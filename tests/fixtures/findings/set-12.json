@@ -1,0 +1,15 @@
+{
+  "findings": [
+    {
+      "agent": "security",
+      "category": "security",
+      "severity": "medium",
+      "title": "Issue 12",
+      "rationale": "Sample rationale.",
+      "file": "src/file_11.ts",
+      "startLine": 12,
+      "confidence": 0.7,
+      "tags": []
+    }
+  ]
+}
