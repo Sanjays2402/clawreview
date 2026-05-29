@@ -1,0 +1,23 @@
+// SQLite-flavored variant of schema.prisma for local development.
+// Run prisma against this file with --schema=prisma/schema.sqlite.prisma.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../../node_modules/.prisma/client-sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:./dev.db"
+}
+
+model Installation {
+  id           String   @id @default(cuid())
+  githubId     BigInt   @unique
+  accountLogin String
+  accountType  String
+  suspended    Boolean  @default(false)
+  monthlyBudgetUsd Float @default(50)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}

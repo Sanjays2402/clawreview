@@ -1,0 +1,187 @@
+// ClawReview Prisma schema. Uses Postgres in production and SQLite locally.
+// Switch the provider in DATABASE_URL; native types are kept conservative.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Severity {
+  critical
+  high
+  medium
+  low
+  nit
+}
+
+enum ReviewStatus {
+  queued
+  running
+  completed
+  failed
+}
+
+enum Role {
+  admin
+  member
+  viewer
+}
+
+model Installation {
+  id           String   @id @default(cuid())
+  githubId     BigInt   @unique
+  accountLogin String
+  accountType  String
+  suspended    Boolean  @default(false)
+  monthlyBudgetUsd Decimal @default(50)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  repos       Repo[]
+  memberships Membership[]
+  audits      AuditLog[]
+}
+
+model User {
+  id          String   @id @default(cuid())
+  githubId    BigInt   @unique
+  login       String
+  email       String?
+  avatarUrl   String?
+  createdAt   DateTime @default(now())
+  sessions    Session[]
+  memberships Membership[]
+}
+
+model Session {
+  id        String   @id
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  installationId String
+  role           Role         @default(member)
+  createdAt      DateTime     @default(now())
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, installationId])
+}
+
+model Repo {
+  id             String   @id @default(cuid())
+  installationId String
+  githubId       BigInt   @unique
+  fullName       String
+  defaultBranch  String?
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  installation Installation @relation(fields: [installationId], references: [id], onDelete: Cascade)
+  pullRequests PullRequest[]
+}
+
+model PullRequest {
+  id        String   @id @default(cuid())
+  repoId    String
+  number    Int
+  title     String
+  authorLogin String
+  state     String
+  headSha   String
+  baseSha   String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  repo    Repo     @relation(fields: [repoId], references: [id], onDelete: Cascade)
+  reviews Review[]
+
+  @@unique([repoId, number])
+}
+
+model Review {
+  id            String       @id @default(cuid())
+  pullRequestId String
+  status        ReviewStatus @default(queued)
+  startedAt     DateTime     @default(now())
+  completedAt   DateTime?
+  commentId     BigInt?
+  checkRunId    BigInt?
+  totalCostUsd  Decimal      @default(0)
+  totalFindings Int          @default(0)
+  configJson    Json?
+  error         String?
+
+  pullRequest PullRequest @relation(fields: [pullRequestId], references: [id], onDelete: Cascade)
+  findings    Finding[]
+  runs        Run[]
+}
+
+model Run {
+  id        String   @id @default(cuid())
+  reviewId  String
+  startedAt DateTime @default(now())
+  endedAt   DateTime?
+  status    String
+
+  review     Review            @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+  executions AgentExecution[]
+}
+
+model AgentExecution {
+  id              String  @id @default(cuid())
+  runId           String
+  agent           String
+  model           String
+  status          String
+  durationMs      Int
+  promptTokens    Int     @default(0)
+  completionTokens Int    @default(0)
+  costUsd         Decimal @default(0)
+  error           String?
+
+  run Run @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+model Finding {
+  id          String   @id @default(cuid())
+  reviewId    String
+  agent       String
+  category    String
+  severity    Severity
+  title       String
+  rationale   String
+  file        String
+  startLine   Int
+  endLine     Int?
+  confidence  Float    @default(0.6)
+  cwe         String?
+  suggestedJson Json?
+  dismissed   Boolean  @default(false)
+  dismissedReason String?
+  createdAt   DateTime @default(now())
+
+  review Review @relation(fields: [reviewId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id             String   @id @default(cuid())
+  installationId String?
+  actorLogin     String
+  action         String
+  subject        String?
+  metaJson       Json?
+  createdAt      DateTime @default(now())
+
+  installation Installation? @relation(fields: [installationId], references: [id], onDelete: SetNull)
+}
