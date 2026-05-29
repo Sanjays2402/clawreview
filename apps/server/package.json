@@ -22,7 +22,7 @@
     "@clawreview/queue": "workspace:*",
     "@clawreview/telemetry": "workspace:*",
     "@clawreview/types": "workspace:*",
-    "@fastify/cors": "^10.0.1",
+    "@fastify/cors": "^11.2.0",
     "@fastify/helmet": "^12.0.1",
     "@fastify/rate-limit": "^10.2.1",
     "envalid": "^8.0.0",
