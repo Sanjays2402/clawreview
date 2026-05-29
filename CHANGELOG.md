@@ -6,6 +6,8 @@ All notable changes to ClawReview are documented in this file. Format follows Ke
 
 ### Added
 
+- Aggregator snapshot tests against a known finding set
+
 - Initial monorepo layout with apps for server, dashboard, and CLI
 - Reviewer agents for security, performance, style, accessibility, sql-injection, and secrets
 - Aggregator with severity ranking and per-file grouping
