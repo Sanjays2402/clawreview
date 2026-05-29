@@ -1,0 +1,6 @@
+agents:
+  - security
+  - performance
+severity_threshold: critical
+budget:
+  monthly_usd: 10

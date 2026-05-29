@@ -1,0 +1,6 @@
+agents:
+  - security
+  - performance
+severity_threshold: medium
+budget:
+  monthly_usd: 80
