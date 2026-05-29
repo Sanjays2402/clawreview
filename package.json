@@ -1,0 +1,32 @@
+{
+  "name": "clawreview",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Multi-agent AI code reviewer for GitHub pull requests",
+  "license": "MIT",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,md,yml,yaml}\"",
+    "cli": "pnpm --filter @clawreview/cli run start",
+    "server": "pnpm --filter @clawreview/server run dev",
+    "dashboard": "pnpm --filter @clawreview/dashboard run dev",
+    "db:push": "pnpm --filter @clawreview/db run push",
+    "db:migrate": "pnpm --filter @clawreview/db run migrate",
+    "changeset": "changeset",
+    "release": "changeset publish"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.9",
+    "prettier": "^3.3.3",
+    "turbo": "^2.3.0",
+    "typescript": "^5.6.3"
+  }
+}
