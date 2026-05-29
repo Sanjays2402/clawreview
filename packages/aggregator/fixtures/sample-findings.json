@@ -1,0 +1,50 @@
+{
+  "findings": [
+    {
+      "agent": "security",
+      "category": "security",
+      "severity": "critical",
+      "title": "SQL injection via concatenation",
+      "rationale": "User input is concatenated into a raw SQL query without parameterization.",
+      "file": "src/users.ts",
+      "startLine": 12,
+      "confidence": 0.92,
+      "cwe": "CWE-89",
+      "tags": []
+    },
+    {
+      "agent": "sql-injection",
+      "category": "sql-injection",
+      "severity": "high",
+      "title": "SQL injection in getUser",
+      "rationale": "Same line, different agent.",
+      "file": "src/users.ts",
+      "startLine": 12,
+      "confidence": 0.88,
+      "cwe": "CWE-89",
+      "tags": []
+    },
+    {
+      "agent": "performance",
+      "category": "performance",
+      "severity": "medium",
+      "title": "N+1 query in list()",
+      "rationale": "Each user causes a separate database round trip.",
+      "file": "src/api.ts",
+      "startLine": 3,
+      "confidence": 0.85,
+      "tags": []
+    },
+    {
+      "agent": "style",
+      "category": "style",
+      "severity": "nit",
+      "title": "Unused variable",
+      "rationale": "Drop it.",
+      "file": "src/api.ts",
+      "startLine": 5,
+      "confidence": 0.7,
+      "tags": []
+    }
+  ]
+}

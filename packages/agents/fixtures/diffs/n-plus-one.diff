@@ -1,0 +1,10 @@
+diff --git a/src/api.ts b/src/api.ts
+index 1111111..2222222 100644
+--- a/src/api.ts
++++ b/src/api.ts
+@@ -1,5 +1,7 @@
+ export async function list(users) {
++  const out = [];
++  for (const u of users) out.push(await db.roles(u.id));
++  return out;
+ }

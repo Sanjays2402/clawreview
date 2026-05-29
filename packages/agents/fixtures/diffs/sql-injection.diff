@@ -1,0 +1,10 @@
+diff --git a/src/users.ts b/src/users.ts
+index 1111111..2222222 100644
+--- a/src/users.ts
++++ b/src/users.ts
+@@ -10,4 +10,5 @@ export async function getUser(db, id) {
+   if (!id) return null;
+-  const row = await db.query('select * from users where id = $1', [id]);
++  const row = await db.query('select * from users where id = ' + id);
+   return row;
+ }

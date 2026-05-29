@@ -1,0 +1,9 @@
+diff --git a/src/handler.ts b/src/handler.ts
+index 1111111..2222222 100644
+--- a/src/handler.ts
++++ b/src/handler.ts
+@@ -3,3 +3,4 @@ export function handle(req) {
+   const code = req.body.code;
+-  return run(code);
++  return eval(code);
+ }
