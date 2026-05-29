@@ -2,9 +2,9 @@
 
 ClawReview ships as four user-facing surfaces:
 
-- `apps/server` — the Fastify webhook receiver and background worker.
-- `apps/dashboard` — the Next.js control plane for humans.
-- `apps/cli` — the local runner that operates on any git diff.
+- `apps/server`  -  the Fastify webhook receiver and background worker.
+- `apps/dashboard`  -  the Next.js control plane for humans.
+- `apps/cli`  -  the local runner that operates on any git diff.
 - The GitHub App itself, which routes events to the server.
 
 Internally everything composes the same pipeline:
