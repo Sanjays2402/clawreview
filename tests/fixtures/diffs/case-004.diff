@@ -1,0 +1,7 @@
+diff --git a/src/file_3.ts b/src/file_3.ts
+--- a/src/file_3.ts
++++ b/src/file_3.ts
+@@ -1,3 +1,4 @@
+ export const value_3 = 3;
++export const extra_3 = 6;
+ export const total_3 = value_3 + 1;
