@@ -1,0 +1,4 @@
+agents:
+  - security
+  - style
+severity_threshold: medium

@@ -1,0 +1,5 @@
+agents:
+  - security
+  - sql-injection
+  - performance
+severity_threshold: medium

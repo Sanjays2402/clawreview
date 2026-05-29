@@ -1,0 +1,7 @@
+agents:
+  - security
+  - accessibility
+  - style
+severity_threshold: medium
+ignore:
+  - "**/*.snap"

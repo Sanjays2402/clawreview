@@ -1,0 +1,4 @@
+agents:
+  - security
+  - secrets
+severity_threshold: medium

@@ -1,0 +1,4 @@
+agents:
+  - security
+  - performance
+severity_threshold: medium
