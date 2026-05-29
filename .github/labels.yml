@@ -1,0 +1,14 @@
+- name: bug
+  color: ee0701
+- name: enhancement
+  color: 84b6eb
+- name: docs
+  color: 0075ca
+- name: security
+  color: b60205
+- name: good first issue
+  color: 7057ff
+- name: agent
+  color: 5319e7
+- name: dashboard
+  color: 0e8a16
