@@ -1,0 +1,10 @@
+diff --git a/src/perf/case_32.ts b/src/perf/case_32.ts
+--- a/src/perf/case_32.ts
++++ b/src/perf/case_32.ts
+@@ -1,4 +1,6 @@
+ export async function compute_32(items: number[]) {
+   let total = 0;
++  for (const x of items) total = total + (await heavy(x));
+   return total;
+ }
++async function heavy(n: number) { return n * 2; }

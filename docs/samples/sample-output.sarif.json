@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "clawreview",
+          "version": "0.1.0"
+        }
+      },
+      "results": [
+        {
+          "ruleId": "security.security",
+          "level": "error",
+          "message": {
+            "text": "Use of eval on user input"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/handler.ts"
+                },
+                "region": {
+                  "startLine": 4
+                }
+              }
+            }
+          ]
+        },
+        {
+          "ruleId": "performance.performance",
+          "level": "warning",
+          "message": {
+            "text": "N+1 query in list()"
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/api.ts"
+                },
+                "region": {
+                  "startLine": 3
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
