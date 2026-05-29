@@ -1,0 +1,11 @@
+apiVersion: v2
+name: clawreview
+description: Multi-agent AI code review for GitHub pull requests
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/Sanjays2402/clawreview
+sources:
+  - https://github.com/Sanjays2402/clawreview
+maintainers:
+  - name: Sanjay

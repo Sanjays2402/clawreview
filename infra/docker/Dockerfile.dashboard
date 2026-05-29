@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* turbo.json tsconfig.base.json ./
+COPY apps/dashboard/package.json apps/dashboard/
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile || pnpm install
+
+FROM base AS build
+COPY --from=deps /app /app
+COPY . .
+RUN pnpm --filter @clawreview/dashboard build
+
+FROM node:20-alpine AS runtime
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=3000
+COPY --from=build /app /app
+USER node
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:3000 || exit 1
+CMD ["pnpm", "--filter", "@clawreview/dashboard", "start"]

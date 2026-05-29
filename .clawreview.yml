@@ -1,0 +1,16 @@
+agents:
+  - security
+  - performance
+  - style
+  - secrets
+  - sql-injection
+severity_threshold: low
+ignore:
+  - "**/*.snap"
+  - "**/vendor/**"
+  - "pnpm-lock.yaml"
+  - "**/__snapshots__/**"
+budget:
+  monthly_usd: 50
+comment_style: detailed
+max_findings_per_file: 10

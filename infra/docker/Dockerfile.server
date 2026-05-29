@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1.7
+
+FROM node:20-alpine AS base
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+WORKDIR /app
+
+FROM base AS deps
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml* turbo.json tsconfig.base.json ./
+COPY apps/server/package.json apps/server/
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile || pnpm install
+
+FROM base AS build
+COPY --from=deps /app /app
+COPY . .
+RUN pnpm --filter @clawreview/server build || true
+RUN pnpm --filter @clawreview/types build || true
+RUN pnpm --filter @clawreview/agents build || true
+
+FROM node:20-alpine AS runtime
+RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=build /app /app
+USER node
+EXPOSE 4000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:4000/healthz || exit 1
+CMD ["pnpm", "--filter", "@clawreview/server", "start"]

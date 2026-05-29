@@ -1,0 +1,10 @@
+agents:
+  - security
+  - sql-injection
+  - secrets
+severity_threshold: medium
+ignore:
+  - "test/**"
+  - "**/*.test.ts"
+budget:
+  monthly_usd: 100

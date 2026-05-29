@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: clawreview
+      POSTGRES_PASSWORD: clawreview
+      POSTGRES_DB: clawreview
+    ports: ["5432:5432"]
+    volumes:
+      - clawreview_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U clawreview"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    volumes:
+      - clawreview_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.server
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://clawreview:clawreview@postgres:5432/clawreview
+      REDIS_URL: redis://redis:6379
+      PUBLIC_URL: http://localhost:4000
+      DASHBOARD_URL: http://localhost:3000
+    ports: ["4000:4000"]
+
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.dashboard
+    depends_on:
+      - server
+    environment:
+      NEXT_PUBLIC_BASE_URL: http://localhost:3000
+      NEXT_PUBLIC_API_URL: http://localhost:4000
+      PUBLIC_URL: http://localhost:3000
+    ports: ["3000:3000"]
+
+volumes:
+  clawreview_pg: {}
+  clawreview_redis: {}

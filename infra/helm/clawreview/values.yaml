@@ -1,0 +1,71 @@
+image:
+  server:
+    repository: ghcr.io/sanjays2402/clawreview-server
+    tag: latest
+    pullPolicy: IfNotPresent
+  dashboard:
+    repository: ghcr.io/sanjays2402/clawreview-dashboard
+    tag: latest
+    pullPolicy: IfNotPresent
+
+replicaCount:
+  server: 2
+  dashboard: 2
+
+service:
+  type: ClusterIP
+
+ingress:
+  enabled: false
+  className: nginx
+  annotations: {}
+  hosts:
+    - host: clawreview.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+          service: dashboard
+        - path: /webhooks/github
+          pathType: Prefix
+          service: server
+  tls: []
+
+env:
+  NODE_ENV: production
+  REVIEW_CONCURRENCY: "6"
+
+secrets:
+  databaseUrl: ""
+  redisUrl: ""
+  githubAppId: ""
+  githubAppPrivateKey: ""
+  githubWebhookSecret: ""
+  llmOpenaiApiKey: ""
+  cookieSecret: "change-me"
+
+resources:
+  server:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 1Gi
+  dashboard:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+  capabilities:
+    drop: ["ALL"]

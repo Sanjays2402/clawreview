@@ -1,0 +1,8 @@
+agents:
+  - style
+severity_threshold: nit
+ignore:
+  - "**/migrations/**"
+budget:
+  monthly_usd: 10
+comment_style: compact
