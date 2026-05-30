@@ -3,7 +3,7 @@ import { cwd as getCwd } from 'node:process';
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
 import { runPipeline } from '@clawreview/agents';
-import { aggregate, applySuppressions, buildSuppressionMap, toSarif, toJUnitXml, toCsv } from '@clawreview/aggregator';
+import { aggregate, applySeverityRules, applySuppressions, buildSuppressionMap, toSarif, toJUnitXml, toCsv } from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -68,7 +68,14 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     },
   });
 
-  const result = aggregate(findings, {
+  const ruled = applySeverityRules(findings, cfg);
+  if (ruled.applied.length > 0) {
+    process.stderr.write(
+      kleur.gray(`  applied ${ruled.applied.length} severity rule match(es)\n`),
+    );
+  }
+
+  const result = aggregate(ruled.findings, {
     threshold: cfg.severity_threshold,
     maxPerFile: cfg.max_findings_per_file,
   });

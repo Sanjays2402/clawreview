@@ -6,7 +6,7 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
+import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 
@@ -130,7 +130,15 @@ export async function startWorker(logger: Logger): Promise<void> {
       },
     });
 
-    const aggregated = aggregate(findings, {
+    const ruled = applySeverityRules(findings, cfg);
+    if (ruled.applied.length > 0) {
+      log.info(
+        { rulesApplied: ruled.applied.length },
+        'severity_rules_applied',
+      );
+    }
+
+    const aggregated = aggregate(ruled.findings, {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
     });

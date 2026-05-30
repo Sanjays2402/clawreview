@@ -43,6 +43,25 @@ export const ClawReviewConfigSchema = z.object({
       max_patch_bytes_per_file: 256 * 1024,
       include_generated: false,
     }),
+  severity_rules: z
+    .array(
+      z.object({
+        /** Glob pattern matched against the finding's file path. */
+        path: z.string().min(1),
+        /** Optional category filter; if absent, matches all categories. */
+        category: z.string().min(1).optional(),
+        /** Optional agent filter. */
+        agent: z.string().min(1).optional(),
+        /** Either an absolute severity to set, or a +/- step relative to current. */
+        set: SeveritySchema.optional(),
+        bump: z.number().int().min(-4).max(4).optional(),
+        /** Human-readable note appended to the finding's tags for audit. */
+        reason: z.string().min(1).max(120).optional(),
+      }).refine((r) => r.set !== undefined || r.bump !== undefined, {
+        message: 'severity_rules entry must specify set or bump',
+      }),
+    )
+    .default([]),
 });
 export type ClawReviewConfig = z.infer<typeof ClawReviewConfigSchema>;
 
