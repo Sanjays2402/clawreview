@@ -407,6 +407,41 @@ that parses each template and verifies the rendered `kind` and
 `apiVersion`, so accidental indentation regressions fail CI before they
 reach a cluster.
 
+### Error tracking (Sentry)
+
+Unhandled server faults are forwarded to Sentry when `SENTRY_DSN` is
+set. The wrapper lives in `@clawreview/telemetry` (`sentry.ts`) and
+lazily loads `@sentry/node` so leaving the DSN empty keeps the SDK out
+of the process entirely. No traffic is emitted in development or test.
+
+What is captured:
+
+- 5xx responses from the Fastify error handler, tagged with
+  `requestId`, `method`, `url`, and the matched `route` template (same
+  label used by the Prometheus histograms, so traces and metrics line
+  up).
+- `unhandledRejection` and `uncaughtException` from the Node process,
+  tagged with `source` so worker failures are distinguishable from
+  request-path failures.
+- Bootstrap failures in `main()` before the HTTP listener is up.
+
+4xx responses are intentionally not forwarded; they are caller
+mistakes and would only add noise. The shutdown handler calls
+`flushSentry(2000)` so in-flight events are not dropped on SIGTERM.
+
+Configuration:
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `SENTRY_DSN` | empty | Empty disables the SDK. Store in a secret, not the chart values. |
+| `SENTRY_ENVIRONMENT` | `NODE_ENV` | Override per cluster (e.g. `staging`, `production`). |
+| `SENTRY_RELEASE` | `npm_package_version` | Set to the git sha at build time for source-mapped stack traces. |
+| `SENTRY_TRACES_SAMPLE_RATE` | `0` | Bump above 0 to enable Sentry performance tracing. |
+
+Under Helm, the DSN is wired through `secrets.sentryDsn` and the
+remaining knobs through `env.SENTRY_*` in `values.yaml` so on-call can
+rotate the DSN without re-rendering the chart.
+
 ## License
 
 MIT. See `LICENSE`.

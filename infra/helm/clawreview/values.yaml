@@ -33,6 +33,10 @@ ingress:
 env:
   NODE_ENV: production
   REVIEW_CONCURRENCY: "6"
+  # Sentry tuning. The DSN itself lives in secrets.sentryDsn so it can be
+  # rotated without re-rendering the chart. Leave empty to disable.
+  SENTRY_ENVIRONMENT: "production"
+  SENTRY_TRACES_SAMPLE_RATE: "0"
 
 # Pod annotations applied per-deployment. The server entries enable
 # Prometheus scraping of /metrics out of the box; remove them if you use
@@ -52,6 +56,7 @@ secrets:
   githubWebhookSecret: ""
   llmOpenaiApiKey: ""
   cookieSecret: "change-me"
+  sentryDsn: ""
 
 resources:
   server:

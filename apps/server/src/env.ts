@@ -46,6 +46,15 @@ export const env = cleanEnv(process.env, {
   }),
   NOTIFY_WEBHOOK_ON_FAILURE: bool({ default: true }),
   NOTIFY_WEBHOOK_TIMEOUT_MS: num({ default: 5000 }),
+
+  // Sentry error tracking. Leaving SENTRY_DSN empty disables the SDK
+  // entirely so local development and tests do not emit network traffic.
+  // SENTRY_TRACES_SAMPLE_RATE between 0 and 1 controls performance
+  // sampling; defaults to 0 (errors only).
+  SENTRY_DSN: str({ default: '' }),
+  SENTRY_ENVIRONMENT: str({ default: '' }),
+  SENTRY_RELEASE: str({ default: '' }),
+  SENTRY_TRACES_SAMPLE_RATE: num({ default: 0 }),
 });
 
 export type Env = typeof env;

@@ -2,7 +2,7 @@ import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import { createLogger, newRequestId } from '@clawreview/telemetry';
+import { createLogger, newRequestId, captureException } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { registerHealthRoutes } from './routes/health.js';
@@ -61,6 +61,20 @@ export async function buildServer(): Promise<FastifyInstance> {
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'unhandled error');
     const status = (err as { statusCode?: number }).statusCode ?? 500;
+    // Only forward genuine server-side faults to Sentry. 4xx errors
+    // (validation, auth, rate-limit) are caller mistakes and would just
+    // create noise. Captures are no-ops when SENTRY_DSN is unset.
+    if (status >= 500) {
+      captureException(err, {
+        requestId: req.id,
+        method: req.method,
+        url: req.url,
+        route:
+          (req as { routeOptions?: { url?: string } }).routeOptions?.url ??
+          (req as { routerPath?: string }).routerPath ??
+          'unmatched',
+      });
+    }
     reply.code(status).send({
       error: err.name || 'InternalServerError',
       message: status >= 500 ? 'Internal Server Error' : err.message,
