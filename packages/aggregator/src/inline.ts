@@ -60,7 +60,7 @@ export function commentableLines(diffText: string): Map<string, Set<number>> {
         } else if (bl.startsWith('-')) {
           // Removed lines don't advance the new-side line counter.
         } else {
-          // metadata like "\ No newline at end of file" — ignore.
+          // metadata like "\ No newline at end of file"; ignore.
         }
       }
     }

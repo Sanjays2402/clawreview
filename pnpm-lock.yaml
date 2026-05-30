@@ -201,6 +201,9 @@ importers:
 
   packages/aggregator:
     dependencies:
+      '@clawreview/diff':
+        specifier: workspace:*
+        version: link:../diff
       '@clawreview/types':
         specifier: workspace:*
         version: link:../types

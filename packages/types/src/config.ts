@@ -25,6 +25,13 @@ export const ClawReviewConfigSchema = z.object({
   custom_rules: z.array(z.string()).default([]),
   max_findings_per_file: z.number().int().positive().default(8),
   comment_style: z.enum(['compact', 'detailed']).default('detailed'),
+  inline_comments: z
+    .object({
+      enabled: z.boolean().default(false),
+      min_severity: SeveritySchema.default('medium'),
+      max: z.number().int().positive().default(20),
+    })
+    .default({ enabled: false, min_severity: 'medium', max: 20 }),
 });
 export type ClawReviewConfig = z.infer<typeof ClawReviewConfigSchema>;
 

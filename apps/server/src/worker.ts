@@ -6,7 +6,7 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
+import { aggregate, buildInlineComments, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 
@@ -116,6 +116,29 @@ export async function startWorker(logger: Logger): Promise<void> {
       { owner: data.owner, repo: data.repo, number: data.prNumber },
       { marker: COMMENT_MARKER, body },
     );
+
+    // Optional: post inline review comments anchored on patched lines.
+    if (cfg.inline_comments?.enabled) {
+      try {
+        const { anchored } = buildInlineComments(aggregated.findings, diff, {
+          minSeverity: cfg.inline_comments.min_severity,
+          max: cfg.inline_comments.max,
+        });
+        if (anchored.length > 0) {
+          const review = await gh.createReview(
+            { owner: data.owner, repo: data.repo, number: data.prNumber },
+            {
+              commitSha: data.headSha,
+              body: `ClawReview posted ${anchored.length} inline ${anchored.length === 1 ? 'comment' : 'comments'}.`,
+              comments: anchored,
+            },
+          );
+          log.info({ reviewId: review.id, inlineCount: review.submittedInlineCount }, 'inline review posted');
+        }
+      } catch (err) {
+        log.warn({ err }, 'inline review failed, continuing with summary comment only');
+      }
+    }
 
     const check = deriveCheckRun(aggregated, data.headSha);
     const checkRun = await gh.createCheckRun(
