@@ -1,5 +1,8 @@
 # ClawReview
 
+![landing](docs/screenshots/landing.png)
+
+
 Multi-agent AI code reviewer for GitHub pull requests. When a PR opens or updates, ClawReview fans the diff out to specialized reviewer agents in parallel (security, performance, style, accessibility, SQL injection, secrets), aggregates the findings, and posts one high-signal comment back to the PR with severity-tagged issues, file:line anchors, and suggested patches.
 
 Install it as a GitHub App across an org, or drive the same pipeline locally with the `clawreview` CLI.
