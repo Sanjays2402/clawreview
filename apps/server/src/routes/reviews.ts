@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { aggregate, toSarif } from '@clawreview/aggregator';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -41,6 +42,35 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       return { error: 'NotFound' };
     }
     return toReviewDetailDto(rec);
+  });
+
+  app.get('/api/reviews/:id/sarif', async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    if (!params.success) {
+      reply.code(400);
+      return { error: 'BadInput' };
+    }
+    const rec = await store.get(params.data.id);
+    if (!rec) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    // Use only open findings in the SARIF export so dismissed findings
+    // don't keep failing downstream code-scanning gates after a human
+    // explicitly accepted them.
+    const open = rec.findings.filter((f) => f.state === 'open');
+    const aggregated = aggregate(open, { threshold: 'nit' });
+    const log = toSarif(aggregated, {
+      commitSha: rec.headSha,
+      repositoryUri: `https://github.com/${rec.owner}/${rec.repo}`,
+    });
+    reply.header('content-type', 'application/sarif+json');
+    reply.header(
+      'content-disposition',
+      `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.sarif.json"`,
+    );
+    return log;
   });
 
   const FindingActionSchema = z.object({

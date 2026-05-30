@@ -109,8 +109,7 @@ describe('reviews and stats routes', () => {
     expect(body.bySeverity).toMatchObject({ critical: 0, high: 0, medium: 0, low: 0, nit: 0 });
   });
 
-  it('webhook posts queue a review and it shows up in /api/reviews', async () => {
-    const { computeSignature } = await import('@clawreview/github');
+  it('webhook posts queue a review and it shows up in /api/reviews', async () => {    const { computeSignature } = await import('@clawreview/github');
     process.env.GITHUB_WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || 'test-secret';
     const payload = JSON.stringify({
       action: 'opened',
@@ -140,5 +139,43 @@ describe('reviews and stats routes', () => {
     const list = await app.inject({ method: 'GET', url: '/api/reviews?installation=55' });
     expect(list.json().items).toHaveLength(1);
     expect(list.json().items[0].prNumber).toBe(11);
+  });
+
+  it('exports a review as SARIF with open findings only', async () => {
+    const store = getReviewStore();
+    const r = await store.start({ installationId: 7, owner: 'o', repo: 'r', prNumber: 2, headSha: 'h2', baseSha: 'b2' });
+    await store.complete(
+      r.id,
+      {
+        pullRequest: { owner: 'o', repo: 'r', number: 2, headSha: 'h2', baseSha: 'b2' },
+        status: 'completed',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        agentExecutions: [],
+        totalFindings: 2,
+        totalCostUsd: 0,
+      },
+      [
+        { agent: 'security', category: 'security', severity: 'high', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        { agent: 'style', category: 'style', severity: 'nit', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.5, tags: [] },
+      ],
+    );
+    // Dismiss the second finding; SARIF must not include it.
+    await app.inject({ method: 'POST', url: `/api/findings/${r.id}:1`, payload: { action: 'dismiss' } });
+
+    const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/sarif` });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['content-type']).toMatch(/sarif\+json/);
+    expect(String(res.headers['content-disposition'])).toMatch(/attachment;.+\.sarif\.json/);
+    const log = res.json();
+    expect(log.version).toBe('2.1.0');
+    expect(log.runs[0].results).toHaveLength(1);
+    expect(log.runs[0].results[0].locations[0].physicalLocation.artifactLocation.uri).toBe('a.ts');
+    expect(log.runs[0].versionControlProvenance[0].revisionId).toBe('h2');
+  });
+
+  it('returns 404 when SARIF is requested for an unknown review', async () => {
+    const res = await app.inject({ method: 'GET', url: '/api/reviews/missing/sarif' });
+    expect(res.statusCode).toBe(404);
   });
 });
