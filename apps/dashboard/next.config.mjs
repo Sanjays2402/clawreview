@@ -2,9 +2,7 @@
 const nextConfig = {
   reactStrictMode: true,
   transpilePackages: ['@clawreview/ui', '@clawreview/types'],
-  experimental: {
-    typedRoutes: true,
-  },
+  typedRoutes: true,
   webpack: (config) => {
     // The workspace UI/types packages are pure TS source with .js import
     // specifiers (ESM NodeNext style). Teach webpack to resolve .js to .ts.
