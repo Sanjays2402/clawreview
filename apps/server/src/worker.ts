@@ -13,6 +13,17 @@ import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
 import { getReviewStore } from './services/review-store.js';
+import { getBudgetGuard } from './budget.js';
+
+const BUDGET_BLOCKED_BODY = (limitUsd: number, spentUsd: number, periodKey: string) =>
+  [
+    '### ClawReview',
+    '',
+    `Skipping this review. The installation has reached its monthly LLM budget for ${periodKey} ` +
+      `($${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} spent).`,
+    '',
+    'Raise `budget.monthly_usd` in `.clawreview.yml`, or wait for the next billing month.',
+  ].join('\n');
 
 export async function startWorker(logger: Logger): Promise<void> {
   const queue = getQueue();
@@ -57,6 +68,22 @@ export async function startWorker(logger: Logger): Promise<void> {
       ref: data.headSha,
     });
     const cfg = parseConfig(cfgRaw, log);
+
+    // Budget gate. Bail before spending any tokens if the installation is over
+    // its monthly LLM budget; post a single comment so the PR author knows why.
+    const budget = getBudgetGuard(env.DEFAULT_MONTHLY_BUDGET_USD);
+    const limit = cfg.budget?.monthly_usd ?? env.DEFAULT_MONTHLY_BUDGET_USD;
+    if (budget.wouldExceed(data.installationId, 0, limit)) {
+      const snap = budget.snapshot(data.installationId, limit);
+      log.warn({ snap }, 'installation over budget, skipping review');
+      const skipBody = `${COMMENT_MARKER}\n${BUDGET_BLOCKED_BODY(snap.limitUsd, snap.spentUsd, snap.periodKey)}`;
+      await gh.upsertReviewComment(
+        { owner: data.owner, repo: data.repo, number: data.prNumber },
+        { marker: COMMENT_MARKER, body: skipBody },
+      );
+      await store.fail(data.reviewId, new Error('budget_exhausted'));
+      return;
+    }
 
     const diff = await gh.fetchPrDiff({ owner: data.owner, repo: data.repo, number: data.prNumber });
 
@@ -103,6 +130,9 @@ export async function startWorker(logger: Logger): Promise<void> {
       commentId: (commentResult as { id?: number } | undefined)?.id,
       checkRunId: (checkRun as { id?: number } | undefined)?.id,
     });
+
+    // Record cost after the run completes so the next job sees the new total.
+    budget.spent(data.installationId, summary.totalCostUsd, limit);
 
     log.info(
       {
