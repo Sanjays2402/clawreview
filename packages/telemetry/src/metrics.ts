@@ -1,5 +1,6 @@
 import {
   Counter,
+  Gauge,
   Histogram,
   Registry,
   collectDefaultMetrics,
@@ -13,6 +14,11 @@ export interface MetricsBundle {
   webhookEventsTotal: Counter<string>;
   reviewsStartedTotal: Counter<string>;
   reviewsCompletedTotal: Counter<string>;
+  reviewDurationSeconds: Histogram<string>;
+  reviewFindingsTotal: Counter<string>;
+  llmCostUsdTotal: Counter<string>;
+  queueDepth: Gauge<string>;
+  queueInflight: Gauge<string>;
 }
 
 let bundle: MetricsBundle | undefined;
@@ -73,6 +79,68 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewDurationSeconds = new Histogram({
+    name: 'clawreview_review_duration_seconds',
+    help: 'End-to-end duration of a review job from worker pickup to completion.',
+    labelNames: ['outcome'],
+    buckets: [1, 5, 10, 30, 60, 120, 300, 600, 1200, 1800],
+    registers: [registry],
+  });
+
+  const reviewFindingsTotal = new Counter({
+    name: 'clawreview_review_findings_total',
+    help: 'Findings emitted by completed reviews, labeled by severity.',
+    labelNames: ['severity'],
+    registers: [registry],
+  });
+
+  const llmCostUsdTotal = new Counter({
+    name: 'clawreview_llm_cost_usd_total',
+    help: 'Cumulative LLM spend in USD attributed to completed reviews.',
+    labelNames: ['outcome'],
+    registers: [registry],
+  });
+
+  const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
+
+  const queueDepth = new Gauge({
+    name: 'clawreview_queue_depth',
+    help: 'Pending review jobs waiting in the queue (sampled at scrape time when a collector is registered).',
+    labelNames: ['queue'],
+    registers: [registry],
+    async collect() {
+      for (const [queue, probe] of queueProbes) {
+        try {
+          const snap = await probe();
+          if (snap && typeof snap.pending === 'number') {
+            this.set({ queue }, snap.pending);
+          }
+        } catch {
+          // Probe failed; leave previous sample in place.
+        }
+      }
+    },
+  });
+
+  const queueInflight = new Gauge({
+    name: 'clawreview_queue_inflight',
+    help: 'Review jobs currently being processed (sampled at scrape time when a collector is registered).',
+    labelNames: ['queue'],
+    registers: [registry],
+    async collect() {
+      for (const [queue, probe] of queueProbes) {
+        try {
+          const snap = await probe();
+          if (snap && typeof snap.inflight === 'number') {
+            this.set({ queue }, snap.inflight);
+          }
+        } catch {
+          // Probe failed; leave previous sample in place.
+        }
+      }
+    },
+  });
+
   bundle = {
     registry,
     httpRequestsTotal,
@@ -80,8 +148,43 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     webhookEventsTotal,
     reviewsStartedTotal,
     reviewsCompletedTotal,
+    reviewDurationSeconds,
+    reviewFindingsTotal,
+    llmCostUsdTotal,
+    queueDepth,
+    queueInflight,
   };
+  queueProbesByBundle.set(bundle, queueProbes);
   return bundle;
+}
+
+// Per-bundle map of queueName -> probe so multiple queues can be sampled
+// at scrape time without clobbering each other's gauge collect hook.
+const queueProbesByBundle = new WeakMap<
+  MetricsBundle,
+  Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>
+>();
+
+/**
+ * Register a pull-time collector that refreshes queueDepth + queueInflight
+ * on every Prometheus scrape by calling the supplied probe. The probe
+ * should be cheap (it runs on each /metrics request). Failures inside the
+ * probe are swallowed so /metrics never 500s because of a transient queue
+ * backend hiccup. Returns a disposer that detaches the collector.
+ */
+export function registerQueueDepthCollector(
+  metrics: MetricsBundle,
+  queueName: string,
+  probe: () => Promise<{ pending?: number; inflight?: number } | undefined>,
+): () => void {
+  const probes = queueProbesByBundle.get(metrics);
+  if (!probes) {
+    throw new Error('metrics bundle is not registered for queue probes');
+  }
+  probes.set(queueName, probe);
+  return () => {
+    probes.delete(queueName);
+  };
 }
 
 /** Reset the cached bundle. Tests only. */

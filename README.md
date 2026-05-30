@@ -283,9 +283,32 @@ by Kubernetes, Prometheus, and on-call tooling.
   - `http_requests_total{method,route,status_code}` counter
   - `http_request_duration_seconds{method,route,status_code}` histogram
     (buckets: 5ms to 10s)
-  - `clawreview_webhook_events_total{event,action,result}` counter
-  - `clawreview_reviews_started_total{source}` counter
-  - `clawreview_reviews_completed_total{outcome}` counter
+  - `clawreview_webhook_events_total{event,action,result}` counter,
+    incremented for every inbound GitHub webhook with `result` set to
+    `queued`, `accepted`, or `ignored` so dashboards can split off the
+    actually-actioned traffic.
+  - `clawreview_reviews_started_total{source}` counter, incremented when
+    a review is enqueued. `source` is `webhook` or `manual` (re-run).
+  - `clawreview_reviews_completed_total{outcome}` counter, incremented
+    when a worker finishes a job. `outcome` is `completed`, `failed`, or
+    `budget_exhausted`.
+  - `clawreview_review_duration_seconds{outcome}` histogram of
+    end-to-end worker job duration in seconds (buckets: 1s to 30m).
+    Pair with the completed counter to alert on a sustained drop in
+    `rate(...completed_total[5m])` or a p95 above your SLO.
+  - `clawreview_review_findings_total{severity}` counter of findings
+    emitted by completed reviews. Useful for tracking false-positive
+    pressure after rule changes.
+  - `clawreview_llm_cost_usd_total{outcome}` counter of LLM spend (USD)
+    attributed to completed reviews. Combined with the per-installation
+    budget guard, this is the system-wide spend rate.
+  - `clawreview_queue_depth{queue}` and
+    `clawreview_queue_inflight{queue}` gauges sampled at scrape time
+    from the queue adapter's health probe. A growing `_depth` while
+    `_inflight` stays flat means worker concurrency is the bottleneck;
+    a flat `_depth` with rising `_inflight` means jobs are slowing down.
+    If the probe throws, the previous sample is kept and `/metrics` does
+    not 500.
 
   The `route` label uses the matched Fastify route template
   (e.g. `/reviews/:id`), not the raw URL, so review identifiers and other

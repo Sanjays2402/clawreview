@@ -4,6 +4,7 @@ import { audit } from '@clawreview/db';
 
 import { REVIEW_JOB, getQueue } from '../queue.js';
 import { getReviewStore } from '../services/review-store.js';
+import { getMetrics } from '@clawreview/telemetry';
 
 const Body = z.object({
   installationId: z.number().int().positive(),
@@ -47,6 +48,7 @@ export async function registerRerunRoutes(app: FastifyInstance): Promise<void> {
       },
       { jobId },
     );
+    getMetrics({ service: 'clawreview-server' }).reviewsStartedTotal.inc({ source: 'manual' });
     await audit(
       {
         installationId: String(input.installationId),

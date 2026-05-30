@@ -9,6 +9,7 @@ import { REVIEW_JOB, getQueue } from '../queue.js';
 import { getDeliveryCache } from '../services/delivery-cache.js';
 import { getReviewStore } from '../services/review-store.js';
 import { getRepoHealth } from '../services/repo-health.js';
+import { getMetrics } from '@clawreview/telemetry';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
@@ -147,6 +148,9 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
           baseSha: payload.pull_request.base.sha,
           reason: payload.action,
         }, { jobId });
+        const metrics = getMetrics({ service: 'clawreview-server' });
+        metrics.reviewsStartedTotal.inc({ source: 'webhook' });
+        metrics.webhookEventsTotal.inc({ event, action: payload.action, result: 'queued' });
         await audit(
           {
             installationId: String(payload.installation.id),
@@ -171,10 +175,27 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
         const payload = InstallationPayloadSchema.safeParse(req.body);
         if (!payload.success) return { ok: true };
         req.log.info({ event, action: payload.data.action, installation: payload.data.installation.id }, 'installation event');
+        getMetrics({ service: 'clawreview-server' }).webhookEventsTotal.inc({
+          event,
+          action: payload.data.action,
+          result: 'accepted',
+        });
         return { ok: true };
       }
 
-      if (event === 'ping') return { ok: true, pong: true };
+      if (event === 'ping') {
+        getMetrics({ service: 'clawreview-server' }).webhookEventsTotal.inc({
+          event: 'ping',
+          action: 'ping',
+          result: 'accepted',
+        });
+        return { ok: true, pong: true };
+      }
+      getMetrics({ service: 'clawreview-server' }).webhookEventsTotal.inc({
+        event,
+        action: 'unknown',
+        result: 'ignored',
+      });
       return { ok: true, ignored: true, event };
     } catch (err) {
       req.log.error({ err, event, delivery }, 'webhook handling failed');

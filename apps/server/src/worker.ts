@@ -9,6 +9,7 @@ import { ProviderRegistry } from '@clawreview/llm';
 import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
+import { getMetrics } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -41,6 +42,16 @@ export async function startWorker(logger: Logger): Promise<void> {
     const data = raw as ReviewJobData;
     const log = logger.child({ job: REVIEW_JOB, owner: data.owner, repo: data.repo, pr: data.prNumber, reviewId: data.reviewId });
     log.info({ headSha: data.headSha, reason: data.reason }, 'review job started');
+    const metrics = getMetrics({ service: 'clawreview-server' });
+    const jobStart = process.hrtime.bigint();
+    let recordedOutcome = false;
+    const recordOutcome = (outcome: 'completed' | 'failed' | 'budget_exhausted' | 'skipped'): void => {
+      if (recordedOutcome) return;
+      recordedOutcome = true;
+      const durationSeconds = Number(process.hrtime.bigint() - jobStart) / 1e9;
+      metrics.reviewsCompletedTotal.inc({ outcome });
+      metrics.reviewDurationSeconds.observe({ outcome }, durationSeconds);
+    };
     const store = getReviewStore();
     try {
       await store.markRunning(data.reviewId);
@@ -51,6 +62,7 @@ export async function startWorker(logger: Logger): Promise<void> {
     if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
       log.warn('GitHub App credentials missing, cannot post results');
       await store.fail(data.reviewId, new Error('GitHub App credentials not configured'));
+      recordOutcome('failed');
       return;
     }
 
@@ -87,6 +99,7 @@ export async function startWorker(logger: Logger): Promise<void> {
         { marker: COMMENT_MARKER, body: skipBody },
       );
       await store.fail(data.reviewId, new Error('budget_exhausted'));
+      recordOutcome('budget_exhausted');
       return;
     }
 
@@ -256,6 +269,15 @@ export async function startWorker(logger: Logger): Promise<void> {
     // Record cost after the run completes so the next job sees the new total.
     budget.spent(data.installationId, summary.totalCostUsd, limit);
 
+    // Domain metrics: cost spent, findings posted, and completion outcome.
+    if (summary.totalCostUsd > 0) {
+      metrics.llmCostUsdTotal.inc({ outcome: 'completed' }, summary.totalCostUsd);
+    }
+    for (const f of aggregated.findings) {
+      metrics.reviewFindingsTotal.inc({ severity: f.severity });
+    }
+    recordOutcome('completed');
+
     log.info(
       {
         findings: aggregated.findings.length,
@@ -299,6 +321,7 @@ export async function startWorker(logger: Logger): Promise<void> {
       } catch (e) {
         log.warn({ err: e }, 'notifier_lookup_failed');
       }
+      recordOutcome('failed');
       throw err;
     }
   });

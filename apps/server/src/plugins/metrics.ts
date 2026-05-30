@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { getMetrics, observeHttp } from '@clawreview/telemetry';
+import { getMetrics, observeHttp, registerQueueDepthCollector } from '@clawreview/telemetry';
+
+import { getQueue } from '../queue.js';
 
 /**
  * Records http_requests_total + http_request_duration_seconds for every
@@ -16,6 +18,21 @@ const startTimes = new WeakMap<FastifyRequest, bigint>();
 
 export async function registerMetrics(app: FastifyInstance): Promise<void> {
   const metrics = getMetrics({ service: 'clawreview-server' });
+
+  // Pull-time queue depth/inflight gauges. The collector calls into the
+  // shared queue adapter on each scrape and silently no-ops if the backend
+  // is unavailable, so /metrics never blocks longer than the queue health
+  // probe (bounded by the BullMQ client / in-memory snapshot).
+  try {
+    const queue = getQueue();
+    registerQueueDepthCollector(metrics, 'clawreview-reviews', async () => {
+      if (!queue.health) return undefined;
+      const h = await queue.health();
+      return { pending: h.pending, inflight: h.inflight };
+    });
+  } catch (err) {
+    app.log.warn({ err: (err as Error).message }, 'queue depth collector not installed');
+  }
 
   app.addHook('onRequest', async (req: FastifyRequest) => {
     const path = (req.url.split('?')[0] ?? req.url);
