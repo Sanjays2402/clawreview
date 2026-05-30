@@ -11,7 +11,9 @@ describe('comment rendering against fixture findings', () => {
     const result = aggregate(raw.findings);
     const md = renderPrComment(result, { prNumber: 42, headSha: 'abcdef0123' });
     expect(md).toMatch(/ClawReview/);
-    expect(md).toMatch(/src\\\/users\\\.ts/);
+    expect(md).toMatch(/src\/users\\\.ts/);
     expect(md).toMatch(/Medium/);
+    expect(md).toMatch(/Critical/);
+    expect(md).toMatch(/abcdef0/);
   });
 });

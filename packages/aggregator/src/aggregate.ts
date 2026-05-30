@@ -50,18 +50,19 @@ function similar(a: string, b: string): boolean {
   const nb = normalize(b);
   if (na === nb) return true;
   if (na.length === 0 || nb.length === 0) return false;
-  const minLen = Math.min(na.length, nb.length);
-  const overlap = sharedPrefix(na, nb);
-  return overlap / minLen >= 0.6;
+  const wa = na.split(' ').filter(Boolean);
+  const wb = nb.split(' ').filter(Boolean);
+  const minWords = Math.min(wa.length, wb.length);
+  if (minWords === 0) return false;
+  const overlap = sharedWords(wa, wb);
+  return overlap / minWords >= 0.6;
 }
 
 function normalize(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
-function sharedPrefix(a: string, b: string): number {
-  const wa = a.split(' ');
-  const wb = b.split(' ');
+function sharedWords(wa: string[], wb: string[]): number {
   const setB = new Set(wb);
   let hits = 0;
   for (const w of wa) if (setB.has(w)) hits += 1;
