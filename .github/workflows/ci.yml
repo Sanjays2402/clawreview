@@ -27,3 +27,101 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm lint
       - run: pnpm test
+
+  build:
+    if: ${{ vars.ENABLE_CI == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: lint-typecheck-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile || pnpm install
+      - name: Build all workspace packages
+        run: pnpm build
+      - name: Verify server dist exists
+        run: |
+          test -f apps/server/dist/index.js \
+            || (echo "server build did not emit dist/index.js" && exit 1)
+      - name: Upload server dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: server-dist
+          path: apps/server/dist
+          retention-days: 7
+          if-no-files-found: error
+
+  helm-validate:
+    if: ${{ vars.ENABLE_CI == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Helm lint
+        run: helm lint infra/helm/clawreview
+      - name: Helm template default values
+        run: helm template clawreview infra/helm/clawreview > /tmp/render-default.yaml
+      - name: Helm template with ingress and autoscaling
+        run: |
+          helm template clawreview infra/helm/clawreview \
+            --set ingress.enabled=true \
+            --set autoscaling.enabled=true \
+            --set autoscaling.minReplicas=3 \
+            --set autoscaling.maxReplicas=10 \
+            > /tmp/render-ha.yaml
+      - name: Assert required kinds rendered
+        run: |
+          for kind in Deployment Service HorizontalPodAutoscaler PodDisruptionBudget NetworkPolicy Secret Ingress; do
+            grep -q "^kind: ${kind}$" /tmp/render-ha.yaml \
+              || (echo "missing kind: ${kind} in HA render" && exit 1)
+          done
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o /tmp/kubeconform.tgz \
+            https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz
+          tar -xzf /tmp/kubeconform.tgz -C /tmp
+          sudo mv /tmp/kubeconform /usr/local/bin/kubeconform
+      - name: Validate rendered manifests against k8s schemas
+        run: |
+          kubeconform -strict -ignore-missing-schemas \
+            -kubernetes-version 1.29.0 \
+            /tmp/render-default.yaml /tmp/render-ha.yaml
+
+  docker-build:
+    if: ${{ vars.ENABLE_CI == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: lint-typecheck-test
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - name: server
+            dockerfile: infra/docker/Dockerfile.server
+          - name: dashboard
+            dockerfile: infra/docker/Dockerfile.dashboard
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build ${{ matrix.image.name }} image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.image.dockerfile }}
+          push: false
+          load: true
+          tags: clawreview-${{ matrix.image.name }}:ci
+          cache-from: type=gha,scope=${{ matrix.image.name }}
+          cache-to: type=gha,scope=${{ matrix.image.name }},mode=max
+      - name: Inspect image size
+        run: docker image inspect clawreview-${{ matrix.image.name }}:ci --format '{{.Size}}'

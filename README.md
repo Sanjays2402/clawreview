@@ -632,6 +632,42 @@ Operational notes:
 4. A delete against an unknown login returns 404 and writes no audit
    row, so retries are idempotent.
 
+### Continuous integration
+
+The `.github/workflows/ci.yml` pipeline is the gate on every push and
+pull request against `main`. It is split into four jobs so a regression
+in one signal does not mask the others, and each job is guarded by the
+`ENABLE_CI` repository variable to keep forks from burning Actions
+minutes by accident.
+
+1. `lint-typecheck-test` runs `pnpm typecheck`, `pnpm lint`, and
+   `pnpm test` across the turbo graph. This is the fast feedback loop
+   and is the prerequisite for the two heavier jobs.
+2. `build` runs the real production `pnpm build`, asserts that
+   `apps/server/dist/index.js` exists, and uploads the server `dist/`
+   tree as an artifact with a 7 day retention. Catches changes that
+   pass `tsc --noEmit` but break the emitted bundle.
+3. `helm-validate` installs the Helm CLI, runs `helm lint` against
+   `infra/helm/clawreview`, renders the chart twice (default values and
+   a high-availability override with ingress and autoscaling on), greps
+   the HA render for the operationally critical kinds
+   (`Deployment`, `Service`, `HorizontalPodAutoscaler`,
+   `PodDisruptionBudget`, `NetworkPolicy`, `Secret`, `Ingress`), and
+   then validates both renders with `kubeconform` against the
+   Kubernetes 1.29 schemas. Stops a template edit that compiles but
+   produces invalid manifests from reaching a cluster.
+4. `docker-build` builds both `infra/docker/Dockerfile.server` and
+   `infra/docker/Dockerfile.dashboard` via a matrix with Buildx and
+   GitHub Actions layer caching. Images are built with `load: true` and
+   not pushed; the goal is to fail the pipeline if a Dockerfile change
+   or a dependency bump breaks the production image.
+
+The `apps/server/tests/ci-workflow.test.ts` test parses the workflow
+file and asserts the four jobs, their `needs` ordering, the matrix of
+image names, and the presence of the helm and kubeconform invocations.
+That way a future edit that quietly drops one of the gates fails the
+unit suite locally before it ever reaches CI.
+
 ## License
 
 MIT. See `LICENSE`.
