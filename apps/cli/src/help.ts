@@ -4,6 +4,7 @@ export function renderHelp(): string {
 Usage:
   clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
   clawreview validate [--config <path>]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
   clawreview version
 
 Flags:
@@ -24,5 +25,6 @@ Examples:
   clawreview run --base main --head HEAD
   clawreview run --config .clawreview.yml --format json
   clawreview validate --config examples/strict.clawreview.yml
+  clawreview run --format json | clawreview stats --fail-on high
 `;
 }

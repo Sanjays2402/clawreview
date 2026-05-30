@@ -1,5 +1,6 @@
 import { parseArgs } from './args.js';
 import { runReview } from './commands/run.js';
+import { runStats } from './commands/stats.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -17,6 +18,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case 'validate':
       await runValidate(args);
+      return;
+    case 'stats':
+      await runStats(args);
       return;
     case 'version':
     case '--version':
