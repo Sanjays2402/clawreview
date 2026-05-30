@@ -2,9 +2,31 @@
 @tailwind components;
 @tailwind utilities;
 
-@import '@clawreview/ui/styles.css';
-
 @layer base {
+  :root {
+    --bg: 0 0% 100%;
+    --bg-subtle: 220 14% 96%;
+    --bg-muted: 220 14% 92%;
+    --fg: 220 18% 12%;
+    --fg-muted: 220 10% 38%;
+    --fg-subtle: 220 8% 54%;
+    --border: 220 13% 88%;
+    --border-subtle: 220 13% 92%;
+    --accent: 252 84% 60%;
+    --accent-fg: 0 0% 100%;
+  }
+  .dark {
+    --bg: 220 18% 8%;
+    --bg-subtle: 220 14% 11%;
+    --bg-muted: 220 14% 15%;
+    --fg: 0 0% 98%;
+    --fg-muted: 220 12% 70%;
+    --fg-subtle: 220 10% 52%;
+    --border: 220 14% 18%;
+    --border-subtle: 220 14% 14%;
+    --accent: 252 84% 70%;
+    --accent-fg: 220 18% 10%;
+  }
   html, body {
     @apply bg-bg text-fg antialiased;
     font-feature-settings: 'cv11', 'ss01';
