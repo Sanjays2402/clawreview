@@ -176,3 +176,49 @@ networkPolicy:
     allowFromNamespaces:
       - ingress-nginx
     extraIngressFrom: []
+
+# Postgres backup CronJob. Runs pg_dump inside the cluster and uploads a
+# gzipped logical dump to an S3-compatible bucket. Off by default so the
+# chart installs without S3 credentials; enable in production and supply
+# bucket + access keys. Restore procedure lives in
+# docs/runbooks/database-restore.md.
+backup:
+  enabled: false
+  schedule: "15 3 * * *"           # 03:15 UTC daily
+  timeZone: "Etc/UTC"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  startingDeadlineSeconds: 600
+  backoffLimit: 2
+  activeDeadlineSeconds: 3600       # job killed if it runs past 1h
+  ttlSecondsAfterFinished: 604800   # cleanup completed jobs after 7d
+  tmpSizeLimit: 5Gi
+  # Refuse to upload a dump smaller than this many bytes. Guards against
+  # a silent pg_dump failure that returns a tiny file (just headers) and
+  # would otherwise quietly overwrite good backups on the next retention
+  # window. 4 KiB catches the empty-database case while staying safely
+  # below any real schema dump.
+  minDumpBytes: 4096
+  image:
+    # Bundles postgresql-client (pg_dump) and awscli on alpine. Pin a
+    # specific digest in production.
+    repository: ghcr.io/sanjays2402/pg-backup
+    tag: "16-awscli"
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  s3:
+    bucket: ""
+    prefix: "clawreview/postgres"
+    region: "us-east-1"
+    # Optional: set for non-AWS S3 (MinIO, R2, B2, Wasabi). Leave empty
+    # for AWS S3 itself.
+    endpoint: ""
+    storageClass: "STANDARD_IA"
+    accessKeyId: ""
+    secretAccessKey: ""

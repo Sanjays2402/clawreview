@@ -1,0 +1,123 @@
+{{- if .Values.backup.enabled }}
+{{- $sa := printf "%s-backup" .Release.Name }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "clawreview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-pg-backup
+  labels:
+    {{- include "clawreview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ .Values.backup.schedule | quote }}
+  timeZone: {{ .Values.backup.timeZone | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ .Values.backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.backup.failedJobsHistoryLimit }}
+  startingDeadlineSeconds: {{ .Values.backup.startingDeadlineSeconds }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backup.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.backup.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: {{ .Values.backup.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            {{- include "clawreview.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          serviceAccountName: {{ $sa }}
+          restartPolicy: OnFailure
+          {{- with .Values.podSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: pg-backup
+              image: "{{ .Values.backup.image.repository }}:{{ .Values.backup.image.tag }}"
+              imagePullPolicy: {{ .Values.backup.image.pullPolicy }}
+              {{- with .Values.securityContext }}
+              securityContext:
+                {{- toYaml . | nindent 16 }}
+              {{- end }}
+              command: ["/bin/sh", "-c"]
+              args:
+                - |
+                  set -euo pipefail
+                  ts="$(date -u +%Y%m%dT%H%M%SZ)"
+                  out="/tmp/clawreview-${ts}.sql.gz"
+                  echo "[backup] dumping database to ${out}"
+                  pg_dump --format=plain --no-owner --no-privileges \
+                    --serializable-deferrable \
+                    "$DATABASE_URL" | gzip -9 > "$out"
+                  size="$(stat -c%s "$out" 2>/dev/null || wc -c < "$out")"
+                  echo "[backup] dump size: ${size} bytes"
+                  if [ "${size:-0}" -lt {{ .Values.backup.minDumpBytes }} ]; then
+                    echo "[backup] FAIL dump too small (< {{ .Values.backup.minDumpBytes }} bytes)" >&2
+                    exit 1
+                  fi
+                  key="${BACKUP_S3_PREFIX%/}/clawreview-${ts}.sql.gz"
+                  echo "[backup] uploading to s3://${BACKUP_S3_BUCKET}/${key}"
+                  aws s3 cp "$out" "s3://${BACKUP_S3_BUCKET}/${key}" \
+                    --only-show-errors \
+                    {{- if .Values.backup.s3.endpoint }}
+                    --endpoint-url "${BACKUP_S3_ENDPOINT}" \
+                    {{- end }}
+                    --storage-class {{ .Values.backup.s3.storageClass | quote }}
+                  echo "[backup] OK ${key}"
+                  rm -f "$out"
+              env:
+                - name: DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-secrets
+                      key: DATABASE_URL
+                - name: AWS_ACCESS_KEY_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-backup-secrets
+                      key: AWS_ACCESS_KEY_ID
+                - name: AWS_SECRET_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Release.Name }}-backup-secrets
+                      key: AWS_SECRET_ACCESS_KEY
+                - name: AWS_DEFAULT_REGION
+                  value: {{ .Values.backup.s3.region | quote }}
+                - name: BACKUP_S3_BUCKET
+                  value: {{ .Values.backup.s3.bucket | quote }}
+                - name: BACKUP_S3_PREFIX
+                  value: {{ .Values.backup.s3.prefix | quote }}
+                {{- if .Values.backup.s3.endpoint }}
+                - name: BACKUP_S3_ENDPOINT
+                  value: {{ .Values.backup.s3.endpoint | quote }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.backup.resources | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: {{ .Values.backup.tmpSizeLimit | quote }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ .Release.Name }}-backup-secrets
+  labels:
+    {{- include "clawreview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+type: Opaque
+stringData:
+  AWS_ACCESS_KEY_ID: {{ .Values.backup.s3.accessKeyId | quote }}
+  AWS_SECRET_ACCESS_KEY: {{ .Values.backup.s3.secretAccessKey | quote }}
+{{- end }}

@@ -758,6 +758,41 @@ image names, and the presence of the helm and kubeconform invocations.
 That way a future edit that quietly drops one of the gates fails the
 unit suite locally before it ever reaches CI.
 
+### Database backup and restore
+
+Logical Postgres backups are produced by an opt-in Helm CronJob
+(`infra/helm/clawreview/templates/cronjob-backup.yaml`) that runs
+`pg_dump --format=plain --no-owner --no-privileges
+--serializable-deferrable`, gzips the output, and uploads it to an
+S3-compatible bucket. The job is off by default so the chart installs
+without cloud credentials; enable it per environment by setting
+`backup.enabled=true` and supplying `backup.s3.bucket` plus IAM keys
+under `backup.s3.accessKeyId` and `backup.s3.secretAccessKey`. Any
+S3-compatible store works: leave `backup.s3.endpoint` empty for AWS S3,
+or point it at MinIO, Cloudflare R2, Backblaze B2, or Wasabi.
+
+Operational guardrails the chart enforces:
+
+- `concurrencyPolicy: Forbid` so a slow run cannot stack with the next
+  scheduled trigger and saturate the database connection pool.
+- `activeDeadlineSeconds: 3600` kills a hung job after one hour.
+- `backup.minDumpBytes` (4 KiB default) refuses to upload a dump that
+  is suspiciously small, catching the silent pg_dump failure where only
+  the header is written and the next retention window would otherwise
+  overwrite a known-good backup with garbage.
+- A dedicated `*-backup-secrets` Secret keeps the S3 credentials
+  separate from the main app secrets so they can be rotated on a
+  different cadence.
+- A dedicated ServiceAccount and inherits the chart's pod and container
+  security context (non-root, dropped capabilities, no privilege
+  escalation).
+
+The full restore procedure (download, quiesce writes, restore into a
+scratch database, smoke check, rename, scale back up) and the
+RPO/RTO contract live in `docs/runbooks/database-restore.md`. Restores
+are deliberately manual so an operator has to make the destructive
+`DROP DATABASE` decision explicitly.
+
 ## License
 
 MIT. See `LICENSE`.

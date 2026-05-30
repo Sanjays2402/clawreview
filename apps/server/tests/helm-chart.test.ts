@@ -167,4 +167,96 @@ describe('helm chart', () => {
       expect(doc.apiVersion).toBe('networking.k8s.io/v1');
     }
   });
+
+  it('values.yaml declares a backup stanza with S3 settings and safety guards', () => {
+    const raw = readFileSync(join(helmDir, 'values.yaml'), 'utf8');
+    const values = parse(raw) as Record<string, unknown>;
+    const backup = values.backup as {
+      enabled: boolean;
+      schedule: string;
+      timeZone: string;
+      successfulJobsHistoryLimit: number;
+      failedJobsHistoryLimit: number;
+      startingDeadlineSeconds: number;
+      backoffLimit: number;
+      activeDeadlineSeconds: number;
+      ttlSecondsAfterFinished: number;
+      minDumpBytes: number;
+      image: { repository: string; tag: string; pullPolicy: string };
+      resources: { requests: Record<string, string>; limits: Record<string, string> };
+      s3: {
+        bucket: string;
+        prefix: string;
+        region: string;
+        endpoint: string;
+        storageClass: string;
+        accessKeyId: string;
+        secretAccessKey: string;
+      };
+    };
+    expect(backup).toBeDefined();
+    // Disabled by default so the chart installs without S3 credentials.
+    expect(backup.enabled).toBe(false);
+    // 5-field cron (m h dom mon dow). Reject 6-field quartz syntax which
+    // kubernetes CronJob does not accept.
+    expect(backup.schedule.trim().split(/\s+/)).toHaveLength(5);
+    expect(backup.timeZone).toBe('Etc/UTC');
+    expect(backup.successfulJobsHistoryLimit).toBeGreaterThanOrEqual(1);
+    expect(backup.failedJobsHistoryLimit).toBeGreaterThanOrEqual(1);
+    expect(backup.startingDeadlineSeconds).toBeGreaterThan(0);
+    expect(backup.backoffLimit).toBeGreaterThanOrEqual(0);
+    expect(backup.activeDeadlineSeconds).toBeGreaterThan(0);
+    expect(backup.ttlSecondsAfterFinished).toBeGreaterThan(0);
+    // Guard against silent pg_dump failures that produce tiny dumps.
+    expect(backup.minDumpBytes).toBeGreaterThanOrEqual(1024);
+    expect(backup.image.repository).toBeTruthy();
+    expect(backup.image.tag).toBeTruthy();
+    expect(backup.resources.requests.memory).toBeTruthy();
+    expect(backup.resources.limits.memory).toBeTruthy();
+    expect(backup.s3.prefix).toBeTruthy();
+    expect(backup.s3.region).toBeTruthy();
+    expect(backup.s3.storageClass).toBeTruthy();
+  });
+
+  it('cronjob-backup.yaml gates the whole template on backup.enabled', () => {
+    const raw = loadTemplate('cronjob-backup.yaml');
+    // First non-empty, non-comment line must be the gate so disabled
+    // installs render nothing at all.
+    const firstDirective = raw.split('\n').find((l) => l.trim() && !l.trim().startsWith('#'));
+    expect(firstDirective).toMatch(/^\{\{-?\s*if\s+\.Values\.backup\.enabled\s*\}\}$/);
+    expect(raw.trim().endsWith('{{- end }}')).toBe(true);
+  });
+
+  it('cronjob-backup.yaml renders the expected CronJob, ServiceAccount, and Secret', () => {
+    const stripped = stripHelm(loadTemplate('cronjob-backup.yaml'));
+    const docs = parseAllDocuments(stripped)
+      .map((d) => d.toJS())
+      .filter(Boolean) as Array<Record<string, unknown>>;
+    const kinds = docs.map((d) => d.kind);
+    expect(kinds).toContain('CronJob');
+    expect(kinds).toContain('ServiceAccount');
+    expect(kinds).toContain('Secret');
+
+    const cron = docs.find((d) => d.kind === 'CronJob') as Record<string, any>;
+    expect(cron.apiVersion).toBe('batch/v1');
+    // Forbid keeps slow runs from stacking and saturating the connection
+    // pool against Postgres.
+    expect(cron.spec.concurrencyPolicy).toBe('Forbid');
+    const podSpec = cron.spec.jobTemplate.spec.template.spec;
+    expect(podSpec.restartPolicy).toBe('OnFailure');
+    expect(podSpec.serviceAccountName).toBeTruthy();
+    const container = podSpec.containers[0];
+    expect(container.name).toBe('pg-backup');
+    expect(container.args[0]).toMatch(/pg_dump/);
+    expect(container.args[0]).toMatch(/aws s3 cp/);
+    expect(container.args[0]).toMatch(/--single-transaction|--serializable-deferrable/);
+    expect(container.args[0]).toMatch(/gzip/);
+    // DATABASE_URL must come from the existing app secret, not a literal.
+    const dbEnv = (container.env as Array<Record<string, any>>).find((e) => e.name === 'DATABASE_URL');
+    expect(dbEnv?.valueFrom?.secretKeyRef?.key).toBe('DATABASE_URL');
+    // S3 credentials live in a dedicated backup secret so they can be
+    // rotated independently of the app secret.
+    const akEnv = (container.env as Array<Record<string, any>>).find((e) => e.name === 'AWS_ACCESS_KEY_ID');
+    expect(akEnv?.valueFrom?.secretKeyRef?.key).toBe('AWS_ACCESS_KEY_ID');
+  });
 });
