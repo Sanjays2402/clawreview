@@ -1,11 +1,6 @@
-import { PageHeader } from '@/components/layout/page-header';
-import { Card, CardBody } from '@clawreview/ui';
+import { redirect } from 'next/navigation';
 
-export default function Page() {
-  return (
-    <div className="space-y-6">
-      <PageHeader title="Findings" description="Every finding in this review with filters." />
-      <Card><CardBody><div className="text-sm text-fg-muted">Every finding in this review with filters.</div></CardBody></Card>
-    </div>
-  );
+export default async function FindingsRedirect({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
+  redirect(`/app/reviews/${id}`);
 }
