@@ -169,8 +169,14 @@ export default async function ReviewDetailPage({ params, searchParams }: PagePro
       <Card>
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="text-sm font-medium">
-              Findings <span className="text-fg-muted">({visible.length} of {review.findings.length})</span>
+            <div className="flex items-center gap-3 text-sm font-medium">
+              <span>Findings <span className="text-fg-muted">({visible.length} of {review.findings.length})</span></span>
+              <Link
+                href={`/app/reviews/${review.id}/findings` as any}
+                className="text-xs font-normal text-fg-muted hover:text-fg hover:underline"
+              >
+                Open filtered view
+              </Link>
             </div>
             <div className="flex flex-wrap items-center gap-1 text-xs">
               <FilterLink id={review.id} sp={sp} key1="show" value="all" label="Show dismissed" active={showDismissed} />
