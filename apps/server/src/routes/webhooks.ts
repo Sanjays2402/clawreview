@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { verifyWebhookSignature } from '@clawreview/github';
+import { audit } from '@clawreview/db';
 import { InstallationPayloadSchema, PullRequestPayloadSchema } from '@clawreview/types';
 
 import { env } from '../env.js';
@@ -146,6 +147,23 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
           baseSha: payload.pull_request.base.sha,
           reason: payload.action,
         }, { jobId });
+        await audit(
+          {
+            installationId: String(payload.installation.id),
+            actorLogin: payload.pull_request.user?.login ?? 'unknown',
+            action: 'review.enqueued',
+            subject: `${payload.repository.full_name}#${payload.number}`,
+            meta: {
+              reviewId: started.id,
+              jobId,
+              headSha: payload.pull_request.head.sha,
+              reason: payload.action,
+              source: 'webhook',
+              delivery,
+            },
+          },
+          { logger: req.log },
+        );
         return { ok: true, queued: jobId, reviewId: started.id };
       }
 

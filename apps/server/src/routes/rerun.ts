@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { audit } from '@clawreview/db';
 
 import { REVIEW_JOB, getQueue } from '../queue.js';
 import { getReviewStore } from '../services/review-store.js';
@@ -45,6 +46,22 @@ export async function registerRerunRoutes(app: FastifyInstance): Promise<void> {
         reason: 'manual' as const,
       },
       { jobId },
+    );
+    await audit(
+      {
+        installationId: String(input.installationId),
+        actorLogin: (req.headers['x-actor-login'] as string | undefined) ?? 'dashboard',
+        action: 'review.rerun',
+        subject: `${input.owner}/${input.repo}#${input.prNumber}`,
+        meta: {
+          reviewId: started.id,
+          jobId,
+          headSha: input.headSha,
+          baseSha: input.baseSha,
+          source: 'manual',
+        },
+      },
+      { logger: req.log },
     );
     reply.code(202);
     return { ok: true, reviewId: started.id, jobId };

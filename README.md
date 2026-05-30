@@ -303,6 +303,39 @@ podAnnotations:
 These are emitted by `infra/helm/clawreview/values.yaml` under
 `podAnnotations.server` and can be overridden per environment.
 
+### Audit log
+
+Mutations to review and budget state are recorded to the `AuditLog` table
+so operators can answer who did what when. Writes are best effort and
+loss tolerant: an audit failure logs a warning and does not break the
+caller's request. Backfilling is not supported, so a brief Postgres
+outage will leave a hole in the trail.
+
+Actions emitted today:
+
+- `review.enqueued` when an inbound GitHub webhook enqueues a review.
+  Actor is the PR author, subject is `<owner>/<repo>#<pr>`, meta includes
+  the review id, job id, head sha, GitHub delivery id, and PR action.
+- `review.rerun` when `POST /api/reviews/rerun` is called from the
+  dashboard. Actor is taken from the `x-actor-login` header when present,
+  otherwise `dashboard`.
+- `budget.updated` when `PUT /api/budget/:installationId` is called.
+  Meta records the new limit and the current spent amount.
+- `budget.reset` when `POST /api/budget/:installationId/reset` is called.
+
+Read the trail with `GET /api/audit`. Filters: `installationId`,
+`actorLogin`, `action`. Pagination is opaque cursor based; pass the
+`nextCursor` returned by the previous page as `?cursor=...` to continue.
+`limit` is clamped to 200.
+
+```bash
+curl -s "http://localhost:4000/api/audit?installationId=99&limit=25" | jq
+```
+
+Backup the table with the same Postgres dump that covers `Review` and
+`Finding`. Recommended retention is 365 days for SOC 2 style audits;
+prune older rows with a scheduled job (not yet wired in this repo).
+
 Deploy, scale, backup, and on-call notes live in `docs/runbooks/`.
 
 ## License
