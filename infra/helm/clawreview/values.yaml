@@ -50,6 +50,12 @@ podAnnotations:
 
 secrets:
   databaseUrl: ""
+  # Redis connection string. Required for production: the per-token
+  # rate limiter uses Redis as a distributed sliding-window backend so
+  # quotas hold across all server replicas. When empty, each replica
+  # falls back to an in-process limiter and the aggregate ceiling
+  # becomes replicaCount * perMinute. The same Redis is used by the
+  # review job queue (BullMQ).
   redisUrl: ""
   githubAppId: ""
   githubAppPrivateKey: ""

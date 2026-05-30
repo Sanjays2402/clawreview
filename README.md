@@ -443,6 +443,21 @@ upstream for no gain.
 To disable the per-token limiter locally during load tests, set
 `DISABLE_PER_TOKEN_RATE_LIMIT=1`. This flag is ignored in production.
 
+The per-token limiter has two backends. With `REDIS_URL` unset (single
+process, local dev, tests) it stores hits in an in-process map. When
+`REDIS_URL` is set and `NODE_ENV` is not `test` the limiter switches to
+a distributed sliding window stored in Redis sorted sets and applied
+atomically via a Lua script. This matters in multi-replica deploys:
+without a shared backend, each pod would enforce its own private
+budget and a single token could burst `replicaCount` times the
+intended ceiling. The Helm chart runs two server replicas by default,
+so production installs should always provide `secrets.redisUrl`. The
+backend in use is logged once at boot under the `backend` field of the
+`per-token rate limit enabled for /api/*` line. If Redis becomes
+unreachable at runtime the limiter logs a warning per affected request
+and falls back to the in-process map so the API keeps serving rather
+than hard-failing every call.
+
 ### Audit log
 
 Mutations to review and budget state are recorded to the `AuditLog` table

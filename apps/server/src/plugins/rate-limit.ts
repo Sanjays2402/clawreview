@@ -1,6 +1,10 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 
 import { env } from '../env.js';
+import {
+  createRedisRateLimitBackend,
+  type RedisRateLimitBackend,
+} from './rate-limit-redis.js';
 
 /**
  * Default per-token budget for /api/* requests. This sits on top of the
@@ -108,6 +112,13 @@ function startSweeper(state: RateLimiterState, intervalMs = WINDOW_MS): NodeJS.T
 
 export interface PerTokenRateLimitOptions {
   perMinute?: number;
+  /**
+   * Optional distributed backend. When provided, the limiter consults
+   * Redis instead of the in-process map so quotas hold across replicas.
+   * Failures fall back to the in-process state to avoid turning a
+   * Redis outage into a request blackout.
+   */
+  redis?: RedisRateLimitBackend;
 }
 
 /**
@@ -124,13 +135,29 @@ export async function registerPerTokenRateLimit(
   const state = createPerTokenLimiter(perMinute);
   startSweeper(state);
 
+  const redis = opts.redis;
+
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (isExempt(req)) return;
     if (!req.url.startsWith('/api/')) return;
 
     const tokenName = req.apiAuth?.tokenName;
     const key = tokenName ? `token:${tokenName}` : `ip:${req.ip ?? 'unknown'}`;
-    const result = checkAndRecord(state, key);
+
+    let result: { ok: boolean; remaining: number; retryAfterSec: number };
+    if (redis) {
+      try {
+        result = await redis.checkAndRecord(key);
+      } catch (err) {
+        // Redis is down or the script errored. Fall back to the in-process
+        // limiter so the API keeps serving with at-least-one-replica
+        // protection. Log once per request so operators can alert on it.
+        req.log.warn({ err }, 'rate-limit redis backend failed, using in-memory fallback');
+        result = checkAndRecord(state, key);
+      }
+    } else {
+      result = checkAndRecord(state, key);
+    }
 
     reply.header('x-ratelimit-limit', String(perMinute));
     reply.header('x-ratelimit-remaining', String(Math.max(0, result.remaining)));
@@ -149,9 +176,22 @@ export async function registerPerTokenRateLimit(
   });
 
   app.log.info(
-    { perMinute, windowMs: WINDOW_MS },
+    { perMinute, windowMs: WINDOW_MS, backend: redis ? 'redis' : 'memory' },
     'per-token rate limit enabled for /api/*',
   );
+
+  // Tear the Redis client down with the server so tests and graceful
+  // shutdowns do not leak connections.
+  if (redis) {
+    app.addHook('onClose', async () => {
+      try {
+        await redis.close();
+      } catch {
+        /* already closed */
+      }
+    });
+  }
+
   return state;
 }
 
@@ -165,7 +205,34 @@ export async function registerRateLimit(app: FastifyInstance): Promise<RateLimit
     app.log.warn('per-token rate limit disabled by DISABLE_PER_TOKEN_RATE_LIMIT');
     return null;
   }
-  return registerPerTokenRateLimit(app);
+
+  // Multi-replica deployments must coordinate quotas through Redis,
+  // otherwise each pod enforces its own private budget and the
+  // aggregate ceiling is replicaCount * perMinute. When REDIS_URL is
+  // empty we stay on the in-memory limiter; that is correct for
+  // single-process dev and test, and the Helm chart documents the
+  // production requirement in values.yaml.
+  let redis: RedisRateLimitBackend | undefined;
+  if (env.REDIS_URL && env.NODE_ENV !== 'test') {
+    try {
+      redis = createRedisRateLimitBackend({
+        redisUrl: env.REDIS_URL,
+        windowMs: WINDOW_MS,
+        perMinute: PER_TOKEN_DEFAULT_PER_MINUTE,
+      });
+      // Cheap liveness probe so a misconfigured URL fails loud at boot
+      // instead of every first request after a deploy.
+      await redis.client.ping();
+    } catch (err) {
+      app.log.error({ err }, 'failed to attach redis rate-limit backend, falling back to in-memory');
+      if (redis) {
+        try { await redis.close(); } catch { /* ignore */ }
+      }
+      redis = undefined;
+    }
+  }
+
+  return registerPerTokenRateLimit(app, { redis });
 }
 
 // Exported for tests.
