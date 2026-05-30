@@ -43,7 +43,7 @@ export default async function RepoDetail({ params }: { params: Promise<{ id: str
       <div className="flex items-start justify-between gap-4">
         <PageHeader
           title={`${slug.owner}/${slug.repo}`}
-          description="Repo health, recent reviews, and pause controls."
+          description="repo health, recent reviews, pause controls."
         />
         <Link href="/app/repos" className="text-xs text-fg-muted hover:text-fg">
           Back to repos

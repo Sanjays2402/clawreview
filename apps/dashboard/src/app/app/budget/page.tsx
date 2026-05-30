@@ -20,10 +20,10 @@ export default async function BudgetPage() {
   const paused = health.filter((h) => h.status === 'paused').length;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
-        title="Budget and health"
-        description="Per-installation spend over the last 30 days and the live health of every monitored repo."
+        title="budget + health"
+        description="per-installation spend over last 30d. live health for every monitored repo."
       />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

@@ -51,8 +51,8 @@ export default async function SlaPage({ searchParams }: PageProps) {
   if (!report) {
     return (
       <div className="space-y-6">
-        <PageHeader title="SLA breaches" description="Open findings past their remediation window." />
-        <EmptyState title="SLA report unavailable" description="The server did not return an SLA snapshot. Check that the API is reachable and try again." />
+        <PageHeader title="sla breaches" description="open findings past their remediation window." />
+        <EmptyState title="sla report unavailable" description="server did not return an sla snapshot. check the api and retry." />
       </div>
     );
   }
@@ -62,10 +62,10 @@ export default async function SlaPage({ searchParams }: PageProps) {
   const breaches = report.breaches;
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-3">
       <PageHeader
-        title="SLA breaches"
-        description="Open findings whose age exceeds their severity remediation window."
+        title="sla breaches"
+        description="open findings whose age exceeds the severity remediation window."
       />
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">

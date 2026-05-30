@@ -43,10 +43,10 @@ export default async function SettingsPage() {
   const yaml = config ? toYaml(config) : null;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
-        title="Settings"
-        description="Org-wide defaults pulled live from the server, plus role reference."
+        title="settings"
+        description="org-wide defaults pulled live from the server, plus role reference."
       />
 
       <div className="grid gap-4 md:grid-cols-3">

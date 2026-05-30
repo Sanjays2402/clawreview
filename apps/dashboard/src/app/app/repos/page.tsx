@@ -26,10 +26,10 @@ export default async function ReposPage() {
   });
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
-        title="Repositories"
-        description="Health, recent activity, and pause controls for every repo we track."
+        title="repos"
+        description="health, recent activity, pause controls for tracked repos."
       />
 
       <Card>

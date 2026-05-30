@@ -16,10 +16,10 @@ export default async function IntegrationsPage() {
   const llm = ready?.checks.llm ?? [];
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
-        title="Integrations"
-        description="Live health for the queue and LLM providers wired into this server."
+        title="integrations"
+        description="live health for the queue and llm providers wired into this server."
       />
 
       <div className="grid gap-4 md:grid-cols-2">

@@ -38,10 +38,10 @@ export default async function ConfigPage() {
   const seed = cfg ? toYaml(cfg) : FALLBACK_YAML;
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
       <PageHeader
-        title="Config playground"
-        description="Paste a .clawreview.yml and validate it against the live server schema before committing it to a repo."
+        title="config playground"
+        description="paste a .clawreview.yml. validate against the live server schema before committing."
       />
       <ConfigValidator defaultYaml={seed} />
     </div>

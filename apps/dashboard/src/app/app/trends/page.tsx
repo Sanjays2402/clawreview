@@ -35,8 +35,8 @@ export default async function TrendsPage({ searchParams }: PageProps) {
   return (
     <div className="space-y-8">
       <PageHeader
-        title="Trends"
-        description="Aggregate review and finding volume over a custom window."
+        title="trends"
+        description="aggregate review and finding volume over a custom window."
         action={<WindowForm days={days} presets={WINDOW_PRESETS} />}
       />
 
