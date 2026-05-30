@@ -330,6 +330,58 @@ podAnnotations:
 These are emitted by `infra/helm/clawreview/values.yaml` under
 `podAnnotations.server` and can be overridden per environment.
 
+### Prometheus Operator (ServiceMonitor and alerts)
+
+When the target cluster runs the Prometheus Operator (kube-prometheus-stack
+or similar), enable the bundled `ServiceMonitor` and `PrometheusRule`
+instead of relying on annotation-based scraping:
+
+```yaml
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  additionalLabels:
+    release: kube-prometheus-stack  # match your operator's serviceMonitorSelector
+
+prometheusRule:
+  enabled: true
+  additionalLabels:
+    release: kube-prometheus-stack
+  thresholds:
+    errorRate: 0.05
+    latencyP95Seconds: 1.5
+    queueDepth: 500
+    reviewFailureRate: 0.20
+    llmSpendHourlyUsd: 25
+```
+
+The `ServiceMonitor` selects the server service on port `http` and scrapes
+`/metrics` at the configured interval. The `PrometheusRule` ships six
+alerts derived from metrics the server already exports, so no extra
+recording rules are required:
+
+- `ClawreviewServerDown` (critical, 5m) fires when no server target is
+  scraped successfully.
+- `ClawreviewServerHighErrorRate` (warning, 10m) fires when the 5xx ratio
+  exceeds `thresholds.errorRate`.
+- `ClawreviewServerSlowRequests` (warning, 10m) fires when p95 HTTP
+  latency exceeds `thresholds.latencyP95Seconds`.
+- `ClawreviewQueueBacklog` (warning, 15m) fires when
+  `clawreview_queue_depth` stays above `thresholds.queueDepth`.
+- `ClawreviewReviewFailureRate` (warning, 15m) fires when the failed
+  outcome share of `clawreview_reviews_completed_total` exceeds
+  `thresholds.reviewFailureRate`.
+- `ClawreviewLLMSpendSpike` (warning, 10m) fires when
+  `clawreview_llm_cost_usd_total` increases by more than
+  `thresholds.llmSpendHourlyUsd` in any hour.
+
+The Kubernetes readiness probe uses `GET /readyz?skipLlm=1` so a
+third-party LLM outage (OpenAI, Copilot proxy, local Hermes) does not
+flap server pods out of the service endpoints. Use the unflagged
+`/readyz` from synthetic monitoring when you do want to verify upstream
+connectivity end to end.
+
 ### GitHub App installations
 
 The server exposes the GitHub App's tenant graph through two read-only

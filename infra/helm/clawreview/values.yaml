@@ -121,6 +121,36 @@ podDisruptionBudget:
     minAvailable: 1
     maxUnavailable: null
 
+# ServiceMonitor for the Prometheus Operator. Set enabled=true when the
+# kube-prometheus-stack (or any operator that watches monitoring.coreos.com
+# CRDs) is installed in the cluster. Disabled by default so the chart still
+# installs on clusters without those CRDs registered.
+serviceMonitor:
+  enabled: false
+  # namespace: monitoring  # only set if scraping from a different ns
+  interval: 30s
+  scrapeTimeout: 10s
+  path: /metrics
+  additionalLabels: {}
+  metricRelabelings: []
+
+# PrometheusRule ships SRE-grade alerts derived from the metrics the server
+# already exports (http_request_duration_seconds, clawreview_queue_depth,
+# clawreview_reviews_completed_total, clawreview_llm_cost_usd_total).
+# Thresholds are overridable; values reflect a small production deployment.
+prometheusRule:
+  enabled: false
+  # namespace: monitoring
+  interval: 30s
+  additionalLabels: {}
+  thresholds:
+    downFor: 5m
+    errorRate: 0.05            # 5% 5xx rate over 5m, sustained 10m
+    latencyP95Seconds: 1.5     # p95 above 1.5s sustained 10m
+    queueDepth: 500            # pending jobs backlog
+    reviewFailureRate: 0.20    # 20% reviews failing
+    llmSpendHourlyUsd: 25      # USD spent per hour spike
+
 # NetworkPolicy locks down pod-to-pod traffic. Requires a CNI that
 # enforces policies (Calico, Cilium, etc.). Off by default for clusters
 # without a policy-aware CNI.

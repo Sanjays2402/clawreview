@@ -1,0 +1,91 @@
+{{- if .Values.prometheusRule.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ .Release.Name }}-server
+  {{- with .Values.prometheusRule.namespace }}
+  namespace: {{ . }}
+  {{- end }}
+  labels:
+    {{- include "clawreview.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+    {{- with .Values.prometheusRule.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: clawreview-server.rules
+      interval: {{ .Values.prometheusRule.interval | default "30s" }}
+      rules:
+        - alert: ClawreviewServerDown
+          expr: |
+            absent(up{job=~".*clawreview.*-server.*"} == 1)
+          for: {{ .Values.prometheusRule.thresholds.downFor | default "5m" }}
+          labels:
+            severity: critical
+            service: clawreview-server
+          annotations:
+            summary: "clawreview server has no healthy targets"
+            description: "Prometheus has not scraped a healthy clawreview server target for {{ "{{ $labels.namespace }}" }} in the last 5 minutes."
+        - alert: ClawreviewServerHighErrorRate
+          expr: |
+            (
+              sum by (service) (rate(http_requests_total{status_code=~"5.."}[5m]))
+              /
+              clamp_min(sum by (service) (rate(http_requests_total[5m])), 1)
+            ) > {{ .Values.prometheusRule.thresholds.errorRate | default 0.05 }}
+          for: 10m
+          labels:
+            severity: warning
+            service: clawreview-server
+          annotations:
+            summary: "5xx error rate above threshold on clawreview server"
+            description: "More than {{ "{{ $value | humanizePercentage }}" }} of requests are 5xx on service {{ "{{ $labels.service }}" }}."
+        - alert: ClawreviewServerSlowRequests
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum by (le, service) (rate(http_request_duration_seconds_bucket[5m]))
+            ) > {{ .Values.prometheusRule.thresholds.latencyP95Seconds | default 1.5 }}
+          for: 10m
+          labels:
+            severity: warning
+            service: clawreview-server
+          annotations:
+            summary: "p95 HTTP latency above threshold"
+            description: "p95 latency on {{ "{{ $labels.service }}" }} is {{ "{{ $value }}" }}s over a 5m window."
+        - alert: ClawreviewQueueBacklog
+          expr: |
+            max by (queue) (clawreview_queue_depth) > {{ .Values.prometheusRule.thresholds.queueDepth | default 500 }}
+          for: 15m
+          labels:
+            severity: warning
+            service: clawreview-server
+          annotations:
+            summary: "Review queue backlog is growing"
+            description: "Queue {{ "{{ $labels.queue }}" }} has more than {{ .Values.prometheusRule.thresholds.queueDepth | default 500 }} pending jobs for 15 minutes."
+        - alert: ClawreviewReviewFailureRate
+          expr: |
+            (
+              sum(rate(clawreview_reviews_completed_total{outcome="failed"}[15m]))
+              /
+              clamp_min(sum(rate(clawreview_reviews_completed_total[15m])), 1)
+            ) > {{ .Values.prometheusRule.thresholds.reviewFailureRate | default 0.20 }}
+          for: 15m
+          labels:
+            severity: warning
+            service: clawreview-server
+          annotations:
+            summary: "Review failure rate above threshold"
+            description: "More than {{ "{{ $value | humanizePercentage }}" }} of reviews are failing over the last 15 minutes."
+        - alert: ClawreviewLLMSpendSpike
+          expr: |
+            increase(clawreview_llm_cost_usd_total[1h]) > {{ .Values.prometheusRule.thresholds.llmSpendHourlyUsd | default 25 }}
+          for: 10m
+          labels:
+            severity: warning
+            service: clawreview-server
+          annotations:
+            summary: "LLM spend exceeded hourly budget threshold"
+            description: "LLM cost increased by more than ${{ .Values.prometheusRule.thresholds.llmSpendHourlyUsd | default 25 }} in the last hour."
+{{- end }}
