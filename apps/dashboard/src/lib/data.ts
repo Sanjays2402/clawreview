@@ -206,6 +206,12 @@ export async function getRepoHealthList(): Promise<RepoHealth[]> {
   return json.items;
 }
 
+export async function getRepoHealth(owner: string, repo: string): Promise<RepoHealth | null> {
+  return getJSONStrict<RepoHealth>(
+    `/api/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/health`,
+  );
+}
+
 export async function getInstallations(): Promise<InstallationListItem[]> {
   const json = await getJSON<{ items: InstallationListItem[] }>('/api/installations', { items: [] });
   return json.items;

@@ -10,9 +10,10 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-6">
           <div className="flex items-center gap-6">
             <Link href="/app" className="text-sm font-semibold tracking-tight">ClawReview</Link>
-            <nav className="flex items-center gap-1 text-sm text-fg-muted">
+            <nav className="flex flex-wrap items-center gap-1 text-sm text-fg-muted">
               <Link href={'/app' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Overview</Link>
               <Link href={'/app/installations' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Installations</Link>
+              <Link href={'/app/repos' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Repos</Link>
               <Link href={'/app/reviews' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Reviews</Link>
               <Link href={'/app/budget' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Budget</Link>
               <Link href={'/app/audit' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Audit log</Link>
