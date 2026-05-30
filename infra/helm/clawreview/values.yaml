@@ -79,3 +79,51 @@ securityContext:
   readOnlyRootFilesystem: false
   capabilities:
     drop: ["ALL"]
+
+# Horizontal Pod Autoscaler. Disabled by default so static replicaCount
+# stays authoritative; flip enabled=true once metrics-server is installed
+# in the target cluster.
+autoscaling:
+  server:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  dashboard:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+
+# Pod Disruption Budgets keep at least one replica available during
+# voluntary disruptions (node drains, cluster upgrades).
+podDisruptionBudget:
+  server:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+  dashboard:
+    enabled: true
+    minAvailable: 1
+    maxUnavailable: null
+
+# NetworkPolicy locks down pod-to-pod traffic. Requires a CNI that
+# enforces policies (Calico, Cilium, etc.). Off by default for clusters
+# without a policy-aware CNI.
+networkPolicy:
+  enabled: false
+  server:
+    # Namespaces (by kubernetes.io/metadata.name label) allowed to reach
+    # the server pods on port 4000. Add your ingress controller namespace
+    # (for example "ingress-nginx") and any monitoring namespace that
+    # scrapes /metrics.
+    allowFromNamespaces:
+      - ingress-nginx
+      - monitoring
+    extraIngressFrom: []
+    extraEgress: []
+  dashboard:
+    allowFromNamespaces:
+      - ingress-nginx
+    extraIngressFrom: []

@@ -338,6 +338,75 @@ prune older rows with a scheduled job (not yet wired in this repo).
 
 Deploy, scale, backup, and on-call notes live in `docs/runbooks/`.
 
+### Scaling and disruption
+
+The Helm chart ships HorizontalPodAutoscaler, PodDisruptionBudget, and
+NetworkPolicy templates so production clusters get scaling and blast-radius
+controls without bespoke YAML.
+
+HPA is off by default so the static `replicaCount` stays authoritative on
+clusters without metrics-server. Enable per component:
+
+```yaml
+autoscaling:
+  server:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+    targetMemoryUtilizationPercentage: 80
+  dashboard:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 70
+```
+
+The server HPA includes a behavior block that scales up aggressively
+(double the pods every 30s, or +2 pods, whichever is larger) and scales
+down conservatively (50% every 60s with a 5 minute stabilization window)
+so bursty webhook traffic does not flap.
+
+PodDisruptionBudgets are on by default at `minAvailable: 1` for both
+server and dashboard. Cluster operators draining a node will always leave
+at least one replica serving traffic. Override per environment:
+
+```yaml
+podDisruptionBudget:
+  server:
+    enabled: true
+    minAvailable: 2
+  dashboard:
+    enabled: true
+    maxUnavailable: 1
+```
+
+NetworkPolicy is off by default because it requires a policy-aware CNI
+(Calico, Cilium, etc.). When enabled, the server pod accepts ingress
+only from the dashboard pod and from namespaces listed in
+`networkPolicy.server.allowFromNamespaces` (defaults include
+`ingress-nginx` and `monitoring` so Prometheus can still scrape
+`/metrics`). Egress is restricted to DNS plus TCP 443, 5432, and 6379,
+and the cloud metadata endpoint `169.254.169.254/32` is explicitly
+blocked to mitigate SSRF.
+
+```yaml
+networkPolicy:
+  enabled: true
+  server:
+    allowFromNamespaces:
+      - ingress-nginx
+      - monitoring
+  dashboard:
+    allowFromNamespaces:
+      - ingress-nginx
+```
+
+The chart is covered by a vitest in `apps/server/tests/helm-chart.test.ts`
+that parses each template and verifies the rendered `kind` and
+`apiVersion`, so accidental indentation regressions fail CI before they
+reach a cluster.
+
 ## License
 
 MIT. See `LICENSE`.
