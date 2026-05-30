@@ -4,12 +4,12 @@ import { z } from 'zod';
 import { getRepoHealth } from '../services/repo-health.js';
 
 export async function registerRepoHealthRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/repos/health', async () => {
+  app.get('/api/repos/health', { preHandler: app.requireRole('readonly') }, async () => {
     const items = getRepoHealth().list();
     return { items };
   });
 
-  app.get('/api/repos/:owner/:repo/health', async (req, reply) => {
+  app.get('/api/repos/:owner/:repo/health', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const params = z
       .object({ owner: z.string().min(1), repo: z.string().min(1) })
       .safeParse(req.params);
@@ -25,7 +25,7 @@ export async function registerRepoHealthRoutes(app: FastifyInstance): Promise<vo
     return state;
   });
 
-  app.post('/api/repos/:owner/:repo/pause', async (req, reply) => {
+  app.post('/api/repos/:owner/:repo/pause', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const params = z
       .object({ owner: z.string().min(1), repo: z.string().min(1) })
       .safeParse(req.params);
@@ -48,7 +48,7 @@ export async function registerRepoHealthRoutes(app: FastifyInstance): Promise<vo
     return { ok: true, state };
   });
 
-  app.post('/api/repos/:owner/:repo/resume', async (req, reply) => {
+  app.post('/api/repos/:owner/:repo/resume', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const params = z
       .object({ owner: z.string().min(1), repo: z.string().min(1) })
       .safeParse(req.params);

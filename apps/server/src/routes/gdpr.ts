@@ -32,7 +32,7 @@ function actorOf(req: { apiAuth?: { tokenName: string } }): string {
 }
 
 export async function registerGdprRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/users/:login/data-export', async (req, reply) => {
+  app.get('/api/users/:login/data-export', { preHandler: app.requireRole('admin') }, async (req, reply) => {
     const parsed = LoginParam.safeParse(req.params);
     if (!parsed.success) {
       reply.code(400);
@@ -68,7 +68,7 @@ export async function registerGdprRoutes(app: FastifyInstance): Promise<void> {
     return bundle;
   });
 
-  app.delete('/api/users/:login', async (req, reply) => {
+  app.delete('/api/users/:login', { preHandler: app.requireRole('admin') }, async (req, reply) => {
     const parsed = LoginParam.safeParse(req.params);
     if (!parsed.success) {
       reply.code(400);

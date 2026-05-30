@@ -22,7 +22,7 @@ const SlaQuerySchema = z.object({
 });
 
 export async function registerSlaRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/reviews/sla/breaches', async (req, reply) => {
+  app.get('/api/reviews/sla/breaches', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const parsed = SlaQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       reply.code(400);

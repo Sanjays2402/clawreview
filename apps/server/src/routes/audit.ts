@@ -17,7 +17,7 @@ const Query = z.object({
  * with offsets.
  */
 export async function registerAuditRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/audit', async (req, reply) => {
+  app.get('/api/audit', { preHandler: app.requireRole('admin') }, async (req, reply) => {
     const parsed = Query.safeParse(req.query);
     if (!parsed.success) {
       reply.code(400);

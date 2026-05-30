@@ -22,7 +22,7 @@ const Body = z.object({
  * a "Re-run" button.
  */
 export async function registerRerunRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/api/reviews/rerun', async (req, reply) => {
+  app.post('/api/reviews/rerun', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const parsed = Body.safeParse(req.body);
     if (!parsed.success) {
       reply.code(400);

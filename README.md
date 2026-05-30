@@ -486,11 +486,15 @@ All `/api/*` routes require a bearer token. Public surfaces stay open:
 independently authenticated by GitHub HMAC signature verification).
 
 Tokens are configured via the `API_AUTH_TOKENS` env var, a comma-separated
-list with optional `name:` prefixes for audit-friendly logging:
+list. Each entry may encode a role for per-route authorization:
 
 ```
-API_AUTH_TOKENS="dashboard:$(openssl rand -hex 32),ci:$(openssl rand -hex 32)"
+API_AUTH_TOKENS="dashboard:readonly:$(openssl rand -hex 32),ops:operator:$(openssl rand -hex 32),root:admin:$(openssl rand -hex 32)"
 ```
+
+Legacy `name:token` and bare-token entries are still accepted and default
+to the `admin` role so existing deployments do not silently downgrade on
+upgrade.
 
 Callers present the token as either header:
 
@@ -529,6 +533,32 @@ On-call runbook for a leaked token:
 3. Grep the server logs for `api auth enabled` to confirm the new token
    count, and for `Unauthorized` 401s coming from unexpected IPs to
    confirm the leaked credential is rejected.
+
+### Role-based access control
+
+Every `/api/*` route is gated by one of three roles. The roles form a
+strict hierarchy: `admin` includes `operator` includes `readonly`.
+
+| Role | What it can do |
+| --- | --- |
+| `readonly` | GET review lists and detail, exports (`.md`, `.sarif`, `.junit.xml`, `.csv`), budget snapshots, repo health, SLA breaches, weekly stats, config validation, installations |
+| `operator` | Everything `readonly` does, plus budget edits and resets, review rerun, repo pause/resume, finding acknowledgement (`/api/findings/:id`, `/api/reviews/:id/findings/bulk`) |
+| `admin` | Everything `operator` does, plus `GET /api/audit` and GDPR endpoints `GET /api/users/:login/data-export` and `DELETE /api/users/:login` |
+
+A token with insufficient role gets `403 Forbidden` with a body that
+names both the role it has and the role the route requires. Every denial
+is persisted as an audit row with action `api.forbidden` so abuse is
+visible from the `GET /api/audit` query.
+
+Issue tokens scoped to the minimum role the consumer needs:
+
+- Dashboard SSR fetches that only read data: `readonly`.
+- A dashboard action that triggers reruns or pauses a repo: `operator`.
+- A DPO tool that calls `DELETE /api/users/:login`: `admin`.
+- CI smoke checks that hit `GET /api/reviews`: `readonly`.
+
+When rotating, prefer adding the new role-scoped token first, switching
+consumers, then removing the old broader-scoped entry.
 
 ### GDPR data lifecycle
 

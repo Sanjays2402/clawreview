@@ -57,7 +57,12 @@ secrets:
   llmOpenaiApiKey: ""
   cookieSecret: "change-me"
   sentryDsn: ""
-  # API bearer tokens (comma-separated, name:token format recommended).
+  # API bearer tokens, comma-separated. Preferred format encodes the
+  # role: "name:role:token" where role is readonly | operator | admin.
+  # Example:
+  #   "dashboard:readonly:<hex>,ops:operator:<hex>,root:admin:<hex>"
+  # Legacy "name:token" and bare-token entries are still accepted and
+  # default to the admin role to preserve the pre-RBAC contract.
   # The server refuses to start in production when this is empty.
   apiAuthTokens: ""
 

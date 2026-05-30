@@ -8,7 +8,7 @@ const Query = z.object({
 });
 
 export async function registerStatsRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/stats/weekly', async (req, reply) => {
+  app.get('/api/stats/weekly', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const parsed = Query.safeParse(req.query);
     if (!parsed.success) {

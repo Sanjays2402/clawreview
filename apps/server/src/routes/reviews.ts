@@ -14,7 +14,7 @@ const ListQuerySchema = z.object({
 });
 
 export async function registerReviewsRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/reviews', async (req, reply) => {
+  app.get('/api/reviews', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const parsed = ListQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -29,7 +29,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     };
   });
 
-  app.get('/api/reviews/:id', async (req, reply) => {
+  app.get('/api/reviews/:id', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     if (!params.success) {
@@ -44,7 +44,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     return toReviewDetailDto(rec);
   });
 
-  app.get('/api/reviews/:id/report.md', async (req, reply) => {
+  app.get('/api/reviews/:id/report.md', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     const query = z
@@ -101,7 +101,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     return md;
   });
 
-  app.get('/api/reviews/:id/sarif', async (req, reply) => {
+  app.get('/api/reviews/:id/sarif', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     if (!params.success) {
@@ -130,7 +130,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     return log;
   });
 
-  app.get('/api/reviews/:id/junit.xml', async (req, reply) => {
+  app.get('/api/reviews/:id/junit.xml', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     if (!params.success) {
@@ -155,7 +155,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     return xml;
   });
 
-  app.get('/api/reviews/:id/findings.csv', async (req, reply) => {
+  app.get('/api/reviews/:id/findings.csv', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     const query = z
@@ -205,7 +205,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       .default({}),
   });
 
-  app.post('/api/reviews/:id/findings/bulk', async (req, reply) => {
+  app.post('/api/reviews/:id/findings/bulk', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     const body = BulkFindingSchema.safeParse(req.body);
@@ -226,7 +226,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     return { ok: true, ...result };
   });
 
-  app.post('/api/findings/:id', async (req, reply) => {
+  app.post('/api/findings/:id', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
     const body = FindingActionSchema.safeParse(req.body);

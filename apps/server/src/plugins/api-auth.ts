@@ -1,7 +1,29 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { timingSafeEqual } from 'node:crypto';
+import { audit } from '@clawreview/db';
 
 import { env } from '../env.js';
+
+/**
+ * Roles available to API tokens. Higher tiers strictly include lower tiers:
+ *
+ *   readonly  GET on any /api/* endpoint
+ *   operator  readonly + day-to-day mutations (budget edits, rerun, pause/resume,
+ *             finding acknowledgement, config validation)
+ *   admin     operator + privileged operations (audit log read, GDPR export
+ *             and account deletion)
+ *
+ * Tokens without an explicit role default to `admin` to preserve the
+ * pre-RBAC contract for upgraded deployments. Operators should re-issue
+ * tokens with explicit roles after upgrading.
+ */
+export type Role = 'readonly' | 'operator' | 'admin';
+
+const ROLE_RANK: Record<Role, number> = { readonly: 1, operator: 2, admin: 3 };
+
+export function roleSatisfies(have: Role, need: Role): boolean {
+  return ROLE_RANK[have] >= ROLE_RANK[need];
+}
 
 /**
  * Loaded API tokens. The map is name -> raw token bytes so we can do a
@@ -9,12 +31,18 @@ import { env } from '../env.js';
  * without ever logging the secret itself.
  *
  * Format of API_AUTH_TOKENS:
- *   "name1:token1,name2:token2"   (named tokens, recommended)
- *   "token1,token2"               (anonymous, name defaults to "token-N")
+ *   "name:role:token,..."   role one of readonly|operator|admin (recommended)
+ *   "name:token,..."        role defaults to admin (legacy)
+ *   "token,..."             anonymous, role defaults to admin (legacy)
  */
 interface LoadedToken {
   name: string;
+  role: Role;
   buf: Buffer;
+}
+
+function isRole(s: string): s is Role {
+  return s === 'readonly' || s === 'operator' || s === 'admin';
 }
 
 function loadTokens(raw: string): LoadedToken[] {
@@ -24,13 +52,16 @@ function loadTokens(raw: string): LoadedToken[] {
     const trimmed = piece.trim();
     if (!trimmed) continue;
     idx += 1;
-    const colon = trimmed.indexOf(':');
-    if (colon > 0 && colon < trimmed.length - 1) {
-      const name = trimmed.slice(0, colon).trim();
-      const tok = trimmed.slice(colon + 1).trim();
-      if (name && tok) out.push({ name, buf: Buffer.from(tok, 'utf8') });
+    const parts = trimmed.split(':').map((p) => p.trim());
+    if (parts.length >= 3 && parts[0] && isRole(parts[1]) && parts.slice(2).join(':')) {
+      // name:role:token (token may itself contain colons, hence join)
+      out.push({ name: parts[0], role: parts[1], buf: Buffer.from(parts.slice(2).join(':'), 'utf8') });
+    } else if (parts.length === 2 && parts[0] && parts[1] && !isRole(parts[1])) {
+      // name:token legacy
+      out.push({ name: parts[0], role: 'admin', buf: Buffer.from(parts[1], 'utf8') });
     } else {
-      out.push({ name: `token-${idx}`, buf: Buffer.from(trimmed, 'utf8') });
+      // bare token
+      out.push({ name: `token-${idx}`, role: 'admin', buf: Buffer.from(trimmed, 'utf8') });
     }
   }
   return out;
@@ -78,7 +109,10 @@ function isPublicPath(url: string): boolean {
 
 declare module 'fastify' {
   interface FastifyRequest {
-    apiAuth?: { tokenName: string };
+    apiAuth?: { tokenName: string; role: Role };
+  }
+  interface FastifyInstance {
+    requireRole: (role: Role) => (req: FastifyRequest, reply: FastifyReply) => Promise<void>;
   }
 }
 
@@ -92,22 +126,63 @@ export async function registerApiAuth(
   opts: ApiAuthOptions = { rawTokens: env.API_AUTH_TOKENS, nodeEnv: env.NODE_ENV as ApiAuthOptions['nodeEnv'] },
 ): Promise<void> {
   const tokens = loadTokens(opts.rawTokens);
+  const enforce = tokens.length > 0;
 
-  if (tokens.length === 0) {
+  if (!enforce) {
     if (opts.nodeEnv === 'production') {
       // Fail closed at startup rather than silently exposing the API.
       throw new Error(
-        'API_AUTH_TOKENS is empty in production. Set at least one token (e.g. "dashboard:<random-hex>") or run behind another authenticating gateway.',
+        'API_AUTH_TOKENS is empty in production. Set at least one token (e.g. "dashboard:admin:<random-hex>") or run behind another authenticating gateway.',
       );
     }
     app.log.warn(
       { nodeEnv: opts.nodeEnv },
       'api auth disabled: API_AUTH_TOKENS is empty (allowed outside production)',
     );
-    return;
+  } else {
+    const byRole = tokens.reduce<Record<Role, number>>(
+      (acc, t) => ({ ...acc, [t.role]: acc[t.role] + 1 }),
+      { readonly: 0, operator: 0, admin: 0 },
+    );
+    app.log.info({ tokenCount: tokens.length, byRole }, 'api auth enabled');
   }
 
-  app.log.info({ tokenCount: tokens.length }, 'api auth enabled');
+  // Decorate first so routes can call app.requireRole() even when auth is
+  // disabled for local dev. In disabled mode the guard is a no-op so
+  // existing tests keep passing without setting tokens.
+  app.decorate('requireRole', (need: Role) => {
+    return async (req: FastifyRequest, reply: FastifyReply) => {
+      if (!enforce) return;
+      const have = req.apiAuth?.role;
+      if (!have) {
+        // No bearer reached us. The onRequest hook below should already
+        // have rejected, but stay defensive.
+        reply.code(401);
+        return reply.send({ error: 'Unauthorized', message: 'missing bearer token', requestId: req.id });
+      }
+      if (!roleSatisfies(have, need)) {
+        // Persist a forbidden attempt so abuse is visible in the audit
+        // trail. Failures inside audit() are swallowed by its own contract.
+        await audit(
+          {
+            actorLogin: `token:${req.apiAuth?.tokenName ?? 'unknown'}`,
+            action: 'api.forbidden',
+            subject: `${req.method} ${req.url.split('?', 1)[0]}`,
+            meta: { have, need, requestId: req.id },
+          },
+          { logger: req.log },
+        );
+        reply.code(403);
+        return reply.send({
+          error: 'Forbidden',
+          message: `role '${have}' cannot access this route (requires '${need}')`,
+          requestId: req.id,
+        });
+      }
+    };
+  });
+
+  if (!enforce) return;
 
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     const url = req.url;
@@ -125,9 +200,9 @@ export async function registerApiAuth(
       reply.code(401);
       return reply.send({ error: 'Unauthorized', message: 'invalid token', requestId: req.id });
     }
-    req.apiAuth = { tokenName: match.name };
+    req.apiAuth = { tokenName: match.name, role: match.role };
   });
 }
 
 // Exported for tests.
-export const _internals = { loadTokens, constantTimeMatch, isPublicPath };
+export const _internals = { loadTokens, constantTimeMatch, isPublicPath, roleSatisfies };
