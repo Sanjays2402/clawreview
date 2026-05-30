@@ -217,6 +217,23 @@ export async function getInstallations(): Promise<InstallationListItem[]> {
   return json.items;
 }
 
+export interface InstallationRepoItem {
+  owner: string;
+  repo: string;
+  defaultBranch?: string;
+  visibility?: 'public' | 'private' | 'internal';
+  enabled?: boolean;
+  lastReviewAt?: string;
+}
+
+export async function getInstallationRepos(installationId: string | number): Promise<InstallationRepoItem[]> {
+  const json = await getJSON<{ items: InstallationRepoItem[] }>(
+    `/api/installations/${encodeURIComponent(String(installationId))}/repos`,
+    { items: [] },
+  );
+  return json.items;
+}
+
 export async function getAudit(): Promise<AuditEntry[]> {
   const json = await getJSON<{ items: AuditEntry[] }>('/api/audit', { items: [] });
   return json.items;
