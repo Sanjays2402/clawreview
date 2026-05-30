@@ -205,4 +205,49 @@ describe('InMemoryReviewStore', () => {
       expect(out).toBeNull();
     });
   });
+
+  describe('cross-review auto-suppress by fingerprint', () => {
+    it('auto-dismisses findings whose fingerprint was dismissed in a prior review of the same PR', async () => {
+      const r1 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 7, headSha: 'sha1', baseSha: 'b' });
+      await store.complete(r1.id, summary(), [f({ title: 'Recurring issue', startLine: 50 })]);
+      await store.findingAction(`${r1.id}:0`, 'dismiss', 'false positive');
+
+      // New review on the same PR, different head sha, same finding (line shifted slightly).
+      const r2 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 7, headSha: 'sha2', baseSha: 'b' });
+      const rec = await store.complete(r2.id, summary(), [f({ title: 'Recurring issue', startLine: 53 })]);
+      expect(rec.findings).toHaveLength(1);
+      expect(rec.findings[0]!.state).toBe('dismissed');
+      expect(rec.findings[0]!.autoDismissed).toBe(true);
+      expect(rec.findings[0]!.dismissReason).toBe('false positive');
+    });
+
+    it('does not auto-dismiss findings dismissed on a different PR', async () => {
+      const r1 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 7, headSha: 'sha1', baseSha: 'b' });
+      await store.complete(r1.id, summary(), [f({ title: 'Issue X' })]);
+      await store.findingAction(`${r1.id}:0`, 'dismiss');
+
+      const r2 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 8, headSha: 'shaX', baseSha: 'b' });
+      const rec = await store.complete(r2.id, summary(), [f({ title: 'Issue X' })]);
+      expect(rec.findings[0]!.state).toBe('open');
+      expect(rec.findings[0]!.autoDismissed).toBeFalsy();
+    });
+
+    it('reopen on a prior review stops future auto-suppress', async () => {
+      const r1 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 7, headSha: 'sha1', baseSha: 'b' });
+      await store.complete(r1.id, summary(), [f({ title: 'Recurring' })]);
+      await store.findingAction(`${r1.id}:0`, 'dismiss', 'noise');
+      await store.findingAction(`${r1.id}:0`, 'reopen');
+
+      const r2 = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 7, headSha: 'sha2', baseSha: 'b' });
+      const rec = await store.complete(r2.id, summary(), [f({ title: 'Recurring' })]);
+      expect(rec.findings[0]!.state).toBe('open');
+    });
+
+    it('assigns a stable fingerprint to every stored finding', async () => {
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'h', baseSha: 'b' });
+      const rec = await store.complete(r.id, summary(), [f(), f({ file: 'x.ts' })]);
+      expect(rec.findings[0]!.fingerprint).toMatch(/^[0-9a-f]{16}$/);
+      expect(rec.findings[0]!.fingerprint).not.toBe(rec.findings[1]!.fingerprint);
+    });
+  });
 });

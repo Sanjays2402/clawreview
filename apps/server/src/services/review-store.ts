@@ -1,4 +1,5 @@
 import type { Finding, ReviewSummary, ReviewStatus, Severity } from '@clawreview/types';
+import { fingerprint } from '@clawreview/aggregator';
 
 export interface ReviewRecord {
   id: string;
@@ -27,8 +28,13 @@ export interface StoredFinding extends Finding {
   id: string;
   reviewId: string;
   state: 'open' | 'dismissed';
+  /** Stable content fingerprint, used for cross-review dedup and auto-suppress. */
+  fingerprint: string;
   dismissReason?: string;
   dismissedAt?: string;
+  /** Set when the finding was auto-dismissed because a prior review on the
+   * same PR had dismissed a finding with the same fingerprint. */
+  autoDismissed?: boolean;
 }
 
 export interface ListReviewsQuery {
@@ -131,6 +137,12 @@ export class InMemoryReviewStore implements ReviewStore {
   private reviews = new Map<string, ReviewRecord>();
   private findingsIndex = new Map<string, string>(); // findingId -> reviewId
   private counter = 0;
+  /**
+   * Map of `${owner}/${repo}#${pr}` -> Set<fingerprint> of findings a
+   * reviewer dismissed on a prior review of the same PR. New reviews use
+   * this set to auto-suppress recurring noise after a force-push or rerun.
+   */
+  private dismissedByPr = new Map<string, Map<string, string>>();
 
   async start(input: StartInput): Promise<ReviewRecord> {
     this.counter += 1;
@@ -185,15 +197,26 @@ export class InMemoryReviewStore implements ReviewStore {
     rec.commentId = refs?.commentId;
     rec.checkRunId = refs?.checkRunId;
 
+    const prKey = `${rec.owner}/${rec.repo}#${rec.prNumber}`;
+    const priorDismissed = this.dismissedByPr.get(prKey) ?? new Map<string, string>();
     rec.findings = findings.map((f, idx) => {
       const fid = `${id}:${idx}`;
       this.findingsIndex.set(fid, id);
-      return {
+      const fp = fingerprint(f);
+      const priorReason = priorDismissed.get(fp);
+      const stored: StoredFinding = {
         ...f,
         id: fid,
         reviewId: id,
-        state: 'open' as const,
+        state: priorReason !== undefined ? 'dismissed' : 'open',
+        fingerprint: fp,
       };
+      if (priorReason !== undefined) {
+        stored.dismissedAt = new Date().toISOString();
+        stored.dismissReason = priorReason;
+        stored.autoDismissed = true;
+      }
+      return stored;
     });
     return rec;
   }
@@ -285,14 +308,30 @@ export class InMemoryReviewStore implements ReviewStore {
     action: 'dismiss' | 'reopen',
     reason: string | undefined,
   ): void {
+    const rec = this.reviews.get(f.reviewId);
+    const prKey = rec ? `${rec.owner}/${rec.repo}#${rec.prNumber}` : null;
     if (action === 'dismiss') {
       f.state = 'dismissed';
       f.dismissedAt = new Date().toISOString();
       f.dismissReason = reason;
+      f.autoDismissed = false;
+      if (prKey) {
+        const map = this.dismissedByPr.get(prKey) ?? new Map<string, string>();
+        map.set(f.fingerprint, reason ?? '');
+        this.dismissedByPr.set(prKey, map);
+      }
     } else {
       f.state = 'open';
       f.dismissedAt = undefined;
       f.dismissReason = undefined;
+      f.autoDismissed = false;
+      if (prKey) {
+        const map = this.dismissedByPr.get(prKey);
+        if (map) {
+          map.delete(f.fingerprint);
+          if (map.size === 0) this.dismissedByPr.delete(prKey);
+        }
+      }
     }
   }
 
