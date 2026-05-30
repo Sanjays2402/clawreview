@@ -5,6 +5,8 @@ Usage:
   clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
   clawreview validate [--config <path>]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
+  clawreview baseline save [--input <path>] [--output <path>]
+  clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview version
 
 Flags:
@@ -26,5 +28,7 @@ Examples:
   clawreview run --config .clawreview.yml --format json
   clawreview validate --config examples/strict.clawreview.yml
   clawreview run --format json | clawreview stats --fail-on high
+  clawreview run --format json > report.json && clawreview baseline save --input report.json
+  clawreview run --format json | clawreview baseline diff --fail-on-new
 `;
 }
