@@ -15,6 +15,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
               <Link href={'/app/installations' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Installations</Link>
               <Link href={'/app/repos' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Repos</Link>
               <Link href={'/app/reviews' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Reviews</Link>
+              <Link href={'/app/trends' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Trends</Link>
               <Link href={'/app/budget' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Budget</Link>
               <Link href={'/app/audit' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Audit log</Link>
               <Link href={'/app/config' as any} className="rounded-md px-3 py-1.5 hover:bg-bg-subtle">Config</Link>
