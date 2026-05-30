@@ -104,6 +104,52 @@ export class GitHubClient {
     });
   }
 
+  /**
+   * Posts a single PR review with N inline comments and an overall body.
+   * GitHub requires inline comments to anchor on lines that exist in the
+   * patch hunks of the head commit; the caller is responsible for filtering.
+   *
+   * If `comments` is empty this falls through to a plain review comment so we
+   * don't spam a useless empty review.
+   */
+  async createReview(
+    id: PrIdentifier,
+    payload: {
+      commitSha: string;
+      body: string;
+      event?: 'COMMENT' | 'REQUEST_CHANGES' | 'APPROVE';
+      comments: Array<{
+        path: string;
+        line: number;
+        side?: 'LEFT' | 'RIGHT';
+        startLine?: number;
+        startSide?: 'LEFT' | 'RIGHT';
+        body: string;
+      }>;
+    },
+  ): Promise<{ id: number; htmlUrl?: string; submittedInlineCount: number }> {
+    const inline = payload.comments.map((c) => ({
+      path: c.path,
+      line: c.line,
+      side: c.side ?? 'RIGHT',
+      ...(c.startLine !== undefined ? { start_line: c.startLine, start_side: c.startSide ?? 'RIGHT' } : {}),
+      body: c.body,
+    }));
+    const created = await this.api<{ id: number; html_url?: string }>(
+      `/repos/${id.owner}/${id.repo}/pulls/${id.number}/reviews`,
+      {
+        method: 'POST',
+        body: {
+          commit_id: payload.commitSha,
+          body: payload.body,
+          event: payload.event ?? 'COMMENT',
+          comments: inline,
+        },
+      },
+    );
+    return { id: created.id, htmlUrl: created.html_url, submittedInlineCount: inline.length };
+  }
+
   async api<T>(path: string, opts: { method?: string; body?: unknown; accept?: string; raw?: boolean } = {}): Promise<T> {
     return withRetry(async () => {
       const res = await this.fetchImpl(`https://api.github.com${path}`, {

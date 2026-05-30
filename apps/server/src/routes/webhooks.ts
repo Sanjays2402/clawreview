@@ -5,6 +5,7 @@ import { InstallationPayloadSchema, PullRequestPayloadSchema } from '@clawreview
 
 import { env } from '../env.js';
 import { REVIEW_JOB, getQueue } from '../queue.js';
+import { getDeliveryCache } from '../services/delivery-cache.js';
 import { getReviewStore } from '../services/review-store.js';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
@@ -55,6 +56,15 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
 
     const event = headers.data['x-github-event'];
     const delivery = headers.data['x-github-delivery'];
+
+    // Idempotency: GitHub will redeliver the exact same payload on retry,
+    // and operators sometimes manually replay from the dashboard. Accept
+    // the first delivery; ack later ones without enqueueing again.
+    const fresh = getDeliveryCache().reserve(delivery);
+    if (!fresh) {
+      req.log.info({ event, delivery }, 'duplicate webhook delivery ignored');
+      return { ok: true, duplicate: true, delivery };
+    }
 
     try {
       if (event === 'pull_request') {

@@ -87,4 +87,32 @@ describe('POST /webhooks/github', () => {
     });
     expect(res.json()).toEqual({ ok: true, pong: true });
   });
+
+  it('treats a redelivered webhook as a duplicate', async () => {
+    const sig = computeSignature(PR_PAYLOAD, 'test-secret');
+    const headers = {
+      'x-github-event': 'pull_request',
+      'x-github-delivery': 'dup-1',
+      'x-hub-signature-256': sig,
+      'content-type': 'application/json',
+    };
+    const first = await app.inject({ method: 'POST', url: '/webhooks/github', headers, payload: PR_PAYLOAD });
+    expect(first.statusCode).toBe(200);
+    expect(first.json().duplicate).toBeUndefined();
+    const firstReviewId = first.json().reviewId;
+
+    const second = await app.inject({ method: 'POST', url: '/webhooks/github', headers, payload: PR_PAYLOAD });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toMatchObject({ ok: true, duplicate: true, delivery: 'dup-1' });
+
+    // sanity: third delivery with a NEW id is processed again
+    const third = await app.inject({
+      method: 'POST',
+      url: '/webhooks/github',
+      headers: { ...headers, 'x-github-delivery': 'dup-2' },
+      payload: PR_PAYLOAD,
+    });
+    expect(third.statusCode).toBe(200);
+    expect(third.json().reviewId).not.toBe(firstReviewId);
+  });
 });
