@@ -3,7 +3,7 @@ import { cwd as getCwd } from 'node:process';
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
 import { runPipeline } from '@clawreview/agents';
-import { aggregate, applySuppressions, buildSuppressionMap, toSarif } from '@clawreview/aggregator';
+import { aggregate, applySuppressions, buildSuppressionMap, toSarif, toJUnitXml } from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -21,7 +21,7 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   const cwd = getCwd();
   const base = String(args.flags.base ?? (await detectBase(cwd)));
   const head = String(args.flags.head ?? 'HEAD');
-  const format = String(args.flags.format ?? 'text') as 'text' | 'json' | 'sarif';
+  const format = String(args.flags.format ?? 'text') as 'text' | 'json' | 'sarif' | 'junit';
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
 
   const cfg = await loadConfig(args.flags.config ? String(args.flags.config) : undefined, cwd);
@@ -96,6 +96,10 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   }
   if (format === 'sarif') {
     console.log(JSON.stringify(toSarif(result, { commitSha: await safeRevParse(cwd, head) }), null, 2));
+    return;
+  }
+  if (format === 'junit') {
+    process.stdout.write(toJUnitXml(result));
     return;
   }
   console.log(renderTextReport(result, { noColor }));

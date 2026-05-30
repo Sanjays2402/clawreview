@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { aggregate, toSarif, renderReviewReport } from '@clawreview/aggregator';
+import { aggregate, toSarif, toJUnitXml, renderReviewReport } from '@clawreview/aggregator';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -128,6 +128,31 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.sarif.json"`,
     );
     return log;
+  });
+
+  app.get('/api/reviews/:id/junit.xml', async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    if (!params.success) {
+      reply.code(400);
+      return { error: 'BadInput' };
+    }
+    const rec = await store.get(params.data.id);
+    if (!rec) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    const open = rec.findings.filter((f) => f.state === 'open');
+    const xml = toJUnitXml(open, {
+      suiteName: `clawreview/${rec.owner}/${rec.repo}#${rec.prNumber}`,
+      timestamp: rec.completedAt ?? rec.createdAt,
+    });
+    reply.header('content-type', 'application/xml; charset=utf-8');
+    reply.header(
+      'content-disposition',
+      `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.junit.xml"`,
+    );
+    return xml;
   });
 
   const FindingActionSchema = z.object({
