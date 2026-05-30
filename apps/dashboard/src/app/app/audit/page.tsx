@@ -1,5 +1,6 @@
-import { Card, CardBody, CardHeader, EmptyState, LockIcon } from '@clawreview/ui';
+import { Card, CardBody, CardHeader } from '@clawreview/ui';
 
+import { AuditTable } from '@/components/audit/audit-table';
 import { getAudit } from '@/lib/data';
 
 export default async function AuditPage() {
@@ -15,34 +16,7 @@ export default async function AuditPage() {
           <div className="text-sm font-medium">Entries</div>
         </CardHeader>
         <CardBody>
-          {items.length === 0 ? (
-            <EmptyState
-              icon={<LockIcon size={28} />}
-              title="No entries yet"
-              description="Sign in events, dismissals, and config changes will land here."
-            />
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase tracking-wide text-fg-subtle">
-                <tr>
-                  <th className="py-2 font-medium">When</th>
-                  <th className="font-medium">Actor</th>
-                  <th className="font-medium">Action</th>
-                  <th className="font-medium">Subject</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border-subtle">
-                {items.map((e) => (
-                  <tr key={e.id}>
-                    <td className="py-2 text-fg-muted">{new Date(e.createdAt).toLocaleString()}</td>
-                    <td className="font-medium text-fg">{e.actorLogin}</td>
-                    <td className="text-fg-muted">{e.action}</td>
-                    <td className="text-fg-muted">{e.subject ?? '-'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <AuditTable entries={items} />
         </CardBody>
       </Card>
     </div>
