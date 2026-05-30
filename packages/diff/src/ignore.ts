@@ -60,13 +60,15 @@ export function parseIgnoreFile(text: string): IgnoreRule[] {
       negate = true;
       pattern = pattern.slice(1);
     }
+    let anchored = false;
     if (pattern.startsWith('/')) {
+      anchored = true;
       pattern = pattern.slice(1);
     }
     if (pattern.endsWith('/')) {
       pattern = `${pattern}**`;
     }
-    if (!pattern.includes('/') && !pattern.startsWith('**/')) {
+    if (!anchored && !pattern.includes('/') && !pattern.startsWith('**/')) {
       // bare names match anywhere in the tree, like gitignore
       pattern = `**/${pattern}`;
     }
