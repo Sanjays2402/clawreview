@@ -261,6 +261,51 @@ Source: `apps/dashboard/src/app/shortcuts/page.tsx` and `apps/dashboard/src/comp
 └── tests           # cross-package fixtures
 ```
 
+## Operations
+
+The server exposes operational endpoints intended for scraping and probing
+by Kubernetes, Prometheus, and on-call tooling.
+
+- `GET /healthz` returns 200 if the process is up. Cheap, no dependencies.
+  Used as the Kubernetes liveness probe and excluded from rate limiting and
+  metric scraping.
+- `GET /readyz` returns 200 only when the queue (and, unless
+  `?skipLlm=1` is passed, at least one LLM provider) is reachable. Used as
+  the readiness probe.
+- `GET /version` returns the build version and Node runtime.
+- `GET /metrics` returns Prometheus text format. Includes
+  `prom-client` default process metrics (CPU, memory, event loop lag, GC,
+  open handles) plus custom series:
+  - `http_requests_total{method,route,status_code}` counter
+  - `http_request_duration_seconds{method,route,status_code}` histogram
+    (buckets: 5ms to 10s)
+  - `clawreview_webhook_events_total{event,action,result}` counter
+  - `clawreview_reviews_started_total{source}` counter
+  - `clawreview_reviews_completed_total{outcome}` counter
+
+  The `route` label uses the matched Fastify route template
+  (e.g. `/reviews/:id`), not the raw URL, so review identifiers and other
+  high-cardinality path segments do not explode the metric series.
+  Unmatched paths collapse to `route="unmatched"`. `/metrics` and
+  `/healthz` are intentionally excluded from the HTTP histograms so scrape
+  traffic and liveness pings do not skew latency percentiles.
+
+For Prometheus scraping under Helm, set the pod annotations on the server
+deployment:
+
+```yaml
+podAnnotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "4000"
+  prometheus.io/path: "/metrics"
+```
+
+These are emitted by `infra/helm/clawreview/values.yaml` under
+`podAnnotations.server` and can be overridden per environment.
+
+Deploy, scale, backup, and on-call notes live in `docs/runbooks/`.
+
 ## License
 
 MIT. See `LICENSE`.
+

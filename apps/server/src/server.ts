@@ -6,6 +6,7 @@ import { createLogger, newRequestId } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { registerHealthRoutes } from './routes/health.js';
+import { registerMetrics } from './plugins/metrics.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerReviewsRoutes } from './routes/reviews.js';
 import { registerInstallationsRoutes } from './routes/installations.js';
@@ -37,13 +38,14 @@ export async function buildServer(): Promise<FastifyInstance> {
   await app.register(rateLimit, {
     max: 240,
     timeWindow: '1 minute',
-    allowList: (req) => req.url.startsWith('/healthz'),
+    allowList: (req) => req.url.startsWith('/healthz') || req.url.startsWith('/metrics'),
   });
 
   app.addHook('onRequest', async (req, reply) => {
     reply.header('x-request-id', req.id);
   });
 
+  await registerMetrics(app);
   await registerHealthRoutes(app);
   await registerWebhookRoutes(app);
   await registerReviewsRoutes(app);

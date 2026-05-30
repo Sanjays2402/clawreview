@@ -16,6 +16,10 @@ spec:
       labels:
         {{- include "clawreview.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: server
+      {{- with .Values.podAnnotations.server }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
     spec:
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}

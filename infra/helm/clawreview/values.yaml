@@ -34,6 +34,16 @@ env:
   NODE_ENV: production
   REVIEW_CONCURRENCY: "6"
 
+# Pod annotations applied per-deployment. The server entries enable
+# Prometheus scraping of /metrics out of the box; remove them if you use
+# a ServiceMonitor instead.
+podAnnotations:
+  server:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "4000"
+    prometheus.io/path: "/metrics"
+  dashboard: {}
+
 secrets:
   databaseUrl: ""
   redisUrl: ""
