@@ -1,11 +1,14 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { FunnelSimple, Warning } from '@phosphor-icons/react/dist/ssr';
+import { Warning } from '@phosphor-icons/react/dist/ssr';
 
-import { Card, CardBody, CardHeader, EmptyState, SeverityBadge } from '@clawreview/ui';
+import { EmptyState } from '@clawreview/ui';
 
 import { Breadcrumbs } from '@/components/ui/breadcrumbs';
 import { PageHeader } from '@/components/layout/page-header';
+import { FindingRow } from '@/components/review/finding-row';
+import { FindingsKeyNav } from '@/components/review/findings-key-nav';
+import { Kbd } from '@/components/ui/kbd';
 import { getReview, type Severity, type BulkFindingFilter } from '@/lib/data';
 
 import { BulkFindingsBar } from './bulk-findings-bar';
@@ -54,100 +57,91 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-3">
+      <FindingsKeyNav />
       <Breadcrumbs
         items={[
-          { label: 'Reviews', href: '/app/reviews' },
+          { label: 'reviews', href: '/app/reviews' },
           { label: `${review.owner}/${review.repo} #${review.prNumber}`, href: `/app/reviews/${id}` },
-          { label: 'Findings' },
+          { label: 'findings' },
         ]}
       />
 
       <PageHeader
-        title="Findings"
-        description={`${review.totalFindings} total, ${review.openFindings} open in this review.`}
+        title="findings"
+        description={`${review.totalFindings} total · ${review.openFindings} open`}
+        action={
+          <div className="flex items-center gap-1.5 font-mono text-[11px] text-fg-muted">
+            <Kbd>j</Kbd><Kbd>k</Kbd><span>nav</span>
+            <Kbd>e</Kbd><span>expand</span>
+            <Kbd>x</Kbd><span>dismiss</span>
+          </div>
+        }
       />
 
-      <Card>
-        <CardHeader>
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <FunnelSimple size={16} weight="duotone" />
-              Filters
-            </div>
-            <form action={`/app/reviews/${id}/findings`} method="get" className="flex flex-wrap items-center gap-3">
-              <input type="hidden" name="state" value={stateFilter === 'all' ? '' : stateFilter} />
-              <input type="hidden" name="severity" value={sevFilter === 'all' ? '' : sevFilter} />
-              <label className="flex items-center gap-2 text-xs text-fg-muted">
-                Agent
-                <select
-                  name="agent"
-                  defaultValue={agentFilter}
-                  className="rounded-md border border-border bg-bg px-2 py-1 text-sm text-fg"
-                >
-                  <option value="">All agents</option>
-                  {agents.map((a) => (
-                    <option key={a} value={a}>{a}</option>
-                  ))}
-                </select>
-              </label>
-              <button
-                type="submit"
-                className="rounded-md border border-border bg-bg-subtle px-3 py-1 text-xs font-medium hover:bg-bg"
+      <div className="rounded-md border border-border">
+        {/* Filter strip */}
+        <div className="flex flex-wrap items-center gap-1 border-b border-border-subtle bg-bg-subtle/30 px-2 py-1.5 font-mono text-[11px]">
+          <span className="uppercase tracking-wider text-fg-subtle">sev</span>
+          {SEVERITIES.map((s) => {
+            const active = s === sevFilter;
+            return (
+              <Link
+                key={s}
+                href={hrefWith({ severity: s }) as any}
+                className={`rounded-sm px-1.5 py-0.5 lowercase ${
+                  active ? 'bg-accent/20 text-fg' : 'text-fg-muted hover:bg-bg-muted hover:text-fg'
+                }`}
               >
-                Apply
-              </button>
-              {(sevFilter !== 'all' || stateFilter !== 'all' || agentFilter) && (
-                <Link
-                  href={`/app/reviews/${id}/findings` as any}
-                  className="text-xs text-fg-muted hover:text-fg hover:underline"
-                >
-                  Reset
-                </Link>
-              )}
-            </form>
-          </div>
-        </CardHeader>
-        <CardBody>
-          <div className="mb-4 flex flex-wrap gap-1 border-b border-border-subtle pb-2">
-            {SEVERITIES.map((s) => {
-              const active = s === sevFilter;
-              return (
-                <Link
-                  key={s}
-                  href={hrefWith({ severity: s }) as any}
-                  className={`-mb-px border-b-2 px-3 py-1.5 text-xs capitalize transition-colors ${
-                    active ? 'border-fg text-fg' : 'border-transparent text-fg-muted hover:text-fg'
-                  }`}
-                >
-                  {s}
-                </Link>
-              );
-            })}
-          </div>
+                {s}
+              </Link>
+            );
+          })}
+          <span className="mx-1 text-fg-subtle">·</span>
+          <span className="uppercase tracking-wider text-fg-subtle">state</span>
+          {STATES.map((s) => {
+            const active = s === stateFilter;
+            return (
+              <Link
+                key={s}
+                href={hrefWith({ state: s }) as any}
+                className={`rounded-sm px-1.5 py-0.5 lowercase ${
+                  active ? 'bg-accent/20 text-fg' : 'text-fg-muted hover:bg-bg-muted hover:text-fg'
+                }`}
+              >
+                {s}
+              </Link>
+            );
+          })}
+          <span className="mx-1 text-fg-subtle">·</span>
+          <form action={`/app/reviews/${id}/findings`} method="get" className="flex items-center gap-1">
+            <input type="hidden" name="state" value={stateFilter === 'all' ? '' : stateFilter} />
+            <input type="hidden" name="severity" value={sevFilter === 'all' ? '' : sevFilter} />
+            <span className="uppercase tracking-wider text-fg-subtle">agent</span>
+            <select
+              name="agent"
+              defaultValue={agentFilter}
+              className="h-5 rounded-sm border border-border bg-bg px-1 text-[11px] text-fg"
+            >
+              <option value="">all</option>
+              {agents.map((a) => (
+                <option key={a} value={a}>{a}</option>
+              ))}
+            </select>
+            <button type="submit" className="rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 hover:bg-bg-muted">apply</button>
+          </form>
+          {(sevFilter !== 'all' || stateFilter !== 'all' || agentFilter) && (
+            <Link href={`/app/reviews/${id}/findings` as any} className="ml-1 text-fg-subtle hover:text-fg">reset</Link>
+          )}
+          <span className="ml-auto tabular-nums text-fg-subtle">{filtered.length} / {review.findings.length}</span>
+        </div>
 
-          <div className="mb-4 flex flex-wrap gap-1">
-            {STATES.map((s) => {
-              const active = s === stateFilter;
-              return (
-                <Link
-                  key={s}
-                  href={hrefWith({ state: s }) as any}
-                  className={`rounded-full px-3 py-1 text-xs capitalize ${
-                    active ? 'bg-fg text-bg' : 'bg-bg-subtle text-fg-muted hover:text-fg'
-                  }`}
-                >
-                  {s}
-                </Link>
-              );
-            })}
-          </div>
-
+        <div className="p-2">
           {filtered.length === 0 ? (
             <EmptyState
-              icon={<Warning size={28} weight="duotone" />}
-              title="No findings match"
-              description="Loosen the filter or jump back to the full review to see everything."
+              icon={<Warning size={20} weight="duotone" />}
+              title="no matches"
+              description="loosen the filter or open the full review."
             />
           ) : (
             <>
@@ -162,37 +156,15 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
                   return f;
                 })()}
               />
-              <ul className="divide-y divide-border-subtle">
-              {filtered.map((f) => (
-                <li key={f.id} className={`py-3 ${f.state === 'dismissed' ? 'opacity-60' : ''}`}>
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <SeverityBadge severity={f.severity} />
-                        <span className="text-xs text-fg-muted">{f.agent}</span>
-                        {f.category && <span className="text-xs text-fg-subtle">· {f.category}</span>}
-                      </div>
-                      <Link
-                        href={`/app/reviews/${id}#finding-${f.id}` as any}
-                        className="mt-1 block truncate text-sm font-medium text-fg hover:underline"
-                      >
-                        {f.title}
-                      </Link>
-                      <div className="mt-1 truncate font-mono text-[11px] text-fg-subtle">
-                        {f.file}{f.line ? `:${f.line}` : ''}
-                      </div>
-                    </div>
-                    <div className="shrink-0 text-xs text-fg-muted">
-                      {f.state === 'dismissed' ? 'Dismissed' : 'Open'}
-                    </div>
-                  </div>
-                </li>
-              ))}
+              <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
+                {filtered.map((f) => (
+                  <FindingRow key={f.id} finding={f} reviewId={id} />
+                ))}
               </ul>
             </>
           )}
-        </CardBody>
-      </Card>
+        </div>
+      </div>
     </div>
   );
 }

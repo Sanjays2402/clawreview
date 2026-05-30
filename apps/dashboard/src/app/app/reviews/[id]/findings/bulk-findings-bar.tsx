@@ -25,8 +25,8 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
     if (matchCount === 0 || pending) return;
     const label =
       kind === 'dismiss'
-        ? `Dismiss ${matchCount} matching finding${matchCount === 1 ? '' : 's'}?`
-        : `Reopen ${matchCount} matching finding${matchCount === 1 ? '' : 's'}?`;
+        ? `dismiss ${matchCount} finding${matchCount === 1 ? '' : 's'}?`
+        : `reopen ${matchCount} finding${matchCount === 1 ? '' : 's'}?`;
     if (!window.confirm(label)) return;
     start(async () => {
       const res =
@@ -38,21 +38,20 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
   }
 
   return (
-    <div className="mb-4 flex flex-col gap-2 rounded-lg border border-border bg-bg-subtle p-3 text-xs sm:flex-row sm:items-center sm:justify-between">
+    <div className="mb-2 flex flex-col gap-1.5 rounded-md border border-border bg-bg-subtle/60 px-2 py-1.5 font-mono text-[11px] sm:flex-row sm:items-center sm:justify-between">
       <div className="flex flex-1 flex-wrap items-center gap-2">
-        <span className="font-medium text-fg">Bulk action</span>
-        <span className="text-fg-muted">
-          on {matchCount} filtered finding{matchCount === 1 ? '' : 's'}
-        </span>
+        <span className="uppercase tracking-wider text-fg-subtle">bulk</span>
+        <span className="tabular-nums text-fg">{matchCount}</span>
+        <span className="text-fg-muted">filtered</span>
         <input
           type="text"
           value={reason}
           onChange={(e) => setReason(e.target.value.slice(0, 280))}
-          placeholder="Reason (optional)"
-          className="min-w-0 flex-1 rounded-md border border-border bg-bg px-2 py-1 text-xs text-fg outline-none focus:border-accent sm:max-w-xs"
+          placeholder="reason (optional)"
+          className="h-6 min-w-0 flex-1 rounded-sm border border-border bg-bg px-1.5 text-[11px] text-fg outline-none focus:border-accent sm:max-w-xs"
         />
       </div>
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1.5">
         {result?.message ? (
           <span className={result.ok ? 'text-fg-muted' : 'text-severity-critical'}>
             {result.ok ? result.message : result.error}
@@ -62,17 +61,17 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
           type="button"
           onClick={() => run('dismiss')}
           disabled={!canDismiss || pending}
-          className="rounded-md border border-border bg-bg px-3 py-1 text-xs font-medium text-fg hover:bg-bg-subtle disabled:cursor-not-allowed disabled:opacity-40"
+          className="h-6 rounded-sm border border-border bg-bg px-2 text-fg hover:bg-bg-subtle disabled:cursor-not-allowed disabled:opacity-40"
         >
-          {pending ? 'Working' : 'Dismiss all'}
+          {pending ? 'working' : 'dismiss all'}
         </button>
         <button
           type="button"
           onClick={() => run('reopen')}
           disabled={!canReopen || pending}
-          className="rounded-md border border-border bg-bg px-3 py-1 text-xs font-medium text-fg hover:bg-bg-subtle disabled:cursor-not-allowed disabled:opacity-40"
+          className="h-6 rounded-sm border border-border bg-bg px-2 text-fg hover:bg-bg-subtle disabled:cursor-not-allowed disabled:opacity-40"
         >
-          Reopen all
+          reopen all
         </button>
       </div>
     </div>

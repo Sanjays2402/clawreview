@@ -24,10 +24,10 @@ export function RerunForm({ review }: { review: ReviewDetail }) {
         baseSha: review.baseSha,
       });
       if (res.ok && res.reviewId) {
-        setResult({ ok: true, message: `Queued as ${res.reviewId.slice(0, 8)}` });
+        setResult({ ok: true, message: `queued ${res.reviewId.slice(0, 8)}` });
         router.push(`/app/reviews/${res.reviewId}` as any);
       } else {
-        setResult({ ok: false, message: res.error ?? 'Failed' });
+        setResult({ ok: false, message: res.error ?? 'failed' });
       }
     });
   }
@@ -38,13 +38,13 @@ export function RerunForm({ review }: { review: ReviewDetail }) {
         type="button"
         onClick={onClick}
         disabled={pending}
-        className="inline-flex h-9 items-center gap-2 rounded-md bg-fg px-3 text-xs font-medium text-bg transition-colors hover:bg-fg/90 disabled:opacity-50"
+        className="inline-flex h-7 items-center gap-1.5 rounded-sm bg-accent px-2 font-mono text-[11px] font-medium text-accent-fg transition-colors hover:bg-accent/90 disabled:opacity-50"
       >
-        <ArrowsClockwise size={14} weight="duotone" className={pending ? 'animate-spin' : ''} />
-        {pending ? 'Queueing' : 'Re-run review'}
+        <ArrowsClockwise size={12} weight="bold" className={pending ? 'animate-spin' : ''} />
+        {pending ? 'queueing' : 're-run'}
       </button>
       {result ? (
-        <span className={`text-xs ${result.ok ? 'text-emerald-700 dark:text-emerald-400' : 'text-rose-700 dark:text-rose-400'}`}>
+        <span className={`font-mono text-[11px] ${result.ok ? 'text-emerald-400' : 'text-severity-critical'}`}>
           {result.message}
         </span>
       ) : null}

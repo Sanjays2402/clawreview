@@ -18,42 +18,40 @@ export default async function AppOverviewPage() {
   const failRate = weekly.totalReviews > 0 ? weekly.failedReviews / weekly.totalReviews : 0;
 
   return (
-    <div className="space-y-8">
-      <PageHeader title="Overview" description="Last seven days across every installation you can see." />
+    <div className="space-y-4">
+      <PageHeader title="overview" description="last 7d across installations." />
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="Reviews" value={weekly.totalReviews} />
-        <Stat label="Findings" value={weekly.totalFindings} />
-        <Stat label="Spend" value={formatUsd(weekly.totalCostUsd)} />
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="reviews" value={weekly.totalReviews} />
+        <Stat label="findings" value={weekly.totalFindings} />
+        <Stat label="spend" value={formatUsd(weekly.totalCostUsd)} />
         <Stat label="p50 latency" value={formatMs(weekly.p50LatencyMs)} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-3 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Findings per day</div>
-              <div className="text-xs text-fg-muted">Last {weekly.windowDays} days</div>
-            </div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">findings/day</div>
+            <div className="font-mono text-[11px] text-fg-muted">{weekly.windowDays}d</div>
           </CardHeader>
           <CardBody>
             {weekly.dailyFindings.some((n) => n > 0) ? (
-              <Sparkline data={weekly.dailyFindings} width={600} height={64} className="w-full" />
+              <Sparkline data={weekly.dailyFindings} width={600} height={48} className="w-full" />
             ) : (
-              <div className="flex h-16 items-center text-xs text-fg-subtle">No findings landed in this window.</div>
+              <div className="flex h-12 items-center font-mono text-xs text-fg-subtle">no findings in window.</div>
             )}
-            <div className="mt-4 grid grid-cols-3 gap-3 text-xs text-fg-muted">
+            <div className="mt-3 grid grid-cols-3 gap-3 font-mono text-[11px] text-fg-muted">
               <div>
-                <div className="text-fg-subtle">Open</div>
-                <div className="text-base font-medium text-fg">{weekly.openFindings}</div>
+                <div className="uppercase tracking-wider text-fg-subtle">open</div>
+                <div className="text-sm tabular-nums text-fg">{weekly.openFindings}</div>
               </div>
               <div>
-                <div className="text-fg-subtle">Dismissed</div>
-                <div className="text-base font-medium text-fg">{weekly.dismissedFindings}</div>
+                <div className="uppercase tracking-wider text-fg-subtle">dismissed</div>
+                <div className="text-sm tabular-nums text-fg">{weekly.dismissedFindings}</div>
               </div>
               <div>
-                <div className="text-fg-subtle">p95 latency</div>
-                <div className="text-base font-medium text-fg">{formatMs(weekly.p95LatencyMs)}</div>
+                <div className="uppercase tracking-wider text-fg-subtle">p95</div>
+                <div className="text-sm tabular-nums text-fg">{formatMs(weekly.p95LatencyMs)}</div>
               </div>
             </div>
           </CardBody>
@@ -61,25 +59,25 @@ export default async function AppOverviewPage() {
 
         <Card>
           <CardHeader>
-            <div className="text-sm font-medium">Reliability</div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">reliability</div>
           </CardHeader>
           <CardBody>
             <div className="flex items-center gap-3">
               {failRate === 0 ? (
-                <CheckCircle size={28} weight="duotone" className="text-emerald-500" />
+                <CheckCircle size={22} weight="duotone" className="text-emerald-400" />
               ) : (
-                <Warning size={28} weight="duotone" className="text-amber-500" />
+                <Warning size={22} weight="duotone" className="text-severity-medium" />
               )}
               <div>
-                <div className="text-2xl font-semibold tracking-tight">
+                <div className="font-mono text-xl font-semibold tracking-tight tabular-nums">
                   {weekly.completedReviews}/{weekly.totalReviews}
                 </div>
-                <div className="text-xs text-fg-muted">reviews completed cleanly</div>
+                <div className="font-mono text-[11px] text-fg-muted">clean reviews</div>
               </div>
             </div>
             {weekly.failedReviews > 0 ? (
-              <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-                {weekly.failedReviews} failed in the last {weekly.windowDays} days.
+              <div className="mt-2 rounded-sm border border-severity-medium/40 bg-severity-medium/5 px-2 py-1 font-mono text-[11px] text-severity-medium">
+                {weekly.failedReviews} failed in {weekly.windowDays}d.
               </div>
             ) : null}
           </CardBody>
@@ -88,10 +86,8 @@ export default async function AppOverviewPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Findings by severity</div>
-            <div className="text-xs text-fg-muted">{weekly.totalFindings} total</div>
-          </div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">findings by severity</div>
+          <div className="font-mono text-[11px] tabular-nums text-fg-muted">{weekly.totalFindings} total</div>
         </CardHeader>
         <CardBody>
           <SeverityRow counts={weekly.bySeverity} total={weekly.totalFindings} />
@@ -100,21 +96,19 @@ export default async function AppOverviewPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">SLA breaches</div>
-            <div className="flex items-center gap-3 text-xs text-fg-muted">
-              <span>{sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}</span>
-              <Link href={'/app/sla' as any} className="hover:text-fg">View all</Link>
-            </div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">sla breaches</div>
+          <div className="flex items-center gap-3 font-mono text-[11px] text-fg-muted">
+            <span>{sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}</span>
+            <Link href={'/app/sla' as any} className="hover:text-fg">view all</Link>
           </div>
         </CardHeader>
         <CardBody>
           {!sla ? (
-            <div className="text-sm text-fg-muted">SLA endpoint did not respond.</div>
+            <div className="font-mono text-xs text-fg-muted">sla endpoint unreachable.</div>
           ) : sla.totalBreaches === 0 ? (
-            <div className="flex items-center gap-2 text-sm text-fg-muted">
-              <CheckCircle size={18} weight="duotone" className="text-emerald-500" />
-              No open findings are past their SLA window.
+            <div className="flex items-center gap-2 font-mono text-xs text-fg-muted">
+              <CheckCircle size={14} weight="duotone" className="text-emerald-400" />
+              no open findings past sla.
             </div>
           ) : (
             <div className="space-y-3">
@@ -160,19 +154,17 @@ export default async function AppOverviewPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Recent reviews</div>
-            <Link href={'/app/reviews' as any} className="text-xs text-fg-muted hover:text-fg">
-              View all
-            </Link>
-          </div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">recent reviews</div>
+          <Link href={'/app/reviews' as any} className="font-mono text-[11px] text-fg-muted hover:text-fg">
+            view all
+          </Link>
         </CardHeader>
         <CardBody>
           {reviews.length === 0 ? (
             <EmptyState
-              icon={<GitPullRequest size={28} weight="duotone" />}
-              title="No reviews yet"
-              description="Install ClawReview on a repo and open a PR. The first review lands here within seconds."
+              icon={<GitPullRequest size={20} weight="duotone" />}
+              title="no reviews yet"
+              description="install on a repo, open a pr. first review lands in seconds."
             />
           ) : (
             <ul className="divide-y divide-border-subtle">
@@ -180,21 +172,21 @@ export default async function AppOverviewPage() {
                 <li key={r.id}>
                   <Link
                     href={`/app/reviews/${r.id}` as any}
-                    className="grid grid-cols-12 items-center gap-3 py-3 hover:bg-bg-subtle/40"
+                    className="grid grid-cols-12 items-center gap-3 px-1 py-1.5 font-mono text-xs hover:bg-bg-subtle/40"
                   >
                     <div className="col-span-12 sm:col-span-6">
-                      <div className="font-medium text-fg">
-                        {r.owner}/{r.repo} #{r.prNumber}
+                      <div className="truncate text-fg">
+                        {r.owner}/{r.repo} <span className="text-fg-subtle">#</span>{r.prNumber}
                       </div>
-                      <div className="truncate text-xs text-fg-muted">
-                        {r.openFindings} open of {r.totalFindings} findings
+                      <div className="truncate text-[11px] text-fg-muted">
+                        {r.openFindings} open / {r.totalFindings}
                       </div>
                     </div>
-                    <div className="col-span-4 text-xs text-fg-muted sm:col-span-2">
+                    <div className="col-span-4 sm:col-span-2">
                       <StatusPill status={r.status} />
                     </div>
-                    <div className="col-span-4 text-xs text-fg-muted sm:col-span-2">{formatUsd(r.totalCostUsd)}</div>
-                    <div className="col-span-4 text-right text-xs text-fg-muted sm:col-span-2">
+                    <div className="col-span-4 tabular-nums text-fg-muted sm:col-span-2">{formatUsd(r.totalCostUsd)}</div>
+                    <div className="col-span-4 text-right tabular-nums text-fg-muted sm:col-span-2">
                       {formatRelative(r.createdAt)}
                     </div>
                   </Link>

@@ -1,26 +1,45 @@
 'use client';
 
-import { useState, useTransition } from 'react';
-import { ArrowCounterClockwise, X } from '@phosphor-icons/react';
+import { useEffect, useRef, useState, useTransition } from 'react';
+import { ArrowCounterClockwise, X, CaretRight } from '@phosphor-icons/react';
 
-import { SeverityBadge } from '@clawreview/ui';
-
+import { StatusPill } from './status-pill';
 import type { FindingDto } from '@/lib/data';
 import { dismissFindingAction, reopenFindingAction } from '@/app/app/reviews/actions';
+
+const SEV_BAR: Record<string, string> = {
+  critical: 'bg-severity-critical',
+  high: 'bg-severity-high',
+  medium: 'bg-severity-medium',
+  low: 'bg-severity-low',
+  nit: 'bg-severity-nit',
+};
+
+const SEV_TEXT: Record<string, string> = {
+  critical: 'text-severity-critical',
+  high: 'text-severity-high',
+  medium: 'text-severity-medium',
+  low: 'text-severity-low',
+  nit: 'text-severity-nit',
+};
 
 export function FindingRow({ finding, reviewId }: { finding: FindingDto; reviewId: string }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [showReason, setShowReason] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const ref = useRef<HTMLLIElement | null>(null);
 
   const dismissed = finding.state === 'dismissed';
+  const status = dismissed ? 'dismissed' : 'open';
 
-  function onDismiss() {
+  function onDismiss(rsn?: string) {
     setError(null);
     startTransition(async () => {
-      const res = await dismissFindingAction(finding.id, reviewId, reason);
-      if (!res.ok) setError(res.error ?? 'Failed');
+      const res = await dismissFindingAction(finding.id, reviewId, rsn ?? reason);
+      if (!res.ok) setError(res.error ?? 'failed');
       else {
         setShowReason(false);
         setReason('');
@@ -32,94 +51,164 @@ export function FindingRow({ finding, reviewId }: { finding: FindingDto; reviewI
     setError(null);
     startTransition(async () => {
       const res = await reopenFindingAction(finding.id, reviewId);
-      if (!res.ok) setError(res.error ?? 'Failed');
+      if (!res.ok) setError(res.error ?? 'failed');
     });
   }
 
+  // Per-row keyboard shortcuts when focused: x dismiss, r reopen, e expand
+  useEffect(() => {
+    if (!focused) return;
+    function onKey(e: KeyboardEvent) {
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key === 'e') {
+        e.preventDefault();
+        setExpanded((v) => !v);
+      } else if (e.key === 'x' && !dismissed) {
+        e.preventDefault();
+        onDismiss('');
+      } else if (e.key === 'r' && dismissed) {
+        e.preventDefault();
+        onReopen();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [focused, dismissed]); // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
-    <li className={`py-4 ${dismissed ? 'opacity-60' : ''}`}>
-      <div className="flex flex-wrap items-center gap-2">
-        <SeverityBadge severity={finding.severity} />
-        <span className="font-mono text-xs text-fg-muted">
-          {finding.file}
-          {finding.line ? `:${finding.line}` : ''}
-        </span>
-        <span className="rounded border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-fg-subtle">
-          {finding.agent}
-        </span>
-        {dismissed ? (
-          <span className="rounded border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-fg-subtle">
-            Dismissed
-          </span>
-        ) : null}
-      </div>
-      <div className={`mt-1 font-medium text-fg ${dismissed ? 'line-through decoration-fg-subtle' : ''}`}>
-        {finding.title}
-      </div>
-      <div className="mt-1 text-sm text-fg-muted">{finding.rationale}</div>
+    <li
+      ref={ref}
+      tabIndex={0}
+      data-finding-row
+      onFocus={() => setFocused(true)}
+      onBlur={() => setFocused(false)}
+      className={`group relative outline-none ${dismissed ? 'opacity-55' : ''} ${
+        focused ? 'bg-accent/[0.06]' : 'hover:bg-bg-subtle/40'
+      }`}
+    >
+      <span className={`sev-strip ${SEV_BAR[finding.severity] ?? 'bg-severity-nit'}`} />
+      <div className="flex items-start gap-2 pl-3 pr-2 py-1.5">
+        <button
+          type="button"
+          aria-label={expanded ? 'collapse' : 'expand'}
+          onClick={() => setExpanded((v) => !v)}
+          className="mt-0.5 shrink-0 text-fg-subtle hover:text-fg"
+        >
+          <CaretRight size={12} weight="bold" className={expanded ? 'rotate-90 transition-transform' : 'transition-transform'} />
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12px]">
+            <span className={`pill-mono border-transparent ${SEV_TEXT[finding.severity] ?? ''}`}>
+              {finding.severity}
+            </span>
+            <span className="mono truncate text-fg">
+              {finding.file}
+              {finding.line ? <span className="text-fg-subtle">:{finding.line}</span> : null}
+            </span>
+            <span className={`truncate ${dismissed ? 'line-through decoration-fg-subtle text-fg-muted' : 'text-fg'}`}>
+              {finding.title}
+            </span>
+          </div>
+          <div className="mt-0.5 flex items-center gap-2 text-[11px] text-fg-subtle">
+            <span className="font-mono">{finding.agent}</span>
+            {finding.category ? <span>· {finding.category}</span> : null}
+            <span>·</span>
+            <StatusPill status={status} />
+          </div>
 
-      {finding.suggestedPatch ? (
-        <pre className="mt-3 max-h-64 overflow-auto rounded-md border border-border-subtle bg-bg-subtle/50 p-3 font-mono text-[11px] leading-relaxed text-fg">
-          {finding.suggestedPatch}
-        </pre>
-      ) : null}
+          {expanded ? (
+            <div className="mt-2 space-y-2">
+              {finding.rationale ? (
+                <div className="text-xs text-fg-muted">{finding.rationale}</div>
+              ) : null}
+              {finding.suggestedPatch ? (
+                <pre className="overflow-x-auto rounded-sm border border-border-subtle bg-bg-subtle/60 p-2 font-mono text-[11px] leading-[16px] text-fg">
+                  {renderDiff(finding.suggestedPatch)}
+                </pre>
+              ) : null}
+              {dismissed && finding.dismissReason ? (
+                <div className="text-[11px] text-fg-subtle">reason: {finding.dismissReason}</div>
+              ) : null}
 
-      {dismissed && finding.dismissReason ? (
-        <div className="mt-2 text-xs text-fg-subtle">Reason: {finding.dismissReason}</div>
-      ) : null}
-
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        {dismissed ? (
-          <button
-            type="button"
-            onClick={onReopen}
-            disabled={pending}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-1 text-fg-muted hover:bg-bg-muted disabled:opacity-50"
-          >
-            <ArrowCounterClockwise size={14} weight="duotone" />
-            {pending ? 'Reopening' : 'Reopen'}
-          </button>
-        ) : showReason ? (
-          <>
-            <input
-              type="text"
-              value={reason}
-              onChange={(e) => setReason(e.target.value)}
-              placeholder="Reason (optional)"
-              maxLength={280}
-              className="h-8 w-full max-w-xs rounded-md border border-border bg-bg px-2 text-xs text-fg outline-none focus:border-fg-muted sm:w-64"
-            />
-            <button
-              type="button"
-              onClick={onDismiss}
-              disabled={pending}
-              className="inline-flex h-8 items-center rounded-md bg-fg px-2 text-xs font-medium text-bg disabled:opacity-50"
-            >
-              {pending ? 'Dismissing' : 'Confirm dismiss'}
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowReason(false);
-                setReason('');
-              }}
-              className="inline-flex h-8 items-center rounded-md border border-border bg-bg-subtle px-2 text-xs text-fg-muted hover:bg-bg-muted"
-            >
-              Cancel
-            </button>
-          </>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setShowReason(true)}
-            className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-subtle px-2 py-1 text-fg-muted hover:bg-bg-muted"
-          >
-            <X size={14} weight="duotone" />
-            Dismiss
-          </button>
-        )}
-        {error ? <span className="text-rose-600 dark:text-rose-400">{error}</span> : null}
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                {dismissed ? (
+                  <button
+                    type="button"
+                    onClick={onReopen}
+                    disabled={pending}
+                    title="reopen (r)"
+                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 font-mono text-fg-muted hover:bg-bg-muted disabled:opacity-50"
+                  >
+                    <ArrowCounterClockwise size={11} weight="bold" />
+                    {pending ? 'reopening' : 'reopen'} <kbd className="ml-1 rounded-sm border border-border px-1 text-[9px]">r</kbd>
+                  </button>
+                ) : showReason ? (
+                  <>
+                    <input
+                      type="text"
+                      value={reason}
+                      onChange={(e) => setReason(e.target.value)}
+                      placeholder="reason (optional)"
+                      maxLength={280}
+                      className="h-6 w-full max-w-xs rounded-sm border border-border bg-bg px-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent sm:w-64"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => onDismiss()}
+                      disabled={pending}
+                      className="h-6 rounded-sm bg-fg px-2 font-mono text-[11px] text-bg disabled:opacity-50"
+                    >
+                      {pending ? 'dismissing' : 'confirm'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowReason(false);
+                        setReason('');
+                      }}
+                      className="h-6 rounded-sm border border-border bg-bg-subtle px-2 font-mono text-[11px] text-fg-muted hover:bg-bg-muted"
+                    >
+                      cancel
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setShowReason(true)}
+                    title="dismiss (x)"
+                    className="inline-flex items-center gap-1 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 font-mono text-fg-muted hover:bg-bg-muted"
+                  >
+                    <X size={11} weight="bold" />
+                    dismiss <kbd className="ml-1 rounded-sm border border-border px-1 text-[9px]">x</kbd>
+                  </button>
+                )}
+                {error ? <span className="font-mono text-severity-critical">{error}</span> : null}
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
     </li>
+  );
+}
+
+function renderDiff(patch: string) {
+  const lines = patch.split('\n');
+  return (
+    <code>
+      {lines.map((ln, i) => {
+        let cls = 'text-fg-muted';
+        if (ln.startsWith('+')) cls = 'text-emerald-400';
+        else if (ln.startsWith('-')) cls = 'text-severity-critical';
+        else if (ln.startsWith('@@')) cls = 'text-accent';
+        return (
+          <span key={i} className={`block ${cls}`}>
+            {ln || ' '}
+          </span>
+        );
+      })}
+    </code>
   );
 }

@@ -1,4 +1,8 @@
 import type { ReactNode } from 'react';
 export function Kbd({ children }: { children: ReactNode }) {
-  return <kbd className="rounded-md border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] font-mono text-fg-muted">{children}</kbd>;
+  return (
+    <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-border bg-bg-subtle px-1 font-mono text-[10px] font-medium text-fg-muted">
+      {children}
+    </kbd>
+  );
 }

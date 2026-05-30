@@ -4,35 +4,55 @@
 
 @layer base {
   :root {
+    /* light mode opt-in */
     --bg: 0 0% 100%;
-    --bg-subtle: 220 14% 96%;
-    --bg-muted: 220 14% 92%;
-    --fg: 220 18% 12%;
-    --fg-muted: 220 10% 38%;
-    --fg-subtle: 220 8% 54%;
+    --bg-subtle: 220 14% 97%;
+    --bg-muted: 220 14% 93%;
+    --fg: 220 20% 10%;
+    --fg-muted: 220 9% 40%;
+    --fg-subtle: 220 8% 56%;
     --border: 220 13% 88%;
-    --border-subtle: 220 13% 92%;
-    --accent: 252 84% 60%;
+    --border-subtle: 220 13% 93%;
+    --accent: 252 96% 68%;
     --accent-fg: 0 0% 100%;
   }
   .dark {
-    --bg: 220 18% 8%;
-    --bg-subtle: 220 14% 11%;
-    --bg-muted: 220 14% 15%;
-    --fg: 0 0% 98%;
-    --fg-muted: 220 12% 70%;
-    --fg-subtle: 220 10% 52%;
-    --border: 220 14% 18%;
-    --border-subtle: 220 14% 14%;
-    --accent: 252 84% 70%;
-    --accent-fg: 220 18% 10%;
+    /* near-black default */
+    --bg: 240 5% 4%;          /* #0A0A0B */
+    --bg-subtle: 240 4% 8%;
+    --bg-muted: 240 4% 12%;
+    --fg: 0 0% 96%;
+    --fg-muted: 240 5% 65%;
+    --fg-subtle: 240 5% 45%;
+    --border: 240 4% 16%;
+    --border-subtle: 240 4% 12%;
+    --accent: 252 96% 68%;    /* #7C5CFC */
+    --accent-fg: 240 5% 4%;
   }
   html, body {
     @apply bg-bg text-fg antialiased;
-    font-feature-settings: 'cv11', 'ss01';
+    font-feature-settings: 'cv11', 'ss01', 'tnum';
   }
+  /* Tabular numerics everywhere by default for dense tables */
+  table, .tabular { font-variant-numeric: tabular-nums; }
   ::selection {
-    background: hsl(var(--accent) / 0.3);
+    background: hsl(var(--accent) / 0.4);
+    color: hsl(var(--fg));
+  }
+}
+
+@layer components {
+  /* Mono pill: small, uppercase, monospace. Status badges + IDs. */
+  .pill-mono {
+    @apply inline-flex h-5 items-center rounded-sm border px-1.5 font-mono text-[10px] font-medium uppercase tracking-wider;
+  }
+  /* Severity left strip on rows: 2px color bar */
+  .sev-strip {
+    @apply absolute inset-y-0 left-0 w-[3px];
+  }
+  /* Mono inline for file:line / SHA */
+  .mono {
+    @apply font-mono text-[12px] tabular-nums;
   }
 }
 
@@ -44,6 +64,6 @@
 .gradient-radial {
   background:
     radial-gradient(60% 60% at 50% 0%, hsl(var(--accent) / 0.18) 0%, transparent 80%),
-    radial-gradient(40% 40% at 10% 90%, hsl(252 90% 60% / 0.12) 0%, transparent 70%),
-    radial-gradient(40% 40% at 90% 90%, hsl(190 90% 60% / 0.10) 0%, transparent 70%);
+    radial-gradient(40% 40% at 10% 90%, hsl(252 96% 68% / 0.10) 0%, transparent 70%),
+    radial-gradient(40% 40% at 90% 90%, hsl(190 90% 60% / 0.08) 0%, transparent 70%);
 }
