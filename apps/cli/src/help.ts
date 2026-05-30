@@ -13,7 +13,7 @@ Flags:
   --base <ref>       Git base ref. Defaults to origin/main if reachable, otherwise main.
   --head <ref>       Git head ref. Defaults to HEAD.
   --config <path>    Path to a .clawreview.yml. Defaults to ./.clawreview.yml.
-  --format <fmt>     Output format: text (default), json, sarif, junit.
+  --format <fmt>     Output format: text (default), json, sarif, junit, csv.
   --threshold <sev>  Override severity threshold: critical|high|medium|low|nit.
   --concurrency <n>  Max parallel (chunk x agent) tasks.
   --no-color         Disable colored output.

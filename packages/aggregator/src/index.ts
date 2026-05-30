@@ -4,6 +4,7 @@ export * from './comment.js';
 export * from './inline.js';
 export * from './sarif.js';
 export * from './junit.js';
+export * from './csv.js';
 export * from './suppress.js';
 export * from './fingerprint.js';
 export * from './report.js';

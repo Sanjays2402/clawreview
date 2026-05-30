@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { aggregate, toSarif, toJUnitXml, renderReviewReport } from '@clawreview/aggregator';
+import { aggregate, toSarif, toJUnitXml, toCsv, renderReviewReport } from '@clawreview/aggregator';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -153,6 +153,38 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.junit.xml"`,
     );
     return xml;
+  });
+
+  app.get('/api/reviews/:id/findings.csv', async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    const query = z
+      .object({
+        includeDismissed: z
+          .union([z.literal('true'), z.literal('false')])
+          .optional(),
+      })
+      .safeParse(req.query);
+    if (!params.success || !query.success) {
+      reply.code(400);
+      return { error: 'BadInput' };
+    }
+    const rec = await store.get(params.data.id);
+    if (!rec) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    const includeDismissed = query.data.includeDismissed === 'true';
+    const rows = includeDismissed
+      ? rec.findings
+      : rec.findings.filter((f) => f.state === 'open');
+    const csv = toCsv(rows);
+    reply.header('content-type', 'text/csv; charset=utf-8');
+    reply.header(
+      'content-disposition',
+      `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.csv"`,
+    );
+    return csv;
   });
 
   const FindingActionSchema = z.object({
