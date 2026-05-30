@@ -12,7 +12,7 @@
     "push": "prisma db push",
     "migrate": "prisma migrate dev",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "vitest run"
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@clawreview/types": "workspace:*",
