@@ -102,8 +102,9 @@ export default async function AppOverviewPage() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <div className="text-sm font-medium">SLA breaches</div>
-            <div className="text-xs text-fg-muted">
-              {sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}
+            <div className="flex items-center gap-3 text-xs text-fg-muted">
+              <span>{sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}</span>
+              <Link href={'/app/sla' as any} className="hover:text-fg">View all</Link>
             </div>
           </div>
         </CardHeader>

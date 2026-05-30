@@ -339,19 +339,26 @@ export interface SlaBreach {
   prNumber: number;
   severity: Severity;
   findingId: string;
+  fingerprint?: string;
+  file?: string;
+  startLine?: number;
   title: string;
   ageHours: number;
   slaHours: number;
+  overdueHours?: number;
 }
 export interface SlaReport {
   reviewsScanned: number;
   defaultPolicy: SlaPolicy;
+  policy?: SlaPolicy;
+  totalOpen?: number;
   totalBreaches: number;
   bySeverity: Record<Severity, number>;
   breaches: SlaBreach[];
 }
-export async function getSlaBreaches(): Promise<SlaReport | null> {
-  return getJSONStrict<SlaReport>('/api/reviews/sla/breaches?limit=200');
+export async function getSlaBreaches(query = 'limit=200'): Promise<SlaReport | null> {
+  const q = query.startsWith('?') ? query.slice(1) : query;
+  return getJSONStrict<SlaReport>(`/api/reviews/sla/breaches?${q}`);
 }
 
 export type DefaultConfig = Record<string, unknown>;
