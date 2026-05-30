@@ -1,4 +1,10 @@
-import { compareSeverity, type Finding, type Severity, SEVERITY_ORDER } from '@clawreview/types';
+import {
+  compareSeverity,
+  type Finding,
+  type FindingCategory,
+  type Severity,
+  SEVERITY_ORDER,
+} from '@clawreview/types';
 
 export interface AggregateOptions {
   threshold?: Severity;
@@ -11,6 +17,14 @@ export interface AggregateResult {
   findings: Finding[];
   groupedByFile: Array<{ file: string; findings: Finding[] }>;
   totals: Record<Severity, number>;
+  /**
+   * Count of surviving findings grouped by category. Useful for the PR
+   * comment breakdown, dashboard charts, and metrics exporters that want
+   * to slice findings without re-walking the array.
+   */
+  categoryTotals: Partial<Record<FindingCategory, number>>;
+  /** Count of surviving findings grouped by the producing agent. */
+  agentTotals: Record<string, number>;
 }
 
 export function dedupFindings(input: Finding[], radius = 2): Finding[] {
@@ -111,7 +125,13 @@ export function aggregate(findings: Finding[], opts: AggregateOptions = {}): Agg
     low: 0,
     nit: 0,
   };
-  for (const f of truncated) totals[f.severity] += 1;
+  const categoryTotals: Partial<Record<FindingCategory, number>> = {};
+  const agentTotals: Record<string, number> = {};
+  for (const f of truncated) {
+    totals[f.severity] += 1;
+    categoryTotals[f.category] = (categoryTotals[f.category] ?? 0) + 1;
+    agentTotals[f.agent] = (agentTotals[f.agent] ?? 0) + 1;
+  }
 
-  return { findings: truncated, groupedByFile, totals };
+  return { findings: truncated, groupedByFile, totals, categoryTotals, agentTotals };
 }

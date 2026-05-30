@@ -151,9 +151,13 @@ export async function startWorker(logger: Logger): Promise<void> {
     for (const k of Object.keys(aggregated.totals) as Array<keyof typeof aggregated.totals>) {
       aggregated.totals[k] = 0;
     }
+    aggregated.categoryTotals = {};
+    aggregated.agentTotals = {};
     const perFile = new Map<string, typeof aggregated.findings>();
     for (const f of aggregated.findings) {
       aggregated.totals[f.severity] += 1;
+      aggregated.categoryTotals[f.category] = (aggregated.categoryTotals[f.category] ?? 0) + 1;
+      aggregated.agentTotals[f.agent] = (aggregated.agentTotals[f.agent] ?? 0) + 1;
       const list = perFile.get(f.file) ?? [];
       list.push(f);
       perFile.set(f.file, list);

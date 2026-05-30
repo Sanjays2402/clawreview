@@ -38,7 +38,19 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     .map((s) => `${SEV_EMOJI[s]} ${totals[s]} ${SEVERITY_LABELS[s]}`)
     .join(' · ');
 
-  const body: string[] = ['### ClawReview', '', summary, ''];
+  const categoryEntries = Object.entries(result.categoryTotals)
+    .filter(([, n]) => (n ?? 0) > 0)
+    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0));
+  const categoryLine =
+    categoryEntries.length > 0
+      ? categoryEntries.map(([cat, n]) => `\`${cat}\` ${n}`).join(' · ')
+      : '';
+
+  const body: string[] = ['### ClawReview', '', summary];
+  if (categoryLine) {
+    body.push('', categoryLine);
+  }
+  body.push('');
 
   for (const group of result.groupedByFile) {
     body.push(`<details><summary><code>${escapeMd(group.file)}</code> (${group.findings.length})</summary>`);

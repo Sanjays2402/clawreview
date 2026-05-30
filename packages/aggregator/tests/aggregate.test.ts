@@ -58,4 +58,25 @@ describe('aggregate', () => {
     expect(out.totals.low).toBe(5);
     expect(out.totals.nit).toBe(0);
   });
+
+  it('returns categoryTotals and agentTotals over surviving findings', () => {
+    const out = aggregate([
+      f({ category: 'security', agent: 'security', title: 'a' }),
+      f({ category: 'security', agent: 'security', title: 'b', startLine: 50 }),
+      f({ category: 'performance', agent: 'performance', title: 'c', file: 'src/y.ts' }),
+      f({ category: 'style', agent: 'style', severity: 'low', title: 'd', file: 'src/z.ts' }),
+    ]);
+    expect(out.categoryTotals.security).toBe(2);
+    expect(out.categoryTotals.performance).toBe(1);
+    expect(out.categoryTotals.style).toBe(1);
+    expect(out.agentTotals.security).toBe(2);
+    expect(out.agentTotals.performance).toBe(1);
+    expect(out.agentTotals.style).toBe(1);
+  });
+
+  it('omits categories with zero count', () => {
+    const out = aggregate([f({ category: 'security', agent: 'security' })]);
+    expect(out.categoryTotals.security).toBe(1);
+    expect(out.categoryTotals.performance).toBeUndefined();
+  });
 });
