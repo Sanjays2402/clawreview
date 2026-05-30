@@ -16,8 +16,19 @@ describe('health endpoints', () => {
     expect(res.json().ok).toBe(true);
   });
 
-  it('returns ok on /readyz', async () => {
-    const res = await app.inject({ method: 'GET', url: '/readyz' });
+  it('returns shape on /readyz with skipLlm=1', async () => {
+    const res = await app.inject({ method: 'GET', url: '/readyz?skipLlm=1' });
     expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.checks.queue.backend).toBe('memory');
+    expect(body.checks.queue.ok).toBe(true);
+    expect(body.checks.llm).toBeUndefined();
+  });
+
+  it('returns version info', async () => {
+    const res = await app.inject({ method: 'GET', url: '/version' });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().name).toBe('clawreview-server');
   });
 });

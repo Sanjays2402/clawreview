@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { JobHandle, QueueAdapter } from './adapter.js';
+import type { JobHandle, QueueAdapter, QueueHealth } from './adapter.js';
 
 interface PendingJob {
   id: string;
@@ -46,6 +46,16 @@ export class InMemoryQueue implements QueueAdapter {
     this.timer = undefined;
     this.handlers.clear();
     this.pending = [];
+  }
+
+  async health(): Promise<QueueHealth> {
+    return {
+      ok: !this.closed,
+      backend: 'memory',
+      pending: this.pending.length,
+      inflight: this.inflight,
+      ...(this.closed ? { error: 'queue_closed' } : {}),
+    };
   }
 
   private kick(): void {

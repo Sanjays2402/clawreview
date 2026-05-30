@@ -29,4 +29,18 @@ describe('InMemoryQueue', () => {
     expect(seen).toEqual([1]);
     await q.close();
   });
+
+  it('reports health and goes not-ok after close', async () => {
+    const q = new InMemoryQueue();
+    await q.process('x', async () => {});
+    await q.enqueue('x', { n: 1 }, { delayMs: 500 });
+    const open = await q.health();
+    expect(open.ok).toBe(true);
+    expect(open.backend).toBe('memory');
+    expect(open.pending).toBe(1);
+    await q.close();
+    const closed = await q.health();
+    expect(closed.ok).toBe(false);
+    expect(closed.error).toBe('queue_closed');
+  });
 });

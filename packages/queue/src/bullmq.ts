@@ -1,4 +1,4 @@
-import type { JobHandle, QueueAdapter } from './adapter.js';
+import type { JobHandle, QueueAdapter, QueueHealth } from './adapter.js';
 
 export interface BullAdapterOptions {
   redisUrl: string;
@@ -43,6 +43,24 @@ export class BullQueueAdapter implements QueueAdapter {
   async close(): Promise<void> {
     await this.queue?.close();
     await this.worker?.close();
+  }
+
+  async health(): Promise<QueueHealth> {
+    try {
+      const queue = await this.getQueue();
+      const q = queue as unknown as {
+        getJobCounts?: () => Promise<Record<string, number>>;
+      };
+      const counts = await q.getJobCounts?.();
+      return {
+        ok: true,
+        backend: 'bullmq',
+        pending: counts?.waiting ?? counts?.['wait'] ?? 0,
+        inflight: counts?.active ?? 0,
+      };
+    } catch (err) {
+      return { ok: false, backend: 'bullmq', error: (err as Error).message };
+    }
   }
 
   private async getQueue() {
