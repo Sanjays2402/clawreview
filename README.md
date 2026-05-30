@@ -208,6 +208,10 @@ Audit / Stats
 - `GET /api/audit` audit log (filterable)
 - `GET /api/stats/weekly` weekly aggregate
 
+GDPR
+- `GET /api/users/:login/data-export` export a user's data (right to access)
+- `DELETE /api/users/:login` erase a user (right to erasure)
+
 ## Keyboard shortcuts
 
 Global
@@ -525,6 +529,50 @@ On-call runbook for a leaked token:
 3. Grep the server logs for `api auth enabled` to confirm the new token
    count, and for `Unauthorized` 401s coming from unexpected IPs to
    confirm the leaked credential is rejected.
+
+### GDPR data lifecycle
+
+ClawReview persists user identities (GitHub login, optional email),
+active sessions, installation memberships, and audit entries that name
+the user as actor. Two operator endpoints fulfil the right-to-access and
+right-to-erasure obligations under GDPR Articles 15 and 17. Both routes
+are gated by the standard API token auth, are rate limited by the
+per-token limiter, and write an audit row on success.
+
+- `GET /api/users/:login/data-export` returns a JSON bundle with the
+  user profile, sessions, memberships, and the most recent 1000 audit
+  entries the user authored. Sent as an attachment with
+  `content-disposition: user-<login>-export.json` so the dashboard or an
+  operator can hand the file to the requester directly. 404 if no such
+  user exists.
+- `DELETE /api/users/:login` removes the user row and cascades sessions
+  and memberships via Prisma's `onDelete: Cascade`. Audit log entries
+  authored by the user are kept (deleting them would defeat the security
+  purpose of the log) but have their `actorLogin` replaced with a stable
+  per-login pseudonym of the form `erased-user-<12 hex chars>` and any
+  free-form `metaJson` payload cleared. The response is a receipt with
+  `deletedUserId`, `sessionsDeleted`, `membershipsDeleted`,
+  `auditEntriesAnonymised`, `pseudonym`, and `completedAt` that the DPO
+  can archive as evidence of fulfilment.
+
+The pseudonym is deterministic (`sha256("gdpr:<login>")` truncated to
+12 hex chars), so audit rows for the same erased user remain correlatable
+for forensic follow-up, but the original login cannot be recovered from
+the pseudonym alone.
+
+Operational notes:
+
+1. Verify the data subject's identity out of band before calling either
+   endpoint. The endpoints trust the caller's API token; they do not
+   re-verify the subject.
+2. Pull the export first, archive it, then issue the delete. The export
+   route is read-only and safe to retry.
+3. Both calls show up in `GET /api/audit` with `action=gdpr.export` or
+   `action=gdpr.delete` and `subject=user:<login>`, with the API token
+   name as the actor. Keep those rows; they are the audit trail of the
+   erasure itself.
+4. A delete against an unknown login returns 404 and writes no audit
+   row, so retries are idempotent.
 
 ## License
 
