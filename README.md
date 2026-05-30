@@ -307,6 +307,34 @@ podAnnotations:
 These are emitted by `infra/helm/clawreview/values.yaml` under
 `podAnnotations.server` and can be overridden per environment.
 
+### GitHub App installations
+
+The server exposes the GitHub App's tenant graph through two read-only
+endpoints. Both require at least the `readonly` API role and every
+successful call writes an audit row (`installations.list` or
+`installations.repos.list`) so operators can trace tenant enumeration.
+
+- `GET /api/installations` returns every installation of the configured
+  GitHub App. Paginates against the GitHub API internally and returns a
+  flattened list with `count`.
+- `GET /api/installations/:id/repos?per_page=&page=` returns the
+  repositories a specific installation has granted access to. Accepts
+  `per_page` (1..100, default 30) and `page` (1..1000, default 1). The
+  response includes `totalCount`, `page`, and `perPage` so the dashboard
+  can paginate without re-querying GitHub.
+
+When `GITHUB_APP_ID` or `GITHUB_APP_PRIVATE_KEY` is unset, both routes
+return `503 GitHubAppNotConfigured` rather than a silent empty list, so a
+misconfigured deployment is visible to the dashboard and to alerting.
+Non-existent installation ids surface as `404 NotFound`; other upstream
+failures surface as `502 GitHubUpstreamError` with the underlying GitHub
+status echoed in the body. Both routes count against the per-IP and
+per-token rate limits described below.
+
+The `GITHUB_APP_PRIVATE_KEY` env var accepts either real newlines or the
+literal `\n` sequences produced by most secret stores; the route
+normalises them before signing the App JWT.
+
 ### Rate limiting
 
 Two independent limiters protect the API.
