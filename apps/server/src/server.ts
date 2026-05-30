@@ -8,6 +8,7 @@ import { env } from './env.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMetrics } from './plugins/metrics.js';
 import { registerApiAuth } from './plugins/api-auth.js';
+import { registerRateLimit } from './plugins/rate-limit.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerReviewsRoutes } from './routes/reviews.js';
 import { registerInstallationsRoutes } from './routes/installations.js';
@@ -48,6 +49,7 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await registerMetrics(app);
   await registerApiAuth(app);
+  await registerRateLimit(app);
   await registerHealthRoutes(app);
   await registerWebhookRoutes(app);
   await registerReviewsRoutes(app);

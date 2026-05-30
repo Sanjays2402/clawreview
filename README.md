@@ -303,6 +303,39 @@ podAnnotations:
 These are emitted by `infra/helm/clawreview/values.yaml` under
 `podAnnotations.server` and can be overridden per environment.
 
+### Rate limiting
+
+Two independent limiters protect the API.
+
+- **Per IP, global.** `@fastify/rate-limit` is registered with a default
+  of 240 requests per minute keyed on client IP. It applies to every
+  route except `/healthz` and `/metrics`. This is the first line of
+  defence against unauthenticated floods and bots probing the surface.
+- **Per token, scoped to `/api/*`.** A second limiter in
+  `apps/server/src/plugins/rate-limit.ts` keys on the API token name
+  resolved by the api-auth plugin and falls back to client IP when no
+  token is present. The default is 600 requests per minute per token
+  over a sliding 60 second window. The per-token limiter exists so a
+  runaway script using a valid token cannot exhaust the per-IP budget
+  for everyone else behind the same NAT, and so each integration can
+  be rotated or revoked independently when it misbehaves.
+
+When either limiter trips, the server returns `429 Too Many Requests`
+with a `retry-after` header (seconds) and a JSON body containing
+`error`, `limit`, `retryAfter`, and the originating `requestId`. Every
+rate-limited response also includes `x-ratelimit-limit` and
+`x-ratelimit-remaining` so well-behaved clients can back off without
+seeing a 429 first.
+
+Exempt paths (never rate-limited): `/healthz`, `/readyz`, `/metrics`,
+`/version`, and `/webhooks/*`. Webhooks are authenticated by HMAC
+signature in the webhook handler, so they have their own abuse story
+and throttling them would cause GitHub to retry against a healthy
+upstream for no gain.
+
+To disable the per-token limiter locally during load tests, set
+`DISABLE_PER_TOKEN_RATE_LIMIT=1`. This flag is ignored in production.
+
 ### Audit log
 
 Mutations to review and budget state are recorded to the `AuditLog` table
