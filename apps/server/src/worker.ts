@@ -14,6 +14,7 @@ import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
 import { getReviewStore } from './services/review-store.js';
 import { getRepoHealth } from './services/repo-health.js';
+import { getNotifier } from './services/notifier.js';
 import { getBudgetGuard } from './budget.js';
 
 const BUDGET_BLOCKED_BODY = (limitUsd: number, spentUsd: number, periodKey: string) =>
@@ -235,11 +236,22 @@ export async function startWorker(logger: Logger): Promise<void> {
       );
     }
 
-    await store.complete(data.reviewId, summary, aggregated.findings, {
+    const completedRec = await store.complete(data.reviewId, summary, aggregated.findings, {
       commentId: (commentResult as { id?: number } | undefined)?.id,
       checkRunId: (checkRun as { id?: number } | undefined)?.id,
     });
     getRepoHealth().recordSuccess(data.owner, data.repo);
+
+    // Fire-and-forget outbound notification. Failures here must never
+    // break the review pipeline.
+    void getNotifier()
+      .notify(completedRec)
+      .then((r) => {
+        if (r.delivered) log.info({ status: r.status }, 'notifier_delivered');
+        else if (r.skipped) log.debug({ skipped: r.skipped }, 'notifier_skipped');
+        else log.warn({ err: r.error, status: r.status }, 'notifier_failed');
+      })
+      .catch((e) => log.warn({ err: e }, 'notifier_threw'));
 
     // Record cost after the run completes so the next job sees the new total.
     budget.spent(data.installationId, summary.totalCostUsd, limit);
@@ -276,6 +288,17 @@ export async function startWorker(logger: Logger): Promise<void> {
       }
       await store.fail(data.reviewId, err as Error);
       getRepoHealth().recordFailure(data.owner, data.repo, (err as Error).message);
+      // Notify on failure if configured. Best-effort.
+      try {
+        const failedRec = await store.get(data.reviewId);
+        if (failedRec) {
+          void getNotifier()
+            .notify(failedRec)
+            .catch((e) => log.warn({ err: e }, 'notifier_threw_on_failure'));
+        }
+      } catch (e) {
+        log.warn({ err: e }, 'notifier_lookup_failed');
+      }
       throw err;
     }
   });

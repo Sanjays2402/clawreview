@@ -31,6 +31,21 @@ export const env = cleanEnv(process.env, {
   // accounts (login ending with `[bot]`) are reviewed at all.
   REVIEW_BOT_PRS: bool({ default: false }),
   REVIEW_SKIP_AUTHORS: str({ default: '' }),
+
+  // Outbound notification webhook. When set, the server POSTs a JSON
+  // payload with the review summary to this URL on completion (and
+  // optionally on failure). NOTIFY_WEBHOOK_SECRET, if present, signs each
+  // delivery with an HMAC-SHA256 header so the receiver can verify
+  // authenticity. NOTIFY_WEBHOOK_MIN_SEVERITY filters out reviews whose
+  // worst finding is below the threshold (defaults to 'medium').
+  NOTIFY_WEBHOOK_URL: str({ default: '' }),
+  NOTIFY_WEBHOOK_SECRET: str({ default: '' }),
+  NOTIFY_WEBHOOK_MIN_SEVERITY: str({
+    choices: ['critical', 'high', 'medium', 'low', 'nit'],
+    default: 'medium',
+  }),
+  NOTIFY_WEBHOOK_ON_FAILURE: bool({ default: true }),
+  NOTIFY_WEBHOOK_TIMEOUT_MS: num({ default: 5000 }),
 });
 
 export type Env = typeof env;
