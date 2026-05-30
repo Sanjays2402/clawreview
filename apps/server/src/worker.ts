@@ -12,6 +12,7 @@ import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
+import { getReviewStore } from './services/review-store.js';
 
 export async function startWorker(logger: Logger): Promise<void> {
   const queue = getQueue();
@@ -25,13 +26,22 @@ export async function startWorker(logger: Logger): Promise<void> {
 
   await queue.process(REVIEW_JOB, async (raw) => {
     const data = raw as ReviewJobData;
-    const log = logger.child({ job: REVIEW_JOB, owner: data.owner, repo: data.repo, pr: data.prNumber });
+    const log = logger.child({ job: REVIEW_JOB, owner: data.owner, repo: data.repo, pr: data.prNumber, reviewId: data.reviewId });
     log.info({ headSha: data.headSha, reason: data.reason }, 'review job started');
+    const store = getReviewStore();
+    try {
+      await store.markRunning(data.reviewId);
+    } catch (err) {
+      log.warn({ err }, 'markRunning failed');
+    }
 
     if (!env.GITHUB_APP_ID || !env.GITHUB_APP_PRIVATE_KEY) {
       log.warn('GitHub App credentials missing, cannot post results');
+      await store.fail(data.reviewId, new Error('GitHub App credentials not configured'));
       return;
     }
+
+    try {
 
     const auth = new AppAuth({
       appId: env.GITHUB_APP_ID,
@@ -75,19 +85,24 @@ export async function startWorker(logger: Logger): Promise<void> {
       dashboardUrl: `${env.DASHBOARD_URL}/r/${encodeURIComponent(`${data.owner}/${data.repo}`)}/${data.prNumber}`,
     })}`;
 
-    await gh.upsertReviewComment(
+    const commentResult = await gh.upsertReviewComment(
       { owner: data.owner, repo: data.repo, number: data.prNumber },
       { marker: COMMENT_MARKER, body },
     );
 
     const check = deriveCheckRun(aggregated, data.headSha);
-    await gh.createCheckRun(
+    const checkRun = await gh.createCheckRun(
       { owner: data.owner, repo: data.repo },
       {
         ...check,
         head_sha: data.headSha,
       },
     );
+
+    await store.complete(data.reviewId, summary, aggregated.findings, {
+      commentId: (commentResult as { id?: number } | undefined)?.id,
+      checkRunId: (checkRun as { id?: number } | undefined)?.id,
+    });
 
     log.info(
       {
@@ -96,6 +111,11 @@ export async function startWorker(logger: Logger): Promise<void> {
       },
       'review job completed',
     );
+    } catch (err) {
+      log.error({ err }, 'review job failed');
+      await store.fail(data.reviewId, err as Error);
+      throw err;
+    }
   });
 }
 

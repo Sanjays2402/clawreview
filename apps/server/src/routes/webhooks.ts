@@ -5,6 +5,7 @@ import { InstallationPayloadSchema, PullRequestPayloadSchema } from '@clawreview
 
 import { env } from '../env.js';
 import { REVIEW_JOB, getQueue } from '../queue.js';
+import { getReviewStore } from '../services/review-store.js';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
@@ -69,8 +70,18 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
           return { ok: true, ignored: true, reason: 'draft' };
         }
         const queue = getQueue();
+        const store = getReviewStore();
+        const started = await store.start({
+          installationId: payload.installation.id,
+          owner: payload.repository.owner.login,
+          repo: payload.repository.name,
+          prNumber: payload.number,
+          headSha: payload.pull_request.head.sha,
+          baseSha: payload.pull_request.base.sha,
+        });
         const jobId = `pr-${payload.repository.full_name}-${payload.number}-${payload.pull_request.head.sha}`;
         await queue.enqueue(REVIEW_JOB, {
+          reviewId: started.id,
           installationId: payload.installation.id,
           owner: payload.repository.owner.login,
           repo: payload.repository.name,
@@ -79,7 +90,7 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
           baseSha: payload.pull_request.base.sha,
           reason: payload.action,
         }, { jobId });
-        return { ok: true, queued: jobId };
+        return { ok: true, queued: jobId, reviewId: started.id };
       }
 
       if (event === 'installation' || event === 'installation_repositories') {

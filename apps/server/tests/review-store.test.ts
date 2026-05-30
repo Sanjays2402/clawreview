@@ -1,0 +1,152 @@
+import { describe, expect, it, beforeEach } from 'vitest';
+import type { Finding, ReviewSummary } from '@clawreview/types';
+
+import { InMemoryReviewStore } from '../src/services/review-store.js';
+
+function f(over: Partial<Finding> = {}): Finding {
+  return {
+    agent: 'security',
+    category: 'security',
+    severity: 'high',
+    title: 'XSS risk',
+    rationale: 'innerHTML with untrusted data',
+    file: 'src/render.ts',
+    startLine: 12,
+    confidence: 0.8,
+    tags: [],
+    ...over,
+  } as Finding;
+}
+
+function summary(over: Partial<ReviewSummary> = {}): ReviewSummary {
+  return {
+    pullRequest: { owner: 'o', repo: 'r', number: 1, headSha: 'h', baseSha: 'b' },
+    status: 'completed',
+    startedAt: new Date(Date.now() - 60_000).toISOString(),
+    completedAt: new Date().toISOString(),
+    agentExecutions: [
+      {
+        agent: 'security',
+        status: 'ok',
+        durationMs: 1200,
+        promptTokens: 100,
+        completionTokens: 50,
+        costUsd: 0.002,
+        findings: [],
+      },
+    ],
+    totalFindings: 0,
+    totalCostUsd: 0.002,
+    ...over,
+  };
+}
+
+describe('InMemoryReviewStore', () => {
+  let store: InMemoryReviewStore;
+  beforeEach(() => {
+    store = new InMemoryReviewStore();
+  });
+
+  it('starts and lists reviews, newest first', async () => {
+    const a = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'aaa', baseSha: 'b' });
+    await new Promise((r) => setTimeout(r, 5));
+    const b = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 2, headSha: 'bbb', baseSha: 'b' });
+    const list = await store.list({ limit: 10 });
+    expect(list.items.map((x) => x.id)).toEqual([b.id, a.id]);
+  });
+
+  it('filters by installation, owner, repo and status', async () => {
+    await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b' });
+    await store.start({ installationId: 2, owner: 'o', repo: 'r', prNumber: 2, headSha: 'a', baseSha: 'b' });
+    await store.start({ installationId: 1, owner: 'o', repo: 'other', prNumber: 3, headSha: 'a', baseSha: 'b' });
+    expect((await store.list({ limit: 10, installationId: 1 })).items).toHaveLength(2);
+    expect((await store.list({ limit: 10, repo: 'r' })).items).toHaveLength(2);
+    expect((await store.list({ limit: 10, status: 'queued' })).items).toHaveLength(3);
+    expect((await store.list({ limit: 10, status: 'completed' })).items).toHaveLength(0);
+  });
+
+  it('paginates with a cursor', async () => {
+    for (let i = 0; i < 5; i++) {
+      await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: i, headSha: 's' + i, baseSha: 'b' });
+    }
+    const page1 = await store.list({ limit: 2 });
+    expect(page1.items).toHaveLength(2);
+    expect(page1.nextCursor).toBe('2');
+    const page2 = await store.list({ limit: 2, cursor: page1.nextCursor! });
+    expect(page2.items).toHaveLength(2);
+    expect(page2.nextCursor).toBe('4');
+    const page3 = await store.list({ limit: 2, cursor: page2.nextCursor! });
+    expect(page3.items).toHaveLength(1);
+    expect(page3.nextCursor).toBeNull();
+  });
+
+  it('completes a review and stores findings with stable ids', async () => {
+    const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b' });
+    const findings = [f(), f({ severity: 'critical', startLine: 30 })];
+    const done = await store.complete(r.id, summary({ totalFindings: 2 }), findings, { commentId: 5, checkRunId: 9 });
+    expect(done.status).toBe('completed');
+    expect(done.findings).toHaveLength(2);
+    expect(done.findings[0]!.id).toBe(`${r.id}:0`);
+    expect(done.commentId).toBe(5);
+    expect(done.checkRunId).toBe(9);
+    expect(done.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('dismiss and reopen a finding', async () => {
+    const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b' });
+    await store.complete(r.id, summary(), [f()]);
+    const fid = `${r.id}:0`;
+    const dismissed = await store.findingAction(fid, 'dismiss', 'false positive');
+    expect(dismissed?.state).toBe('dismissed');
+    expect(dismissed?.dismissReason).toBe('false positive');
+    const reopened = await store.findingAction(fid, 'reopen');
+    expect(reopened?.state).toBe('open');
+    expect(reopened?.dismissReason).toBeUndefined();
+    const missing = await store.findingAction('nope', 'dismiss');
+    expect(missing).toBeNull();
+  });
+
+  it('fail() records error and duration', async () => {
+    const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b' });
+    await store.markRunning(r.id);
+    await new Promise((res) => setTimeout(res, 10));
+    await store.fail(r.id, new Error('boom'));
+    const got = await store.get(r.id);
+    expect(got?.status).toBe('failed');
+    expect(got?.error).toBe('boom');
+    expect(got?.durationMs).toBeGreaterThan(0);
+  });
+
+  it('weeklyStats computes severity counts, percentiles, and per-agent breakdown', async () => {
+    for (let i = 0; i < 5; i++) {
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: i, headSha: 'h' + i, baseSha: 'b' });
+      // Simulate a queued review starting in the past and finishing now.
+      await store.markRunning(r.id);
+      await new Promise((res) => setTimeout(res, 5 + i * 2));
+      const s = summary({
+        startedAt: new Date(Date.now() - (i + 1) * 1000).toISOString(),
+        completedAt: new Date().toISOString(),
+        agentExecutions: [
+          { agent: 'security', status: i === 4 ? 'error' : 'ok', durationMs: 100 * (i + 1), promptTokens: 0, completionTokens: 0, costUsd: 0.01, findings: [] },
+          { agent: 'performance', status: 'ok', durationMs: 200, promptTokens: 0, completionTokens: 0, costUsd: 0, findings: [] },
+        ],
+        totalCostUsd: 0.01,
+      });
+      await store.complete(r.id, s, [f({ severity: i < 2 ? 'critical' : 'medium' })]);
+    }
+    const stats = await store.weeklyStats(7);
+    expect(stats.totalReviews).toBe(5);
+    expect(stats.completedReviews).toBe(5);
+    expect(stats.totalFindings).toBe(5);
+    expect(stats.openFindings).toBe(5);
+    expect(stats.bySeverity.critical).toBe(2);
+    expect(stats.bySeverity.medium).toBe(3);
+    expect(stats.p50LatencyMs).toBeGreaterThan(0);
+    expect(stats.p95LatencyMs).toBeGreaterThanOrEqual(stats.p50LatencyMs);
+    const security = stats.byAgent.find((a) => a.agent === 'security')!;
+    expect(security.runs).toBe(5);
+    expect(security.errorRate).toBeCloseTo(0.2, 5);
+    expect(stats.dailyFindings).toHaveLength(7);
+    expect(stats.dailyFindings.reduce((a, b) => a + b, 0)).toBe(5);
+  });
+});

@@ -11,6 +11,7 @@ import { registerReviewsRoutes } from './routes/reviews.js';
 import { registerInstallationsRoutes } from './routes/installations.js';
 import { registerAuditRoutes } from './routes/audit.js';
 import { registerConfigRoutes } from './routes/config.js';
+import { registerStatsRoutes } from './routes/stats.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const logger = createLogger({
@@ -45,6 +46,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await registerInstallationsRoutes(app);
   await registerAuditRoutes(app);
   await registerConfigRoutes(app);
+  await registerStatsRoutes(app);
 
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'unhandled error');

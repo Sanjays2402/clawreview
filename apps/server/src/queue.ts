@@ -17,6 +17,7 @@ export function getQueue(): QueueAdapter {
 export const REVIEW_JOB = 'review.pull-request';
 
 export interface ReviewJobData {
+  reviewId: string;
   installationId: number;
   owner: string;
   repo: string;
