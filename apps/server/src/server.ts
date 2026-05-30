@@ -15,6 +15,7 @@ import { registerStatsRoutes } from './routes/stats.js';
 import { registerBudgetRoutes } from './routes/budget.js';
 import { registerRerunRoutes } from './routes/rerun.js';
 import { registerRepoHealthRoutes } from './routes/repo-health.js';
+import { registerSlaRoutes } from './routes/sla.js';
 
 export async function buildServer(): Promise<FastifyInstance> {
   const logger = createLogger({
@@ -53,6 +54,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   await registerBudgetRoutes(app);
   await registerRerunRoutes(app);
   await registerRepoHealthRoutes(app);
+  await registerSlaRoutes(app);
 
   app.setErrorHandler((err, req, reply) => {
     req.log.error({ err }, 'unhandled error');
