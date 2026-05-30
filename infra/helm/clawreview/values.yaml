@@ -57,6 +57,9 @@ secrets:
   llmOpenaiApiKey: ""
   cookieSecret: "change-me"
   sentryDsn: ""
+  # API bearer tokens (comma-separated, name:token format recommended).
+  # The server refuses to start in production when this is empty.
+  apiAuthTokens: ""
 
 resources:
   server:

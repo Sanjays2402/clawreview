@@ -7,6 +7,7 @@ import { createLogger, newRequestId, captureException } from '@clawreview/teleme
 import { env } from './env.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMetrics } from './plugins/metrics.js';
+import { registerApiAuth } from './plugins/api-auth.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerReviewsRoutes } from './routes/reviews.js';
 import { registerInstallationsRoutes } from './routes/installations.js';
@@ -46,6 +47,7 @@ export async function buildServer(): Promise<FastifyInstance> {
   });
 
   await registerMetrics(app);
+  await registerApiAuth(app);
   await registerHealthRoutes(app);
   await registerWebhookRoutes(app);
   await registerReviewsRoutes(app);

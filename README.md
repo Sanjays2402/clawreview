@@ -442,6 +442,57 @@ Under Helm, the DSN is wired through `secrets.sentryDsn` and the
 remaining knobs through `env.SENTRY_*` in `values.yaml` so on-call can
 rotate the DSN without re-rendering the chart.
 
+### API authentication
+
+All `/api/*` routes require a bearer token. Public surfaces stay open:
+`/healthz`, `/readyz`, `/metrics`, and `/webhooks/*` (webhooks are
+independently authenticated by GitHub HMAC signature verification).
+
+Tokens are configured via the `API_AUTH_TOKENS` env var, a comma-separated
+list with optional `name:` prefixes for audit-friendly logging:
+
+```
+API_AUTH_TOKENS="dashboard:$(openssl rand -hex 32),ci:$(openssl rand -hex 32)"
+```
+
+Callers present the token as either header:
+
+```
+Authorization: Bearer <token>
+x-api-key: <token>
+```
+
+Matching is constant-time. Failed auth returns `401 Unauthorized` with a
+`www-authenticate: Bearer realm="clawreview-api"` header and the
+offending request id in the body.
+
+Behaviour by environment:
+
+- `development` and `test`: an empty `API_AUTH_TOKENS` leaves the API
+  open and the server logs `api auth disabled` at startup. This keeps the
+  local `pnpm dev` loop and the existing vitest suite frictionless.
+- `production`: an empty `API_AUTH_TOKENS` is a hard startup failure.
+  The server refuses to boot rather than silently exposing the management
+  API. Set the value via `secrets.apiAuthTokens` in the Helm chart (it is
+  mounted into the server pod through the shared secret as `envFrom`).
+
+The dashboard reads `CLAWREVIEW_API_TOKEN` server-side only (no
+`NEXT_PUBLIC_` prefix) and attaches it to every upstream call from
+`apps/dashboard/src/lib/data.ts`. Rotate by adding a second named token,
+rolling the dashboard with the new value, then removing the old entry on
+the next deploy.
+
+On-call runbook for a leaked token:
+
+1. Remove the affected entry from `secrets.apiAuthTokens` and `helm
+   upgrade`. The server reloads on rollout and the old token stops
+   working immediately (no in-process token cache TTL).
+2. Generate a replacement with `openssl rand -hex 32`, add it under a new
+   name, and roll the dashboard / CI consumers that depend on it.
+3. Grep the server logs for `api auth enabled` to confirm the new token
+   count, and for `Unauthorized` 401s coming from unexpected IPs to
+   confirm the leaked credential is rejected.
+
 ## License
 
 MIT. See `LICENSE`.

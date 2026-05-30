@@ -55,6 +55,14 @@ export const env = cleanEnv(process.env, {
   SENTRY_ENVIRONMENT: str({ default: '' }),
   SENTRY_RELEASE: str({ default: '' }),
   SENTRY_TRACES_SAMPLE_RATE: num({ default: 0 }),
+
+  // API bearer auth. Comma-separated list, optionally name-prefixed:
+  //   API_AUTH_TOKENS="dashboard:abc123,ci:def456"
+  // When empty in development/test the API is open (preserves local DX and
+  // existing tests). When empty in production the server refuses to boot.
+  // Public paths (/healthz, /readyz, /metrics, /webhooks/*) are always
+  // exempt; webhooks have their own HMAC signature verification.
+  API_AUTH_TOKENS: str({ default: '' }),
 });
 
 export type Env = typeof env;

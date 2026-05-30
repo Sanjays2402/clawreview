@@ -7,6 +7,21 @@
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? 'http://localhost:4000';
 
+/**
+ * Server-side bearer token sent to the ClawReview API. Set via
+ * CLAWREVIEW_API_TOKEN (must match one of the server's API_AUTH_TOKENS
+ * entries). Never expose this to the browser; data.ts only runs on the
+ * server in Next.js app router fetches.
+ */
+const API_TOKEN = process.env.CLAWREVIEW_API_TOKEN ?? '';
+
+function authHeaders(extra?: HeadersInit): HeadersInit {
+  const base: Record<string, string> = {};
+  if (API_TOKEN) base['authorization'] = `Bearer ${API_TOKEN}`;
+  if (!extra) return base;
+  return { ...base, ...(extra as Record<string, string>) };
+}
+
 class ApiError extends Error {
   constructor(public status: number, public path: string, message: string) {
     super(message);
@@ -16,7 +31,11 @@ class ApiError extends Error {
 
 async function getJSON<T>(path: string, fallback: T, init?: RequestInit): Promise<T> {
   try {
-    const res = await fetch(`${API}${path}`, { cache: 'no-store', ...init });
+    const res = await fetch(`${API}${path}`, {
+      cache: 'no-store',
+      ...init,
+      headers: authHeaders(init?.headers),
+    });
     if (!res.ok) return fallback;
     return (await res.json()) as T;
   } catch {
@@ -26,7 +45,11 @@ async function getJSON<T>(path: string, fallback: T, init?: RequestInit): Promis
 
 async function getJSONStrict<T>(path: string, init?: RequestInit): Promise<T | null> {
   try {
-    const res = await fetch(`${API}${path}`, { cache: 'no-store', ...init });
+    const res = await fetch(`${API}${path}`, {
+      cache: 'no-store',
+      ...init,
+      headers: authHeaders(init?.headers),
+    });
     if (res.status === 404) return null;
     if (!res.ok) throw new ApiError(res.status, path, await res.text().catch(() => res.statusText));
     return (await res.json()) as T;
@@ -39,8 +62,8 @@ async function getJSONStrict<T>(path: string, init?: RequestInit): Promise<T | n
 async function mutate<T>(path: string, init: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     cache: 'no-store',
-    headers: { 'content-type': 'application/json' },
     ...init,
+    headers: authHeaders({ 'content-type': 'application/json', ...(init.headers as Record<string, string> | undefined) }),
   });
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText);
