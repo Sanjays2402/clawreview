@@ -105,6 +105,21 @@ export class GitHubClient {
   }
 
   /**
+   * Update an existing check-run, used to flip from `in_progress` to
+   * `completed` once the review pipeline finishes (or fails). GitHub
+   * accepts the same payload shape as createCheckRun minus `name`.
+   */
+  async updateCheckRun(
+    id: { owner: string; repo: string; checkRunId: number },
+    payload: Record<string, unknown>,
+  ): Promise<{ id: number }> {
+    return this.api<{ id: number }>(
+      `/repos/${id.owner}/${id.repo}/check-runs/${id.checkRunId}`,
+      { method: 'PATCH', body: payload },
+    );
+  }
+
+  /**
    * Posts a single PR review with N inline comments and an overall body.
    * GitHub requires inline comments to anchor on lines that exist in the
    * patch hunks of the head commit; the caller is responsible for filtering.

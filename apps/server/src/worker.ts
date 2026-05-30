@@ -52,6 +52,8 @@ export async function startWorker(logger: Logger): Promise<void> {
       return;
     }
 
+    let inProgressCheckRunId: number | undefined;
+    let ghForCleanup: GitHubClient | undefined;
     try {
 
     const auth = new AppAuth({
@@ -60,6 +62,7 @@ export async function startWorker(logger: Logger): Promise<void> {
     });
     const token = await auth.installationToken(data.installationId);
     const gh = new GitHubClient(token);
+    ghForCleanup = gh;
 
     const cfgRaw = await gh.fetchRawFile({
       owner: data.owner,
@@ -86,6 +89,31 @@ export async function startWorker(logger: Logger): Promise<void> {
     }
 
     const diff = await gh.fetchPrDiff({ owner: data.owner, repo: data.repo, number: data.prNumber });
+
+    // Surface progress on the PR immediately so a long review run doesn't
+    // look like silence. We create the check-run as `in_progress` here and
+    // PATCH it to `completed` after aggregation. If creation fails (e.g.
+    // missing checks: write permission on the App), we log and continue;
+    // the final createCheckRun fallback below still runs.
+    try {
+      const startedCheck = await gh.createCheckRun(
+        { owner: data.owner, repo: data.repo },
+        {
+          name: 'ClawReview',
+          head_sha: data.headSha,
+          status: 'in_progress',
+          started_at: new Date().toISOString(),
+          output: {
+            title: 'ClawReview is analyzing this PR',
+            summary:
+              'Specialized agents are running over the diff. This check will update once review completes.',
+          },
+        },
+      );
+      inProgressCheckRunId = (startedCheck as { id?: number } | undefined)?.id;
+    } catch (err) {
+      log.warn({ err }, 'in_progress check-run creation failed, continuing');
+    }
 
     const { summary, findings } = await runPipeline({
       diffText: diff,
@@ -167,13 +195,32 @@ export async function startWorker(logger: Logger): Promise<void> {
     }
 
     const check = deriveCheckRun(aggregated, data.headSha);
-    const checkRun = await gh.createCheckRun(
-      { owner: data.owner, repo: data.repo },
-      {
-        ...check,
-        head_sha: data.headSha,
-      },
-    );
+    let checkRun: { id: number } | undefined;
+    if (inProgressCheckRunId) {
+      // Promote the existing in_progress run to completed so PR authors
+      // see a single check entry transition, not two separate ones.
+      try {
+        checkRun = await gh.updateCheckRun(
+          { owner: data.owner, repo: data.repo, checkRunId: inProgressCheckRunId },
+          {
+            ...check,
+            status: 'completed',
+            completed_at: new Date().toISOString(),
+          },
+        );
+      } catch (err) {
+        log.warn({ err, checkRunId: inProgressCheckRunId }, 'check-run update failed, recreating');
+      }
+    }
+    if (!checkRun) {
+      checkRun = await gh.createCheckRun(
+        { owner: data.owner, repo: data.repo },
+        {
+          ...check,
+          head_sha: data.headSha,
+        },
+      );
+    }
 
     await store.complete(data.reviewId, summary, aggregated.findings, {
       commentId: (commentResult as { id?: number } | undefined)?.id,
@@ -192,6 +239,27 @@ export async function startWorker(logger: Logger): Promise<void> {
     );
     } catch (err) {
       log.error({ err }, 'review job failed');
+      // If we already posted an in_progress check-run, flip it to failure
+      // so the PR doesn't show a stuck running check after a crash.
+      if (ghForCleanup && inProgressCheckRunId) {
+        try {
+          await ghForCleanup.updateCheckRun(
+            { owner: data.owner, repo: data.repo, checkRunId: inProgressCheckRunId },
+            {
+              status: 'completed',
+              conclusion: 'failure',
+              completed_at: new Date().toISOString(),
+              output: {
+                title: 'ClawReview failed',
+                summary:
+                  'The review pipeline raised an error before findings could be posted. Check the worker logs or rerun from the dashboard.',
+              },
+            },
+          );
+        } catch (cleanupErr) {
+          log.warn({ err: cleanupErr }, 'failed to mark check-run as failure on cleanup');
+        }
+      }
       await store.fail(data.reviewId, err as Error);
       throw err;
     }
