@@ -1,100 +1,266 @@
-# ClawReview
+# clawreview
+
+Multi-agent AI code reviewer for GitHub pull requests.
 
 ![landing](docs/screenshots/landing.png)
 
+## What it does
 
-Multi-agent AI code reviewer for GitHub pull requests. When a PR opens or updates, ClawReview fans the diff out to specialized reviewer agents in parallel (security, performance, style, accessibility, SQL injection, secrets), aggregates the findings, and posts one high-signal comment back to the PR with severity-tagged issues, file:line anchors, and suggested patches.
+clawreview reviews pull requests with a fan-out of specialised agents (security, performance, style, secrets, sql-injection) and aggregates their output into a single, deduplicated set of findings per PR. GitHub webhooks land on the Fastify server, which enqueues a review job; workers fetch the diff, run agents in parallel against an OpenAI-compatible LLM endpoint, then post line comments and a summary back to the PR. Each finding carries a severity (`critical | high | medium | low | nit`) and a stable id so reruns don't duplicate comments. The dashboard tracks SLA breaches (time-to-first-review, time-to-resolution), per-installation monthly spend against a USD budget, and an append-only audit log of dismiss/reopen/bulk actions. It's keyboard-first (`⌘K` palette, `j/k` row nav), config is a single `.clawreview.yml` file with a live validation playground, and the same engine runs locally via the `clawreview` CLI.
 
-Install it as a GitHub App across an org, or drive the same pipeline locally with the `clawreview` CLI.
+## Features
 
-## Why
+- Per-PR findings list with severity, file/line, agent attribution, dismiss/reopen
+- Bulk actions: `POST /api/reviews/:id/findings/bulk` (dismiss / reopen many)
+- SLA tracking with breach feed (`/api/reviews/sla/breaches`) and dashboard page
+- Append-only audit log (`/api/audit`, `/app/audit`)
+- Monthly budget per installation in USD with reset (`/api/budget/:installationId`)
+- Repo health view and pause/resume per repo
+- Config playground: paste `.clawreview.yml`, hit `POST /api/config/validate`
+- Command palette (`⌘K`) over all dashboard routes
+- Vim-style `j/k`, `gg`, `G`, `e`, `x`, `r` shortcuts on findings list
+- Rerun a review: `POST /api/reviews/rerun`
+- Export findings: CSV, SARIF, JUnit XML, Markdown report
+- Outbound notification webhook with HMAC-SHA256 signing and min-severity filter
+- Author filters: skip bot PRs and a comma-separated allowlist
+- Rate limit (240/min) and Helmet on all server routes
+- Weekly stats endpoint for trends charts
+- Local CLI (`pnpm cli`) that runs the same agent pipeline against a local diff
 
-Single-model reviewers either spam every PR with low-value nits or miss the one critical issue that mattered. Splitting the review into specialists with distinct prompts, then merging through a ranking aggregator, produces fewer comments and higher precision per comment.
+## Stack
+
+- Node 20+, TypeScript, pnpm 10 workspaces, Turborepo
+- Server: Fastify 5, `@fastify/cors`, `@fastify/helmet`, `@fastify/rate-limit`, envalid, zod
+- Dashboard: Next.js 15 (App Router), React 19, Tailwind 3, Phosphor Icons, Geist
+- DB: PostgreSQL 16 via Prisma 5
+- Queue: Redis 7
+- LLM: OpenAI-compatible providers (OpenAI, Hermes, Copilot endpoints)
+- Tests: Vitest, Playwright (dashboard e2e)
 
 ## Architecture
 
-```mermaid
-flowchart LR
-  GH[GitHub PR event] --> WH[Webhook]
-  WH -->|verify HMAC| Q[Queue]
-  Q --> W[Worker]
-  W --> D[Diff splitter]
-  D --> A1[Security agent]
-  D --> A2[Performance agent]
-  D --> A3[Style agent]
-  D --> A4[Secrets agent]
-  D --> A5[A11y agent]
-  A1 & A2 & A3 & A4 & A5 --> AG[Aggregator]
-  AG --> C[PR comment + check-run]
-  AG --> DB[(Postgres)]
-  DB --> UI[Dashboard]
-```
-
-## Quick start (local dogfood)
+GitHub posts to the Fastify server's webhook route. The server validates, persists the review row, and pushes a job onto Redis. A worker pulls the job, hydrates the diff via `@clawreview/github`, runs the agent pipeline from `@clawreview/agents` against an LLM provider from `@clawreview/llm`, then `@clawreview/aggregator` dedupes and ranks findings before they're written back to Postgres and surfaced via the API to the Next.js dashboard.
 
 ```
+ GitHub ─webhook─▶ Fastify server ─▶ Postgres (reviews, findings, audit)
+                       │
+                       ├─▶ Redis queue ─▶ worker ─▶ agents ─▶ LLM provider
+                       │                                       │
+                       └─◀────── findings + comments ◀─────────┘
+ Next.js dashboard ───HTTP───▶ Fastify server
+```
+
+## Quick start
+
+Prereqs: Node >= 20, pnpm 10.33, Docker (for Postgres + Redis), a GitHub App.
+
+```bash
+git clone https://github.com/Sanjays2402/clawreview.git
+cd clawreview
 pnpm install
-cp apps/cli/.env.example apps/cli/.env
-pnpm cli -- run --base main --head HEAD
-```
 
-Point `LLM_BASE_URL` at a local OpenAI-compatible endpoint (the defaults target hermes-agent at `http://127.0.0.1:8642/v1` and the github-copilot proxy at `http://127.0.0.1:4141/v1`).
+# infra
+docker compose -f infra/docker/docker-compose.dev.yml up -d postgres redis
 
-## Run the server stack
+# env
+cp apps/server/.env.example apps/server/.env
+cp apps/dashboard/.env.example apps/dashboard/.env
+cp packages/db/.env.example packages/db/.env
+# fill GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET, LLM_*_API_KEY
 
-```
-docker compose -f infra/docker/docker-compose.dev.yml up -d
+# db
 pnpm db:push
-pnpm server
-pnpm dashboard
+
+# dev (turbo runs server + dashboard + watchers)
+pnpm dev
 ```
 
-Then expose the server through ngrok or cloudflared and register a GitHub App pointing its webhook at `https://<tunnel>/webhooks/github`.
+Dashboard: `http://localhost:3000` · Server: `http://localhost:4000` · Health: `GET /healthz`.
 
-## Per-repo configuration
+## Configuration
 
-Drop a `.clawreview.yml` at the root of any installed repo:
+Server (`apps/server/.env`):
+
+| Variable | Default | Notes |
+|---|---|---|
+| `NODE_ENV` | `development` | `development` / `test` / `production` |
+| `PORT` | `4000` | Fastify port |
+| `HOST` | `0.0.0.0` | bind address |
+| `LOG_LEVEL` | `info` | pino level |
+| `DATABASE_URL` | `postgresql://clawreview:clawreview@localhost:5432/clawreview` | Postgres |
+| `REDIS_URL` | _empty_ | required for queue/worker |
+| `PUBLIC_URL` | `http://localhost:4000` | public server URL |
+| `DASHBOARD_URL` | `http://localhost:3000` | CORS origin |
+| `GITHUB_APP_ID` | _empty_ | GitHub App id |
+| `GITHUB_APP_PRIVATE_KEY` | _empty_ | PEM contents |
+| `GITHUB_WEBHOOK_SECRET` | _empty_ | webhook HMAC secret |
+| `GITHUB_APP_SLUG` | `clawreview` | install URL slug |
+| `LLM_OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI-compatible base |
+| `LLM_OPENAI_API_KEY` | _empty_ | OpenAI key |
+| `LLM_HERMES_BASE_URL` | `http://127.0.0.1:8642/v1` | local Hermes endpoint |
+| `LLM_COPILOT_BASE_URL` | `http://127.0.0.1:4141/v1` | Copilot proxy |
+| `LLM_COPILOT_API_KEY` | _empty_ | Copilot key |
+| `REVIEW_CONCURRENCY` | `6` | parallel reviews per worker |
+| `DEFAULT_MONTHLY_BUDGET_USD` | `50` | default installation budget |
+| `COOKIE_SECRET` | `dev-cookie-secret-change-me` | rotate in prod |
+| `REVIEW_BOT_PRS` | `false` | review PRs from `[bot]` accounts |
+| `REVIEW_SKIP_AUTHORS` | _empty_ | comma-separated logins |
+| `NOTIFY_WEBHOOK_URL` | _empty_ | outbound completion webhook |
+| `NOTIFY_WEBHOOK_SECRET` | _empty_ | HMAC-SHA256 signing key |
+| `NOTIFY_WEBHOOK_MIN_SEVERITY` | `medium` | `critical`/`high`/`medium`/`low`/`nit` |
+| `NOTIFY_WEBHOOK_ON_FAILURE` | `true` | also notify on failed reviews |
+| `NOTIFY_WEBHOOK_TIMEOUT_MS` | `5000` | per-delivery timeout |
+
+Dashboard (`apps/dashboard/.env`): `NEXT_PUBLIC_BASE_URL`, `NEXT_PUBLIC_API_URL`, `PUBLIC_URL`, `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`.
+
+CLI (`apps/cli/.env`): `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_DEFAULT_MODEL`.
+
+Per-repo config (`.clawreview.yml`):
 
 ```yaml
-agents:
-  - security
-  - performance
-  - style
-  - secrets
-severity_threshold: medium
-ignore:
-  - "**/*.snap"
-  - "**/vendor/**"
-models:
-  security: gpt-4o-mini
-  performance: claude-opus-4
-budget:
-  monthly_usd: 25
+agents: [security, performance, style, secrets, sql-injection]
+severity_threshold: low
+ignore: ["**/*.snap", "**/vendor/**", "pnpm-lock.yaml"]
+budget: { monthly_usd: 50 }
+comment_style: detailed
+max_findings_per_file: 10
 ```
 
-## Packages
+More examples in `examples/`.
 
-| Package | Purpose |
-| --- | --- |
-| `apps/server` | Fastify webhook receiver, queue worker, REST surface |
-| `apps/dashboard` | Next.js 15 control plane (installations, repos, reviews, audit log) |
-| `apps/cli` | Local pipeline runner for any git diff |
-| `packages/agents` | Pluggable reviewer agent definitions |
-| `packages/llm` | OpenAI-compatible provider abstraction |
-| `packages/diff` | Unified-diff parser, hunk chunking, language detection |
-| `packages/aggregator` | Dedup, severity ranking, file grouping |
-| `packages/github` | Octokit wrappers and App auth |
-| `packages/db` | Prisma schema + client (Postgres prod, SQLite dev) |
-| `packages/queue` | BullMQ adapter with in-memory fallback |
-| `packages/types` | Shared zod schemas |
-| `packages/telemetry` | OpenTelemetry traces, pino logger |
-| `packages/ui` | Shared React components for the dashboard |
-| `packages/config` | Shared eslint, tsconfig, tailwind, prettier |
+## Scripts
 
-## Status
+Top-level (`package.json`):
 
-Pre-alpha. Schema and config keys may change without notice until 0.1.0.
+- `pnpm build` turbo build across workspaces
+- `pnpm dev` turbo dev (server + dashboard + watchers)
+- `pnpm lint` turbo lint
+- `pnpm typecheck` turbo typecheck
+- `pnpm test` turbo test (vitest in every package)
+- `pnpm format` prettier write
+- `pnpm cli` run the local `clawreview` CLI
+- `pnpm server` run `@clawreview/server` in watch mode
+- `pnpm dashboard` run the Next.js dashboard
+- `pnpm db:push` `prisma db push` against `DATABASE_URL`
+- `pnpm db:migrate` `prisma migrate dev`
+- `pnpm changeset` open a changeset
+- `pnpm release` `changeset publish`
+
+Workspace scripts:
+
+- `apps/server`: `dev`, `start`, `build`, `typecheck`, `test`, `test:integration`
+- `apps/dashboard`: `dev` (port 3000), `build`, `start`, `typecheck`, `lint`, `test:e2e` (Playwright)
+- `apps/cli`: `start`, `build`, `typecheck`, `test`
+- `packages/db`: `build`, `generate`, `push`, `migrate`, `typecheck`, `test`
+
+Repo scripts (`scripts/`):
+
+- `check-secrets.sh` grep for committed secrets
+- `lint-no-emdash.sh` fail on em-dashes in tracked files
+- `seed-dev.ts` seed Postgres with sample reviews
+
+## API
+
+Base URL: `http://localhost:4000`. JSON in/out. All `/api/*` are CORS-restricted to `DASHBOARD_URL`.
+
+Health
+- `GET /healthz` liveness
+- `GET /readyz` readiness (DB/Redis)
+- `GET /version` build info
+
+Webhooks
+- `POST /webhooks/github` GitHub App events (HMAC-verified)
+
+Reviews
+- `GET /api/reviews` list reviews (paginated)
+- `GET /api/reviews/:id` single review with findings
+- `POST /api/reviews/rerun` rerun a review
+- `GET /api/reviews/:id/report.md` Markdown report
+- `GET /api/reviews/:id/findings.csv` CSV export
+- `GET /api/reviews/:id/sarif` SARIF export
+- `GET /api/reviews/:id/junit.xml` JUnit XML export
+- `POST /api/reviews/:id/findings/bulk` bulk dismiss/reopen
+- `GET /api/reviews/sla/breaches` SLA breach feed
+
+Findings
+- `POST /api/findings/:id` mutate a single finding (dismiss/reopen/comment)
+
+Repos
+- `GET /api/repos/health` health across all tracked repos
+- `GET /api/repos/:owner/:repo/health` single repo
+- `POST /api/repos/:owner/:repo/pause` pause reviews
+- `POST /api/repos/:owner/:repo/resume` resume reviews
+
+Installations
+- `GET /api/installations` list installations
+- `GET /api/installations/:id/repos` repos under an installation
+
+Budget
+- `GET /api/budget/:installationId` current month spend + cap
+- `PUT /api/budget/:installationId` update monthly cap
+- `POST /api/budget/:installationId/reset` reset counters
+
+Config
+- `GET /api/config/default` server default config
+- `POST /api/config/validate` validate a `.clawreview.yml` body
+
+Audit / Stats
+- `GET /api/audit` audit log (filterable)
+- `GET /api/stats/weekly` weekly aggregate
+
+## Keyboard shortcuts
+
+Global
+- `⌘ K` open command palette
+- `?` open shortcuts
+- `esc` close overlay
+
+Findings list
+- `j` next finding
+- `k` previous finding
+- `g g` jump to first
+- `G` jump to last
+- `e` expand / collapse focused row
+- `x` dismiss focused finding
+- `r` reopen focused finding
+
+Palette
+- `↑ ↓` navigate results
+- `↵` run command
+- `ctrl n / p` navigate results
+
+Source: `apps/dashboard/src/app/shortcuts/page.tsx` and `apps/dashboard/src/components/command-palette.tsx`.
+
+## Project structure
+
+```
+.
+├── apps
+│   ├── cli         # local clawreview CLI
+│   ├── dashboard   # Next.js 15 dashboard
+│   └── server      # Fastify API + worker
+├── packages
+│   ├── agents      # agent pipeline + prompts + language rules
+│   ├── aggregator  # finding dedupe + ranking
+│   ├── config      # shared eslint/tsconfig/tailwind/prettier
+│   ├── db          # Prisma schema + client
+│   ├── diff        # unified diff parsing
+│   ├── github      # GitHub App / REST helpers
+│   ├── llm         # OpenAI-compatible providers + retry/rate-limit
+│   ├── queue       # Redis queue
+│   ├── telemetry   # pino logger + request ids
+│   ├── types       # zod schemas (severity, findings, config)
+│   └── ui          # shared React components
+├── infra
+│   ├── docker      # Dockerfile.server, Dockerfile.dashboard, compose
+│   ├── helm        # chart
+│   └── terraform   # AWS
+├── examples        # sample .clawreview.yml configs
+├── scripts         # check-secrets, lint-no-emdash, seed-dev
+├── docs            # ADRs, runbooks, API, screenshots
+└── tests           # cross-package fixtures
+```
 
 ## License
 
-MIT, see [LICENSE](./LICENSE).
+MIT. See `LICENSE`.
