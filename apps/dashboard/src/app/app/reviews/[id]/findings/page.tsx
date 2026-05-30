@@ -6,7 +6,9 @@ import { Card, CardBody, CardHeader, EmptyState, SeverityBadge } from '@clawrevi
 
 import { Breadcrumbs } from '@/components/ui/breadcrumbs';
 import { PageHeader } from '@/components/layout/page-header';
-import { getReview, type Severity } from '@/lib/data';
+import { getReview, type Severity, type BulkFindingFilter } from '@/lib/data';
+
+import { BulkFindingsBar } from './bulk-findings-bar';
 
 const SEVERITIES: Array<Severity | 'all'> = ['all', 'critical', 'high', 'medium', 'low', 'nit'];
 const STATES: Array<'all' | 'open' | 'dismissed'> = ['all', 'open', 'dismissed'];
@@ -148,7 +150,19 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
               description="Loosen the filter or jump back to the full review to see everything."
             />
           ) : (
-            <ul className="divide-y divide-border-subtle">
+            <>
+              <BulkFindingsBar
+                reviewId={id}
+                matchCount={filtered.length}
+                stateFilter={stateFilter}
+                filter={(() => {
+                  const f: BulkFindingFilter = {};
+                  if (sevFilter !== 'all') f.severities = [sevFilter as Severity];
+                  if (agentFilter) f.agents = [agentFilter];
+                  return f;
+                })()}
+              />
+              <ul className="divide-y divide-border-subtle">
               {filtered.map((f) => (
                 <li key={f.id} className={`py-3 ${f.state === 'dismissed' ? 'opacity-60' : ''}`}>
                   <div className="flex items-start justify-between gap-4">
@@ -174,7 +188,8 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
                   </div>
                 </li>
               ))}
-            </ul>
+              </ul>
+            </>
           )}
         </CardBody>
       </Card>

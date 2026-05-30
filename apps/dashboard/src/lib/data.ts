@@ -387,3 +387,32 @@ export async function validateConfig(yaml: string): Promise<ValidateConfigResult
 }
 
 export { ApiError };
+
+export interface BulkFindingFilter {
+  severities?: Severity[];
+  categories?: string[];
+  agents?: string[];
+  files?: string[];
+}
+
+export interface BulkFindingResult {
+  ok: true;
+  matched: number;
+  updated: number;
+  action: 'dismiss' | 'reopen';
+}
+
+export async function bulkFindingAction(
+  reviewId: string,
+  action: 'dismiss' | 'reopen',
+  filter: BulkFindingFilter,
+  reason?: string,
+): Promise<BulkFindingResult> {
+  return mutate<BulkFindingResult>(
+    `/api/reviews/${encodeURIComponent(reviewId)}/findings/bulk`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ action, filter, reason }),
+    },
+  );
+}
