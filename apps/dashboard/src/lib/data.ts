@@ -359,4 +359,31 @@ export async function getDefaultConfig(): Promise<DefaultConfig | null> {
   return getJSONStrict<DefaultConfig>('/api/config/default');
 }
 
+export interface ValidateConfigOk {
+  ok: true;
+  config: Record<string, unknown>;
+}
+export interface ValidateConfigErr {
+  ok: false;
+  issues?: { formErrors: string[]; fieldErrors: Record<string, string[]> };
+  error?: string;
+}
+export type ValidateConfigResult = ValidateConfigOk | ValidateConfigErr;
+
+export async function validateConfig(yaml: string): Promise<ValidateConfigResult> {
+  try {
+    const res = await fetch(`${API}/api/config/validate`, {
+      method: 'POST',
+      cache: 'no-store',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ yaml }),
+    });
+    const json = (await res.json().catch(() => null)) as ValidateConfigResult | null;
+    if (json) return json;
+    return { ok: false, error: `Server returned ${res.status}` };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Network error' };
+  }
+}
+
 export { ApiError };
