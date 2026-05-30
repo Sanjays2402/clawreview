@@ -284,4 +284,62 @@ export function reviewJUnitUrl(id: string): string {
   return `${API}/api/reviews/${encodeURIComponent(id)}/junit.xml`;
 }
 
+export interface ServerVersion {
+  name: string;
+  version: string;
+  node: string;
+}
+export async function getServerVersion(): Promise<ServerVersion | null> {
+  return getJSONStrict<ServerVersion>('/version');
+}
+
+export interface ReadinessProbe {
+  name?: string;
+  baseUrl?: string;
+  ok?: boolean;
+  status?: number;
+  latencyMs?: number;
+  error?: string;
+  backend?: string;
+}
+export interface ReadinessReport {
+  ok: boolean;
+  ts: string;
+  checks: {
+    queue?: ReadinessProbe;
+    llm?: ReadinessProbe[];
+  };
+}
+export async function getReadiness(): Promise<ReadinessReport | null> {
+  return getJSONStrict<ReadinessReport>('/readyz');
+}
+
+export interface SlaPolicy { critical: number; high: number; medium: number; low: number; nit: number }
+export interface SlaBreach {
+  reviewId: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  severity: Severity;
+  findingId: string;
+  title: string;
+  ageHours: number;
+  slaHours: number;
+}
+export interface SlaReport {
+  reviewsScanned: number;
+  defaultPolicy: SlaPolicy;
+  totalBreaches: number;
+  bySeverity: Record<Severity, number>;
+  breaches: SlaBreach[];
+}
+export async function getSlaBreaches(): Promise<SlaReport | null> {
+  return getJSONStrict<SlaReport>('/api/reviews/sla/breaches?limit=200');
+}
+
+export type DefaultConfig = Record<string, unknown>;
+export async function getDefaultConfig(): Promise<DefaultConfig | null> {
+  return getJSONStrict<DefaultConfig>('/api/config/default');
+}
+
 export { ApiError };
