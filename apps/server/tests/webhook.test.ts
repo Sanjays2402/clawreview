@@ -115,4 +115,28 @@ describe('POST /webhooks/github', () => {
     expect(third.statusCode).toBe(200);
     expect(third.json().reviewId).not.toBe(firstReviewId);
   });
+
+  it('ignores a PR opened by a bot account by default', async () => {
+    const botPayload = JSON.stringify({
+      ...JSON.parse(PR_PAYLOAD),
+      pull_request: {
+        ...JSON.parse(PR_PAYLOAD).pull_request,
+        user: { login: 'dependabot[bot]' },
+      },
+    });
+    const sig = computeSignature(botPayload, 'test-secret');
+    const res = await app.inject({
+      method: 'POST',
+      url: '/webhooks/github',
+      headers: {
+        'x-github-event': 'pull_request',
+        'x-github-delivery': 'bot-1',
+        'x-hub-signature-256': sig,
+        'content-type': 'application/json',
+      },
+      payload: botPayload,
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true, ignored: true, reason: 'bot' });
+  });
 });

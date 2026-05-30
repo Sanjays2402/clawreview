@@ -1,4 +1,4 @@
-import { cleanEnv, num, port, str, url } from 'envalid';
+import { bool, cleanEnv, num, port, str, url } from 'envalid';
 
 export const env = cleanEnv(process.env, {
   NODE_ENV: str({ choices: ['development', 'test', 'production'], default: 'development' }),
@@ -25,6 +25,12 @@ export const env = cleanEnv(process.env, {
   DEFAULT_MONTHLY_BUDGET_USD: num({ default: 50 }),
 
   COOKIE_SECRET: str({ default: 'dev-cookie-secret-change-me' }),
+
+  // Webhook author filters. Comma-separated logins are skipped before
+  // enqueueing a review. REVIEW_BOT_PRS controls whether GitHub App / bot
+  // accounts (login ending with `[bot]`) are reviewed at all.
+  REVIEW_BOT_PRS: bool({ default: false }),
+  REVIEW_SKIP_AUTHORS: str({ default: '' }),
 });
 
 export type Env = typeof env;

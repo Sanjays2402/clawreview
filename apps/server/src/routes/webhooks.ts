@@ -10,6 +10,26 @@ import { getReviewStore } from '../services/review-store.js';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
+function parseLoginList(raw: string): Set<string> {
+  return new Set(
+    raw
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean),
+  );
+}
+
+export function shouldSkipAuthor(
+  login: string | undefined,
+  opts: { allowBots: boolean; skipAuthors: Set<string> },
+): { skip: true; reason: 'bot' | 'author' } | { skip: false } {
+  if (!login) return { skip: false };
+  const lower = login.toLowerCase();
+  if (opts.skipAuthors.has(lower)) return { skip: true, reason: 'author' };
+  if (!opts.allowBots && lower.endsWith('[bot]')) return { skip: true, reason: 'bot' };
+  return { skip: false };
+}
+
 export async function registerWebhookRoutes(app: FastifyInstance): Promise<void> {
   app.addContentTypeParser(
     'application/json',
@@ -78,6 +98,17 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
         }
         if (payload.pull_request.draft && payload.action !== 'ready_for_review') {
           return { ok: true, ignored: true, reason: 'draft' };
+        }
+        const authorSkip = shouldSkipAuthor(payload.pull_request.user?.login, {
+          allowBots: env.REVIEW_BOT_PRS,
+          skipAuthors: parseLoginList(env.REVIEW_SKIP_AUTHORS),
+        });
+        if (authorSkip.skip) {
+          req.log.info(
+            { author: payload.pull_request.user?.login, reason: authorSkip.reason },
+            'webhook ignored: author filter',
+          );
+          return { ok: true, ignored: true, reason: authorSkip.reason };
         }
         const queue = getQueue();
         const store = getReviewStore();
