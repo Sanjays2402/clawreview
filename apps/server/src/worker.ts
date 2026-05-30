@@ -13,6 +13,7 @@ import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
 import { getReviewStore } from './services/review-store.js';
+import { getRepoHealth } from './services/repo-health.js';
 import { getBudgetGuard } from './budget.js';
 
 const BUDGET_BLOCKED_BODY = (limitUsd: number, spentUsd: number, periodKey: string) =>
@@ -230,6 +231,7 @@ export async function startWorker(logger: Logger): Promise<void> {
       commentId: (commentResult as { id?: number } | undefined)?.id,
       checkRunId: (checkRun as { id?: number } | undefined)?.id,
     });
+    getRepoHealth().recordSuccess(data.owner, data.repo);
 
     // Record cost after the run completes so the next job sees the new total.
     budget.spent(data.installationId, summary.totalCostUsd, limit);
@@ -265,6 +267,7 @@ export async function startWorker(logger: Logger): Promise<void> {
         }
       }
       await store.fail(data.reviewId, err as Error);
+      getRepoHealth().recordFailure(data.owner, data.repo, (err as Error).message);
       throw err;
     }
   });

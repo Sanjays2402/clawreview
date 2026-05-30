@@ -7,6 +7,7 @@ import { env } from '../env.js';
 import { REVIEW_JOB, getQueue } from '../queue.js';
 import { getDeliveryCache } from '../services/delivery-cache.js';
 import { getReviewStore } from '../services/review-store.js';
+import { getRepoHealth } from '../services/repo-health.js';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
@@ -109,6 +110,20 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
             'webhook ignored: author filter',
           );
           return { ok: true, ignored: true, reason: authorSkip.reason };
+        }
+        const health = getRepoHealth();
+        if (health.isPaused(payload.repository.owner.login, payload.repository.name)) {
+          const state = health.get(payload.repository.owner.login, payload.repository.name);
+          req.log.warn(
+            { repo: payload.repository.full_name, reason: state?.pausedReason },
+            'webhook ignored: repo paused',
+          );
+          return {
+            ok: true,
+            ignored: true,
+            reason: 'repo_paused',
+            pausedUntil: state?.pausedUntil,
+          };
         }
         const queue = getQueue();
         const store = getReviewStore();
