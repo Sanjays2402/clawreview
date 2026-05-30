@@ -3,7 +3,7 @@ import { cwd as getCwd } from 'node:process';
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
 import { runPipeline } from '@clawreview/agents';
-import { aggregate, applySuppressions, buildSuppressionMap } from '@clawreview/aggregator';
+import { aggregate, applySuppressions, buildSuppressionMap, toSarif } from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -95,7 +95,7 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     return;
   }
   if (format === 'sarif') {
-    console.log(JSON.stringify(toSarif(result), null, 2));
+    console.log(JSON.stringify(toSarif(result, { commitSha: await safeRevParse(cwd, head) }), null, 2));
     return;
   }
   console.log(renderTextReport(result, { noColor }));
@@ -103,33 +103,11 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   else if (result.totals.high > 0) process.exitCode = 1;
 }
 
-function toSarif(result: ReturnType<typeof aggregate>) {
-  return {
-    $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
-    version: '2.1.0',
-    runs: [
-      {
-        tool: { driver: { name: 'clawreview', version: '0.1.0' } },
-        results: result.findings.map((f) => ({
-          ruleId: `${f.agent}.${f.category}`,
-          level: levelFor(f.severity),
-          message: { text: `${f.title}\n${f.rationale}` },
-          locations: [
-            {
-              physicalLocation: {
-                artifactLocation: { uri: f.file },
-                region: { startLine: f.startLine, endLine: f.endLine ?? f.startLine },
-              },
-            },
-          ],
-        })),
-      },
-    ],
-  };
+async function safeRevParse(cwd: string, ref: string): Promise<string | undefined> {
+  try {
+    return await revParse(ref, cwd);
+  } catch {
+    return undefined;
+  }
 }
 
-function levelFor(severity: Severity): 'error' | 'warning' | 'note' {
-  if (severity === 'critical' || severity === 'high') return 'error';
-  if (severity === 'medium' || severity === 'low') return 'warning';
-  return 'note';
-}
