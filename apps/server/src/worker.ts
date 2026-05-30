@@ -6,7 +6,7 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, buildInlineComments, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
+import { aggregate, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 
@@ -105,6 +105,32 @@ export async function startWorker(logger: Logger): Promise<void> {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
     });
+
+    // Honor inline `clawreview-ignore` / `clawreview-ignore-next-line`
+    // markers in the diff. Suppressed findings are recorded for telemetry
+    // but not posted.
+    const suppressionMap = buildSuppressionMap(diff);
+    const suppression = applySuppressions(aggregated.findings, suppressionMap);
+    if (suppression.suppressed.length > 0) {
+      log.info(
+        { suppressed: suppression.suppressed.length, kept: suppression.kept.length },
+        'inline suppression applied',
+      );
+    }
+    aggregated.findings = suppression.kept;
+    // Recompute totals and per-file groups from the surviving findings so
+    // the rendered comment and the persisted summary agree with the body.
+    for (const k of Object.keys(aggregated.totals) as Array<keyof typeof aggregated.totals>) {
+      aggregated.totals[k] = 0;
+    }
+    const perFile = new Map<string, typeof aggregated.findings>();
+    for (const f of aggregated.findings) {
+      aggregated.totals[f.severity] += 1;
+      const list = perFile.get(f.file) ?? [];
+      list.push(f);
+      perFile.set(f.file, list);
+    }
+    aggregated.groupedByFile = [...perFile.entries()].map(([file, list]) => ({ file, findings: list }));
 
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {
       prNumber: data.prNumber,

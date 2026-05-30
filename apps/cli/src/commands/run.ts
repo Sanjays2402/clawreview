@@ -3,7 +3,7 @@ import { cwd as getCwd } from 'node:process';
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
 import { runPipeline } from '@clawreview/agents';
-import { aggregate } from '@clawreview/aggregator';
+import { aggregate, applySuppressions, buildSuppressionMap } from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -72,6 +72,23 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     threshold: cfg.severity_threshold,
     maxPerFile: cfg.max_findings_per_file,
   });
+
+  // Honor inline clawreview-ignore markers in the diff so local runs match
+  // what the server-side worker would post on a real PR.
+  const suppressionMap = buildSuppressionMap(diff);
+  const suppression = applySuppressions(result.findings, suppressionMap);
+  if (suppression.suppressed.length > 0) {
+    process.stderr.write(
+      kleur.gray(`  suppressed ${suppression.suppressed.length} finding(s) via inline markers\n`),
+    );
+  }
+  result.findings = suppression.kept;
+  // Recompute severity totals to reflect suppressions, so exit codes and
+  // rendered counts match what the user actually sees.
+  for (const k of Object.keys(result.totals) as Array<keyof typeof result.totals>) {
+    result.totals[k] = 0;
+  }
+  for (const f of result.findings) result.totals[f.severity] += 1;
 
   if (format === 'json') {
     console.log(JSON.stringify({ summary, aggregated: result }, null, 2));
