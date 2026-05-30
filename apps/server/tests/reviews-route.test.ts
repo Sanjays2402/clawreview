@@ -235,4 +235,67 @@ describe('reviews and stats routes', () => {
     });
     expect(res.statusCode).toBe(404);
   });
+
+  describe('GET /api/reviews/:id/report.md', () => {
+    it('returns a Markdown report with the right content type and filename', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 1, owner: 'sanjay', repo: 'demo', prNumber: 7, headSha: 'abcdef0', baseSha: 'beef000' });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'sanjay', repo: 'demo', number: 7, headSha: 'abcdef0', baseSha: 'beef000' },
+          status: 'completed',
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 1,
+          totalCostUsd: 0.001,
+          skippedFiles: [],
+        },
+        [
+          { agent: 'security', category: 'security', severity: 'high', title: 'SQLi', rationale: 'unsanitized', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        ],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/report.md` });
+      expect(res.statusCode).toBe(200);
+      expect(res.headers['content-type']).toContain('text/markdown');
+      expect(res.headers['content-disposition']).toContain('clawreview-sanjay-demo-7.md');
+      expect(res.body).toContain('# ClawReview report for sanjay/demo#7');
+      expect(res.body).toContain('SQLi');
+    });
+
+    it('hides dismissed findings unless includeDismissed=true', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 9, headSha: 'h', baseSha: 'b' });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 9, headSha: 'h', baseSha: 'b' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 1,
+          totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        [
+          { agent: 'security', category: 'security', severity: 'high', title: 'Will be dismissed', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        ],
+      );
+      await store.findingAction(`${r.id}:0`, 'dismiss', 'noise');
+
+      const hidden = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/report.md` });
+      expect(hidden.body).not.toContain('Will be dismissed');
+
+      const shown = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/report.md?includeDismissed=true` });
+      expect(shown.body).toContain('Will be dismissed');
+      expect(shown.body).toContain('noise');
+    });
+
+    it('returns 404 for an unknown review id', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/reviews/nope/report.md' });
+      expect(res.statusCode).toBe(404);
+    });
+  });
 });

@@ -1,6 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { aggregate, toSarif } from '@clawreview/aggregator';
+import { aggregate, toSarif, renderReviewReport } from '@clawreview/aggregator';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -42,6 +42,63 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       return { error: 'NotFound' };
     }
     return toReviewDetailDto(rec);
+  });
+
+  app.get('/api/reviews/:id/report.md', async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    const query = z
+      .object({
+        includeDismissed: z
+          .union([z.literal('true'), z.literal('false')])
+          .optional(),
+        includeSuggestedPatches: z
+          .union([z.literal('true'), z.literal('false')])
+          .optional(),
+      })
+      .safeParse(req.query);
+    if (!params.success || !query.success) {
+      reply.code(400);
+      return { error: 'BadInput' };
+    }
+    const rec = await store.get(params.data.id);
+    if (!rec) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    const md = renderReviewReport(
+      {
+        reviewId: rec.id,
+        owner: rec.owner,
+        repo: rec.repo,
+        prNumber: rec.prNumber,
+        headSha: rec.headSha,
+        baseSha: rec.baseSha,
+        status: rec.status,
+        createdAt: rec.createdAt,
+        completedAt: rec.completedAt,
+        durationMs: rec.durationMs,
+        totalCostUsd: rec.totalCostUsd,
+        agentExecutions: rec.agentExecutions.map((ex) => ({
+          agent: ex.agent,
+          status: ex.status,
+          durationMs: ex.durationMs,
+          findings: ex.findings.length,
+          error: ex.error,
+        })),
+      },
+      rec.findings,
+      {
+        includeDismissed: query.data.includeDismissed === 'true',
+        includeSuggestedPatches: query.data.includeSuggestedPatches !== 'false',
+      },
+    );
+    reply.header('content-type', 'text/markdown; charset=utf-8');
+    reply.header(
+      'content-disposition',
+      `attachment; filename="clawreview-${rec.owner}-${rec.repo}-${rec.prNumber}.md"`,
+    );
+    return md;
   });
 
   app.get('/api/reviews/:id/sarif', async (req, reply) => {
