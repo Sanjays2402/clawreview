@@ -1,6 +1,6 @@
 import type { ClawReviewConfig, Finding, ReviewSummary } from '@clawreview/types';
 import { ProviderRegistry } from '@clawreview/llm';
-import { chunkFile, FileContextLoader, filterIgnored, parseUnifiedDiff } from '@clawreview/diff';
+import { chunkFile, FileContextLoader, filterIgnored, parseUnifiedDiff, selectReviewableFiles } from '@clawreview/diff';
 
 import type { Agent } from './agent.js';
 import { AGENT_REGISTRY } from './registry.js';
@@ -28,9 +28,12 @@ export interface PipelineResult {
 export async function runPipeline(input: PipelineInput): Promise<PipelineResult> {
   const startedAt = new Date();
   const parsed = parseUnifiedDiff(input.diffText);
-  const files = filterIgnored(parsed.files, input.config.ignore).filter(
-    (f) => !f.isBinary && f.hunks.length > 0,
-  );
+  const ignored = filterIgnored(parsed.files, input.config.ignore);
+  const { files, skipped } = selectReviewableFiles(ignored, {
+    maxChangedLines: input.config.review_limits?.max_changed_lines_per_file,
+    maxPatchBytes: input.config.review_limits?.max_patch_bytes_per_file,
+    includeGenerated: input.config.review_limits?.include_generated,
+  });
 
   const chunks = files.flatMap((f) => chunkFile(f));
   const contextLoader = input.cwd
@@ -106,6 +109,7 @@ export async function runPipeline(input: PipelineInput): Promise<PipelineResult>
     agentExecutions: merged,
     totalFindings: allFindings.length,
     totalCostUsd: merged.reduce((sum, e) => sum + e.costUsd, 0),
+    skippedFiles: skipped,
   };
 
   return { summary, findings: allFindings };

@@ -18,6 +18,20 @@ export const AgentExecutionSchema = z.object({
 });
 export type AgentExecution = z.infer<typeof AgentExecutionSchema>;
 
+export const SkippedFileSchema = z.object({
+  path: z.string(),
+  reason: z.enum([
+    'binary',
+    'no-hunks',
+    'oversize-lines',
+    'oversize-bytes',
+    'generated-path',
+    'generated-extension',
+  ]),
+  detail: z.string().optional(),
+});
+export type SkippedFileSummary = z.infer<typeof SkippedFileSchema>;
+
 export const ReviewSummarySchema = z.object({
   pullRequest: z.object({
     owner: z.string(),
@@ -32,5 +46,6 @@ export const ReviewSummarySchema = z.object({
   agentExecutions: z.array(AgentExecutionSchema),
   totalFindings: z.number().nonnegative(),
   totalCostUsd: z.number().nonnegative(),
+  skippedFiles: z.array(SkippedFileSchema).default([]),
 });
 export type ReviewSummary = z.infer<typeof ReviewSummarySchema>;

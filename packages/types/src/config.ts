@@ -32,6 +32,17 @@ export const ClawReviewConfigSchema = z.object({
       max: z.number().int().positive().default(20),
     })
     .default({ enabled: false, min_severity: 'medium', max: 20 }),
+  review_limits: z
+    .object({
+      max_changed_lines_per_file: z.number().int().positive().default(1500),
+      max_patch_bytes_per_file: z.number().int().positive().default(256 * 1024),
+      include_generated: z.boolean().default(false),
+    })
+    .default({
+      max_changed_lines_per_file: 1500,
+      max_patch_bytes_per_file: 256 * 1024,
+      include_generated: false,
+    }),
 });
 export type ClawReviewConfig = z.infer<typeof ClawReviewConfigSchema>;
 
