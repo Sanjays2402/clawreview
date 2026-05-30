@@ -23,7 +23,22 @@ const Body = z.object({
  * a "Re-run" button.
  */
 export async function registerRerunRoutes(app: FastifyInstance): Promise<void> {
-  app.post('/api/reviews/rerun', { preHandler: app.requireRole('operator') }, async (req, reply) => {
+  app.post(
+    '/api/reviews/rerun',
+    {
+      preHandler: [
+        app.requireRole('operator'),
+        app.requireInstallation((req) => {
+          // Body is not parsed by the preHandler chain yet, so we run a
+          // light zod parse to surface the installation id. Full validation
+          // still happens in the handler below.
+          const body = (req.body ?? {}) as { installationId?: unknown };
+          const n = Number(body.installationId);
+          return Number.isFinite(n) && n > 0 ? n : null;
+        }),
+      ],
+    },
+    async (req, reply) => {
     const parsed = Body.safeParse(req.body);
     if (!parsed.success) {
       reply.code(400);

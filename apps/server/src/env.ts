@@ -56,8 +56,17 @@ export const env = cleanEnv(process.env, {
   SENTRY_RELEASE: str({ default: '' }),
   SENTRY_TRACES_SAMPLE_RATE: num({ default: 0 }),
 
-  // API bearer auth. Comma-separated list, optionally name-prefixed:
-  //   API_AUTH_TOKENS="dashboard:abc123,ci:def456"
+  // API bearer auth. Comma-separated list, optionally name- and
+  // scope-prefixed:
+  //   API_AUTH_TOKENS="dashboard:admin:*:abc123,acme:operator:42|99:def456"
+  // Supported forms per entry:
+  //   name:role:scopes:token   role one of readonly|operator|admin,
+  //                            scopes either "*" (any installation) or a
+  //                            pipe-separated list of installation ids
+  //                            (multi-tenant scoping)
+  //   name:role:token          unscoped (any installation)
+  //   name:token               legacy, role defaults to admin, unscoped
+  //   token                    legacy bare token, admin, unscoped
   // When empty in development/test the API is open (preserves local DX and
   // existing tests). When empty in production the server refuses to boot.
   // Public paths (/healthz, /readyz, /metrics, /webhooks/*) are always

@@ -8,8 +8,17 @@ import { getBudgetGuard } from '../budget.js';
 const Params = z.object({ installationId: z.coerce.number().int().positive() });
 const PutBody = z.object({ limitUsd: z.number().positive() });
 
+const installationFromParams = (req: { params: unknown }): number | null => {
+  const p = (req.params as { installationId?: unknown }) ?? {};
+  const n = Number(p.installationId);
+  return Number.isFinite(n) && n > 0 ? n : null;
+};
+
 export async function registerBudgetRoutes(app: FastifyInstance): Promise<void> {
-  app.get('/api/budget/:installationId', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
+  app.get(
+    '/api/budget/:installationId',
+    { preHandler: [app.requireRole('readonly'), app.requireInstallation(installationFromParams)] },
+    async (req, reply) => {
     const parsed = Params.safeParse(req.params);
     if (!parsed.success) {
       reply.code(400);
@@ -27,7 +36,10 @@ export async function registerBudgetRoutes(app: FastifyInstance): Promise<void> 
     };
   });
 
-  app.post('/api/budget/:installationId/reset', { preHandler: app.requireRole('operator') }, async (req, reply) => {
+  app.post(
+    '/api/budget/:installationId/reset',
+    { preHandler: [app.requireRole('operator'), app.requireInstallation(installationFromParams)] },
+    async (req, reply) => {
     const parsed = Params.safeParse(req.params);
     if (!parsed.success) {
       reply.code(400);
@@ -47,7 +59,10 @@ export async function registerBudgetRoutes(app: FastifyInstance): Promise<void> 
     return { ok: true };
   });
 
-  app.put('/api/budget/:installationId', { preHandler: app.requireRole('operator') }, async (req, reply) => {
+  app.put(
+    '/api/budget/:installationId',
+    { preHandler: [app.requireRole('operator'), app.requireInstallation(installationFromParams)] },
+    async (req, reply) => {
     const p = Params.safeParse(req.params);
     const b = PutBody.safeParse(req.body);
     if (!p.success || !b.success) {

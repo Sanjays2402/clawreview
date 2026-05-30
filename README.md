@@ -678,6 +678,51 @@ Issue tokens scoped to the minimum role the consumer needs:
 When rotating, prefer adding the new role-scoped token first, switching
 consumers, then removing the old broader-scoped entry.
 
+### Multi-tenant API token scoping
+
+A single ClawReview deployment can serve multiple GitHub App installations
+(one per tenant). API tokens can optionally be pinned to a subset of
+installation ids so that a token issued to one tenant cannot reach another
+tenant's budget, rerun, or installation-scoped endpoints, even if it has
+the right role.
+
+Token format extends to four colon-separated segments:
+
+```
+name:role:scopes:token
+```
+
+Where `scopes` is either `*` (any installation, the default) or a
+pipe-separated list of installation ids, for example `42|99|123`. Comma
+stays reserved as the outer entry separator.
+
+```
+API_AUTH_TOKENS="acme:operator:42|99:$(openssl rand -hex 32),beta:operator:7:$(openssl rand -hex 32),root:admin:*:$(openssl rand -hex 32)"
+```
+
+Three-part `name:role:token` entries (and legacy `name:token` / bare
+tokens) remain unscoped, so existing deployments behave exactly as
+before until they opt in.
+
+Enforcement runs as a Fastify `preHandler` after the role check on every
+installation-scoped route. Currently wired:
+
+- `GET /api/budget/:installationId`
+- `PUT /api/budget/:installationId`
+- `POST /api/budget/:installationId/reset`
+- `POST /api/reviews/rerun` (scoped by `body.installationId`)
+
+A scoped token hitting an installation outside its allow-list gets
+`403 Forbidden` with a message naming the token and the rejected id, and
+the denial is persisted as an audit row with action `api.tenant_forbidden`
+and `subject=installation:<id>` so cross-tenant probing is visible from
+`GET /api/audit`.
+
+Unscoped admin tokens (typically held by the platform operator) keep
+reaching every installation, which preserves the existing on-call and
+support workflows. Tenant-issued tokens should be minted with the
+smallest viable scope and role.
+
 ### GDPR data lifecycle
 
 ClawReview persists user identities (GitHub login, optional email),
