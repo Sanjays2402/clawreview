@@ -149,4 +149,60 @@ describe('InMemoryReviewStore', () => {
     expect(stats.dailyFindings).toHaveLength(7);
     expect(stats.dailyFindings.reduce((a, b) => a + b, 0)).toBe(5);
   });
+
+  describe('bulkFindingAction', () => {
+    it('dismisses every open finding when no filter is supplied', async () => {
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'h', baseSha: 'b' });
+      await store.complete(r.id, summary({ totalFindings: 3 }), [
+        f({ severity: 'high' }),
+        f({ severity: 'medium', category: 'performance', agent: 'performance' }),
+        f({ severity: 'nit', category: 'style', agent: 'style' }),
+      ]);
+      const result = await store.bulkFindingAction(r.id, 'dismiss', {}, 'sweep');
+      expect(result?.matched).toBe(3);
+      expect(result?.changed).toHaveLength(3);
+      const rec = await store.get(r.id);
+      expect(rec!.findings.every((x) => x.state === 'dismissed')).toBe(true);
+      expect(rec!.findings[0]!.dismissReason).toBe('sweep');
+    });
+
+    it('respects severity, category, agent, and file filters', async () => {
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'h', baseSha: 'b' });
+      await store.complete(r.id, summary({ totalFindings: 4 }), [
+        f({ severity: 'high', file: 'a.ts' }),
+        f({ severity: 'medium', category: 'performance', agent: 'performance', file: 'a.ts' }),
+        f({ severity: 'medium', category: 'performance', agent: 'performance', file: 'b.ts' }),
+        f({ severity: 'nit', category: 'style', agent: 'style', file: 'a.ts' }),
+      ]);
+      const result = await store.bulkFindingAction(
+        r.id,
+        'dismiss',
+        { severities: ['medium'], files: ['a.ts'] },
+      );
+      expect(result?.matched).toBe(1);
+      expect(result?.changed).toHaveLength(1);
+      const rec = await store.get(r.id);
+      const dismissed = rec!.findings.filter((x) => x.state === 'dismissed');
+      expect(dismissed).toHaveLength(1);
+      expect(dismissed[0]!.file).toBe('a.ts');
+      expect(dismissed[0]!.severity).toBe('medium');
+    });
+
+    it('reopen only flips currently-dismissed findings, matched still counts the rest', async () => {
+      const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'h', baseSha: 'b' });
+      await store.complete(r.id, summary({ totalFindings: 2 }), [f({ severity: 'high' }), f({ severity: 'high', startLine: 99 })]);
+      // First dismiss one.
+      await store.findingAction(`${r.id}:0`, 'dismiss');
+      const result = await store.bulkFindingAction(r.id, 'reopen', { severities: ['high'] });
+      expect(result?.matched).toBe(2);
+      expect(result?.changed).toEqual([`${r.id}:0`]);
+      const rec = await store.get(r.id);
+      expect(rec!.findings.every((x) => x.state === 'open')).toBe(true);
+    });
+
+    it('returns null for an unknown review id', async () => {
+      const out = await store.bulkFindingAction('nope', 'dismiss', {});
+      expect(out).toBeNull();
+    });
+  });
 });

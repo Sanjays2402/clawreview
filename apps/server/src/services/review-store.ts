@@ -77,6 +77,18 @@ export interface ReviewStore {
     reason?: string,
   ): Promise<StoredFinding | null>;
 
+  /**
+   * Apply an action to every open (or every dismissed, on 'reopen') finding
+   * in a review that matches the supplied filter. Returns the IDs that were
+   * actually mutated so callers can audit-log them.
+   */
+  bulkFindingAction(
+    reviewId: string,
+    action: 'dismiss' | 'reopen',
+    filter: BulkFindingFilter,
+    reason?: string,
+  ): Promise<BulkFindingResult | null>;
+
   /** Aggregated stats over the last `days` days for the dashboard. */
   weeklyStats(days?: number): Promise<WeeklyStats>;
 }
@@ -95,6 +107,24 @@ export interface WeeklyStats {
   bySeverity: Record<Severity, number>;
   byAgent: Array<{ agent: string; runs: number; findings: number; avgMs: number; errorRate: number }>;
   dailyFindings: number[];
+}
+
+export interface BulkFindingFilter {
+  /** Limit to these severities. Empty/undefined matches all severities. */
+  severities?: Severity[];
+  /** Limit to these categories. Empty/undefined matches all categories. */
+  categories?: string[];
+  /** Limit to findings produced by these agents. */
+  agents?: string[];
+  /** Limit to these file paths (exact match). */
+  files?: string[];
+}
+
+export interface BulkFindingResult {
+  reviewId: string;
+  action: 'dismiss' | 'reopen';
+  matched: number;
+  changed: string[];
 }
 
 export class InMemoryReviewStore implements ReviewStore {
@@ -211,6 +241,50 @@ export class InMemoryReviewStore implements ReviewStore {
     if (!rec) return null;
     const f = rec.findings.find((x) => x.id === findingId);
     if (!f) return null;
+    this.applyAction(f, action, reason);
+    rec.updatedAt = new Date().toISOString();
+    return f;
+  }
+
+  async bulkFindingAction(
+    reviewId: string,
+    action: 'dismiss' | 'reopen',
+    filter: BulkFindingFilter,
+    reason?: string,
+  ): Promise<BulkFindingResult | null> {
+    const rec = this.reviews.get(reviewId);
+    if (!rec) return null;
+
+    const sevSet = filter.severities && filter.severities.length > 0 ? new Set(filter.severities) : null;
+    const catSet = filter.categories && filter.categories.length > 0 ? new Set(filter.categories) : null;
+    const agentSet = filter.agents && filter.agents.length > 0 ? new Set(filter.agents) : null;
+    const fileSet = filter.files && filter.files.length > 0 ? new Set(filter.files) : null;
+
+    // 'dismiss' acts on findings currently in 'open' state; 'reopen' acts
+    // on findings currently in 'dismissed' state. Findings already in the
+    // target state are counted in `matched` but not re-mutated.
+    const sourceState: StoredFinding['state'] = action === 'dismiss' ? 'open' : 'dismissed';
+    const changed: string[] = [];
+    let matched = 0;
+    for (const f of rec.findings) {
+      if (sevSet && !sevSet.has(f.severity)) continue;
+      if (catSet && !catSet.has(f.category)) continue;
+      if (agentSet && !agentSet.has(f.agent)) continue;
+      if (fileSet && !fileSet.has(f.file)) continue;
+      matched += 1;
+      if (f.state !== sourceState) continue;
+      this.applyAction(f, action, reason);
+      changed.push(f.id);
+    }
+    if (changed.length > 0) rec.updatedAt = new Date().toISOString();
+    return { reviewId, action, matched, changed };
+  }
+
+  private applyAction(
+    f: StoredFinding,
+    action: 'dismiss' | 'reopen',
+    reason: string | undefined,
+  ): void {
     if (action === 'dismiss') {
       f.state = 'dismissed';
       f.dismissedAt = new Date().toISOString();
@@ -220,8 +294,6 @@ export class InMemoryReviewStore implements ReviewStore {
       f.dismissedAt = undefined;
       f.dismissReason = undefined;
     }
-    rec.updatedAt = new Date().toISOString();
-    return f;
   }
 
   async weeklyStats(days = 7): Promise<WeeklyStats> {

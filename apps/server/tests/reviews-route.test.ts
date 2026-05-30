@@ -178,4 +178,61 @@ describe('reviews and stats routes', () => {
     const res = await app.inject({ method: 'GET', url: '/api/reviews/missing/sarif' });
     expect(res.statusCode).toBe(404);
   });
+
+  it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
+    const store = getReviewStore();
+    const r = await store.start({ installationId: 3, owner: 'o', repo: 'r', prNumber: 9, headSha: 'h9', baseSha: 'b9' });
+    await store.complete(
+      r.id,
+      {
+        pullRequest: { owner: 'o', repo: 'r', number: 9, headSha: 'h9', baseSha: 'b9' },
+        status: 'completed',
+        startedAt: new Date().toISOString(),
+        completedAt: new Date().toISOString(),
+        agentExecutions: [],
+        totalFindings: 3,
+        totalCostUsd: 0,
+      },
+      [
+        { agent: 'style', category: 'style', severity: 'nit', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.4, tags: [] },
+        { agent: 'style', category: 'style', severity: 'nit', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.4, tags: [] },
+        { agent: 'security', category: 'security', severity: 'high', title: 'C', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.9, tags: [] },
+      ],
+    );
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/reviews/${r.id}/findings/bulk`,
+      payload: { action: 'dismiss', reason: 'style sweep', filter: { agents: ['style'] } },
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.ok).toBe(true);
+    expect(body.matched).toBe(2);
+    expect(body.changed).toHaveLength(2);
+
+    const detail = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+    const remainingOpen = detail.json().findings.filter((f: { state: string }) => f.state === 'open');
+    expect(remainingOpen).toHaveLength(1);
+    expect(remainingOpen[0]!.agent).toBe('security');
+  });
+
+  it('rejects a bulk request with an invalid action', async () => {
+    const store = getReviewStore();
+    const r = await store.start({ installationId: 4, owner: 'o', repo: 'r', prNumber: 1, headSha: 'h', baseSha: 'b' });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/reviews/${r.id}/findings/bulk`,
+      payload: { action: 'nuke', filter: {} },
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
+  it('returns 404 from bulk when the review id is unknown', async () => {
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/reviews/missing/findings/bulk',
+      payload: { action: 'dismiss', filter: {} },
+    });
+    expect(res.statusCode).toBe(404);
+  });
 });

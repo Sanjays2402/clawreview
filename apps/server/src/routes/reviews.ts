@@ -78,6 +78,40 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     reason: z.string().max(280).optional(),
   });
 
+  const BulkFindingSchema = z.object({
+    action: z.enum(['dismiss', 'reopen']),
+    reason: z.string().max(280).optional(),
+    filter: z
+      .object({
+        severities: z.array(z.enum(['critical', 'high', 'medium', 'low', 'nit'])).optional(),
+        categories: z.array(z.string().min(1).max(64)).optional(),
+        agents: z.array(z.string().min(1).max(64)).optional(),
+        files: z.array(z.string().min(1).max(512)).optional(),
+      })
+      .default({}),
+  });
+
+  app.post('/api/reviews/:id/findings/bulk', async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    const body = BulkFindingSchema.safeParse(req.body);
+    if (!params.success || !body.success) {
+      reply.code(400);
+      return { error: 'BadInput', issues: body.success ? undefined : body.error.flatten() };
+    }
+    const result = await store.bulkFindingAction(
+      params.data.id,
+      body.data.action,
+      body.data.filter,
+      body.data.reason,
+    );
+    if (!result) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    return { ok: true, ...result };
+  });
+
   app.post('/api/findings/:id', async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
