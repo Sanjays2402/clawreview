@@ -6,11 +6,15 @@ import { Card, CardBody, CardHeader, EmptyState, Sparkline, Stat } from '@clawre
 import { PageHeader } from '@/components/layout/page-header';
 import { SeverityRow } from '@/components/review/severity-row';
 import { StatusPill } from '@/components/review/status-pill';
-import { getRecentReviews, getWeeklyStats } from '@/lib/data';
+import { getRecentReviews, getSlaBreaches, getWeeklyStats } from '@/lib/data';
 import { formatMs, formatRelative, formatUsd } from '@/lib/format';
 
 export default async function AppOverviewPage() {
-  const [reviews, weekly] = await Promise.all([getRecentReviews(8), getWeeklyStats(7)]);
+  const [reviews, weekly, sla] = await Promise.all([
+    getRecentReviews(8),
+    getWeeklyStats(7),
+    getSlaBreaches(),
+  ]);
   const failRate = weekly.totalReviews > 0 ? weekly.failedReviews / weekly.totalReviews : 0;
 
   return (
@@ -91,6 +95,65 @@ export default async function AppOverviewPage() {
         </CardHeader>
         <CardBody>
           <SeverityRow counts={weekly.bySeverity} total={weekly.totalFindings} />
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div className="text-sm font-medium">SLA breaches</div>
+            <div className="text-xs text-fg-muted">
+              {sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}
+            </div>
+          </div>
+        </CardHeader>
+        <CardBody>
+          {!sla ? (
+            <div className="text-sm text-fg-muted">SLA endpoint did not respond.</div>
+          ) : sla.totalBreaches === 0 ? (
+            <div className="flex items-center gap-2 text-sm text-fg-muted">
+              <CheckCircle size={18} weight="duotone" className="text-emerald-500" />
+              No open findings are past their SLA window.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-2xl font-semibold tracking-tight">{sla.totalBreaches}</div>
+              <div className="flex flex-wrap gap-2 text-xs">
+                {(['critical', 'high', 'medium', 'low', 'nit'] as const).map((sev) => {
+                  const n = sla.bySeverity[sev] ?? 0;
+                  if (!n) return null;
+                  return (
+                    <span
+                      key={sev}
+                      className="rounded-full border border-border bg-bg-subtle px-2 py-0.5 text-fg-muted"
+                    >
+                      <span className="font-medium text-fg">{n}</span> {sev}
+                    </span>
+                  );
+                })}
+              </div>
+              <ul className="divide-y divide-border-subtle text-sm">
+                {sla.breaches.slice(0, 5).map((b) => (
+                  <li key={b.findingId} className="py-2">
+                    <Link
+                      href={`/app/reviews/${b.reviewId}` as any}
+                      className="flex items-center justify-between gap-3 hover:bg-bg-subtle/40"
+                    >
+                      <span className="min-w-0 flex-1 truncate">
+                        <span className="font-medium text-fg">
+                          {b.owner}/{b.repo} #{b.prNumber}
+                        </span>{' '}
+                        <span className="text-fg-muted">{b.title}</span>
+                      </span>
+                      <span className="shrink-0 text-xs text-fg-muted">
+                        {Math.round(b.ageHours)}h / {b.slaHours}h
+                      </span>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </CardBody>
       </Card>
 
