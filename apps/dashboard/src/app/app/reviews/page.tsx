@@ -9,11 +9,11 @@ import { listReviews, type ReviewStatus } from '@/lib/data';
 import { formatMs, formatRelative, formatUsd } from '@/lib/format';
 
 const STATUS_TABS: Array<{ key: ReviewStatus | 'all'; label: string }> = [
-  { key: 'all', label: 'All' },
-  { key: 'running', label: 'Running' },
-  { key: 'completed', label: 'Completed' },
-  { key: 'failed', label: 'Failed' },
-  { key: 'queued', label: 'Queued' },
+  { key: 'all', label: 'all' },
+  { key: 'running', label: 'running' },
+  { key: 'completed', label: 'completed' },
+  { key: 'failed', label: 'failed' },
+  { key: 'queued', label: 'queued' },
 ];
 
 interface PageProps {
@@ -31,13 +31,10 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   });
 
   return (
-    <div className="space-y-6">
-      <PageHeader
-        title="Reviews"
-        description="Every review across every installation you can see."
-      />
+    <div className="space-y-3">
+      <PageHeader title="reviews" description="every review across installations you can see." />
 
-      <div className="flex flex-wrap items-center gap-1 border-b border-border-subtle">
+      <div className="flex flex-wrap items-center gap-px border-b border-border-subtle font-mono text-[11px]">
         {STATUS_TABS.map((t) => {
           const active = t.key === status;
           const href = t.key === 'all' ? '/app/reviews' : `/app/reviews?status=${t.key}`;
@@ -45,10 +42,8 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
             <Link
               key={t.key}
               href={href as any}
-              className={`-mb-px border-b-2 px-3 py-2 text-sm transition-colors ${
-                active
-                  ? 'border-fg text-fg'
-                  : 'border-transparent text-fg-muted hover:text-fg'
+              className={`-mb-px border-b-2 px-2.5 py-1 lowercase transition-colors ${
+                active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
               }`}
             >
               {t.label}
@@ -59,50 +54,52 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">{items.length} result{items.length === 1 ? '' : 's'}</div>
-            <div className="text-xs text-fg-muted">Newest first</div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">
+            {items.length} result{items.length === 1 ? '' : 's'}
           </div>
+          <div className="font-mono text-[11px] text-fg-muted">newest first</div>
         </CardHeader>
-        <CardBody>
+        <CardBody className="p-0">
           {items.length === 0 ? (
-            <EmptyState
-              icon={<GitPullRequest size={28} weight="duotone" />}
-              title="No reviews match"
-              description="Try a different status filter, or open a pull request on an installed repo to kick off a review."
-            />
+            <div className="p-3">
+              <EmptyState
+                icon={<GitPullRequest size={20} weight="duotone" />}
+                title="no matches"
+                description="try a different status, or open a pr on an installed repo."
+              />
+            </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[640px] text-sm">
-                <thead className="text-left text-xs uppercase tracking-wide text-fg-subtle">
+              <table className="w-full min-w-[720px] font-mono text-xs">
+                <thead className="bg-bg-subtle/50 text-left text-[10px] uppercase tracking-wider text-fg-subtle">
                   <tr>
-                    <th className="py-2 font-medium">Pull request</th>
-                    <th className="font-medium">Status</th>
-                    <th className="font-medium">Findings</th>
-                    <th className="font-medium">Duration</th>
-                    <th className="font-medium">Spend</th>
-                    <th className="text-right font-medium">Created</th>
+                    <th className="px-3 py-1.5 font-medium">pull request</th>
+                    <th className="font-medium">status</th>
+                    <th className="font-medium">findings</th>
+                    <th className="font-medium tabular-nums">duration</th>
+                    <th className="font-medium tabular-nums">spend</th>
+                    <th className="px-3 text-right font-medium tabular-nums">created</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
                   {items.map((r) => (
                     <tr key={r.id} className="hover:bg-bg-subtle/40">
-                      <td className="py-3">
+                      <td className="px-3 py-1.5">
                         <Link href={`/app/reviews/${r.id}` as any} className="block">
-                          <div className="font-medium text-fg">
-                            {r.owner}/{r.repo} <span className="text-fg-muted">#{r.prNumber}</span>
+                          <div className="text-fg">
+                            {r.owner}/{r.repo} <span className="text-fg-subtle">#</span>{r.prNumber}
                           </div>
-                          <div className="font-mono text-[11px] text-fg-subtle">{r.headSha.slice(0, 8)}</div>
+                          <div className="text-[10px] text-fg-subtle">{r.headSha.slice(0, 8)}</div>
                         </Link>
                       </td>
                       <td><StatusPill status={r.status} /></td>
                       <td className="text-fg-muted">
-                        <span className="font-medium text-fg">{r.openFindings}</span>
-                        <span className="text-fg-subtle"> / {r.totalFindings}</span>
+                        <span className="tabular-nums text-fg">{r.openFindings}</span>
+                        <span className="tabular-nums text-fg-subtle"> / {r.totalFindings}</span>
                       </td>
-                      <td className="text-fg-muted">{formatMs(r.durationMs)}</td>
-                      <td className="text-fg-muted">{formatUsd(r.totalCostUsd)}</td>
-                      <td className="text-right text-fg-muted">{formatRelative(r.createdAt)}</td>
+                      <td className="tabular-nums text-fg-muted">{formatMs(r.durationMs)}</td>
+                      <td className="tabular-nums text-fg-muted">{formatUsd(r.totalCostUsd)}</td>
+                      <td className="px-3 text-right tabular-nums text-fg-muted">{formatRelative(r.createdAt)}</td>
                     </tr>
                   ))}
                 </tbody>

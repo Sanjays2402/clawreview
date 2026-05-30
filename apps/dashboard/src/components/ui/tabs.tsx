@@ -4,14 +4,21 @@ export function Tabs({ tabs }: { tabs: Array<{ id: string; label: string; conten
   const [active, setActive] = useState(tabs[0]?.id);
   return (
     <div>
-      <div className="flex gap-1 border-b border-border-subtle">
+      <div className="flex gap-px border-b border-border-subtle font-mono text-[11px]">
         {tabs.map((t) => (
-          <button key={t.id} onClick={() => setActive(t.id)} className={
-            'px-3 py-2 text-sm ' + (active === t.id ? 'border-b-2 border-accent text-fg' : 'text-fg-muted hover:text-fg')
-          }>{t.label}</button>
+          <button
+            key={t.id}
+            onClick={() => setActive(t.id)}
+            className={
+              '-mb-px border-b-2 px-2.5 py-1 lowercase ' +
+              (active === t.id ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg')
+            }
+          >
+            {t.label}
+          </button>
         ))}
       </div>
-      <div className="pt-4">{tabs.find((t) => t.id === active)?.content}</div>
+      <div className="pt-3">{tabs.find((t) => t.id === active)?.content}</div>
     </div>
   );
 }
