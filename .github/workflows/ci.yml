@@ -50,7 +50,7 @@ jobs:
           test -f apps/server/dist/index.js \
             || (echo "server build did not emit dist/index.js" && exit 1)
       - name: Upload server dist
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: server-dist
           path: apps/server/dist
