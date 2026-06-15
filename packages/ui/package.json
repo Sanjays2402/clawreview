@@ -15,7 +15,7 @@
     "test": "vitest run --passWithNoTests"
   },
   "peerDependencies": {
-    "react": "^19.0.0",
+    "react": "^19.2.7",
     "react-dom": "^19.0.0"
   },
   "dependencies": {
@@ -23,9 +23,9 @@
     "clsx": "^2.1.1"
   },
   "devDependencies": {
-    "@types/react": "^19.0.0",
+    "@types/react": "^19.2.16",
     "@types/react-dom": "^19.0.0",
-    "react": "^19.0.0",
+    "react": "^19.2.7",
     "react-dom": "^19.0.0",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"
