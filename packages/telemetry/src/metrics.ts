@@ -17,6 +17,26 @@ export interface MetricsBundle {
   reviewDurationSeconds: Histogram<string>;
   reviewFindingsTotal: Counter<string>;
   llmCostUsdTotal: Counter<string>;
+  /**
+   * Per-agent execution latency in seconds, labeled by agent name and
+   * by outcome ('ok', 'error', or 'skipped'). Use rate() on this to
+   * spot a single slow agent in a sea of healthy pipeline runs without
+   * having to scrape per-review timing out of the worker logs.
+   *
+   * The buckets are tuned for typical single-agent runs: most agents
+   * complete in 1-15s against a Claude/Hermes endpoint, with the long
+   * tail dominated by retries against rate-limited providers.
+   */
+  agentDurationSeconds: Histogram<string>;
+  /**
+   * Total agent invocations completed, labeled by agent and outcome.
+   * Combined with agentDurationSeconds_sum this gives per-agent average
+   * latency, and on its own it captures the per-agent error rate via
+   * the `outcome="error"` series.
+   */
+  agentInvocationsTotal: Counter<string>;
+  /** Total findings emitted by an agent before dedup/threshold pruning. */
+  agentFindingsTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -101,6 +121,30 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const agentDurationSeconds = new Histogram({
+    name: 'clawreview_agent_duration_seconds',
+    help: 'Per-agent execution latency in seconds, labeled by agent name and outcome.',
+    labelNames: ['agent', 'outcome'],
+    // Tuned for OpenAI-compatible LLM calls; the slowest bucket captures
+    // worst-case retries against rate-limited providers.
+    buckets: [0.25, 0.5, 1, 2.5, 5, 10, 20, 45, 90, 180],
+    registers: [registry],
+  });
+
+  const agentInvocationsTotal = new Counter({
+    name: 'clawreview_agent_invocations_total',
+    help: 'Total agent invocations across all reviews, labeled by agent and outcome.',
+    labelNames: ['agent', 'outcome'],
+    registers: [registry],
+  });
+
+  const agentFindingsTotal = new Counter({
+    name: 'clawreview_agent_findings_total',
+    help: 'Total findings emitted by an agent before dedup/threshold pruning.',
+    labelNames: ['agent'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -151,6 +195,9 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDurationSeconds,
     reviewFindingsTotal,
     llmCostUsdTotal,
+    agentDurationSeconds,
+    agentInvocationsTotal,
+    agentFindingsTotal,
     queueDepth,
     queueInflight,
   };
@@ -202,4 +249,47 @@ export function observeHttp(
 ): void {
   metrics.httpRequestsTotal.inc(labels);
   metrics.httpRequestDurationSeconds.observe(labels, durationSeconds);
+}
+
+/**
+ * Shape compatible with `ReviewSummary.agentExecutions` so the worker
+ * can hand the same array used for logging directly to the metrics
+ * recorder without converting it first. Kept structural (not a typed
+ * import) so the telemetry package stays free of a dependency on
+ * `@clawreview/types`.
+ */
+export interface AgentExecutionLike {
+  agent: string;
+  status: 'ok' | 'error' | 'skipped';
+  durationMs: number;
+  findings: { length: number } | number;
+  error?: string;
+}
+
+/**
+ * Record per-agent metrics for an entire review's worth of executions.
+ * Writes to three series so dashboards can answer:
+ *   - which agent is slow?           agent_duration_seconds (histogram)
+ *   - which agent is erroring?       agent_invocations_total{outcome}
+ *   - which agent is most prolific?  agent_findings_total
+ *
+ * Safe to call with an empty array (no-op). The duration histogram is
+ * skipped for skipped invocations because they did no real work.
+ */
+export function observeAgentExecutions(
+  metrics: MetricsBundle,
+  executions: readonly AgentExecutionLike[],
+): void {
+  for (const e of executions) {
+    const labels = { agent: e.agent, outcome: e.status };
+    metrics.agentInvocationsTotal.inc(labels);
+    if (e.status !== 'skipped') {
+      metrics.agentDurationSeconds.observe(labels, e.durationMs / 1000);
+    }
+    const findingsCount =
+      typeof e.findings === 'number' ? e.findings : e.findings.length;
+    if (findingsCount > 0) {
+      metrics.agentFindingsTotal.inc({ agent: e.agent }, findingsCount);
+    }
+  }
 }

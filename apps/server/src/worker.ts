@@ -9,7 +9,7 @@ import { ProviderRegistry } from '@clawreview/llm';
 import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -293,6 +293,10 @@ export async function startWorker(logger: Logger): Promise<void> {
     for (const f of aggregated.findings) {
       metrics.reviewFindingsTotal.inc({ severity: f.severity });
     }
+    // Per-agent latency / outcome / findings counts derived from the
+    // pipeline summary. Gives operators the same per-agent visibility
+    // the dashboard already has, scoped to Prometheus.
+    observeAgentExecutions(metrics, summary.agentExecutions);
     recordOutcome('completed');
 
     log.info(
