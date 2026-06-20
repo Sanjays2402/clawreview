@@ -13,7 +13,7 @@ Flags:
   --base <ref>       Git base ref. Defaults to origin/main if reachable, otherwise main.
   --head <ref>       Git head ref. Defaults to HEAD.
   --config <path>    Path to a .clawreview.yml. Defaults to ./.clawreview.yml.
-  --format <fmt>     Output format: text (default), json, sarif, junit, csv, gitlab, markdown.
+  --format <fmt>     Output format: text (default), json, sarif, junit, csv, gitlab, markdown, rdjsonl.
   --threshold <sev>  Override severity threshold: critical|high|medium|low|nit.
   --concurrency <n>  Max parallel (chunk x agent) tasks.
   --no-color         Disable colored output.
@@ -28,9 +28,14 @@ Examples:
   clawreview run --config .clawreview.yml --format json
   clawreview run --format markdown > review.md
   clawreview run --format gitlab > gl-code-quality-report.json
+  clawreview run --format rdjsonl | reviewdog -f rdjsonl -reporter=github-pr-review
   clawreview validate --config examples/strict.clawreview.yml
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new
 `;
 }
+/bin/bash: line 4: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-snap-9e73823f4ad6.sh: No space left on device
+/bin/bash: line 5: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-cwd-9e73823f4ad6.txt: No space left on device
+/bin/bash: line 4: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-snap-9e73823f4ad6.sh: No space left on device
+/bin/bash: line 5: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-cwd-9e73823f4ad6.txt: No space left on device
