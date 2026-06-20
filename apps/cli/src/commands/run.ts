@@ -21,6 +21,7 @@ import type { Severity } from '@clawreview/types';
 import type { ParsedArgs } from '../args.js';
 import { loadConfig } from '../config.js';
 import { detectBase, gitDiff, revParse } from '../git.js';
+import { loadClawreviewIgnore, mergeIgnorePatterns } from '../ignorefile.js';
 import { renderTextReport } from '../render.js';
 
 const ENV = {
@@ -45,6 +46,19 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
 
   const cfg = await loadConfig(args.flags.config ? String(args.flags.config) : undefined, cwd);
+  // Layer .clawreviewignore on top of cfg.ignore so reviewers can keep
+  // generated-code or vendored paths out of LLM context without editing
+  // the YAML config. Honored before the pipeline so ignored files never
+  // reach an agent.
+  const ignoreFile = await loadClawreviewIgnore(cwd);
+  if (ignoreFile.patterns.length > 0) {
+    cfg.ignore = mergeIgnorePatterns(cfg.ignore, ignoreFile.patterns);
+    process.stderr.write(
+      kleur.gray(
+        `  loaded ${ignoreFile.patterns.length} pattern(s) from ${ignoreFile.source}\n`,
+      ),
+    );
+  }
   if (args.flags.threshold) {
     cfg.severity_threshold = String(args.flags.threshold) as Severity;
   }
@@ -195,9 +209,3 @@ async function safeRevParse(cwd: string, ref: string): Promise<string | undefine
     return undefined;
   }
 }
-/bin/bash: line 4: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-snap-9e73823f4ad6.sh: No space left on device
-/bin/bash: line 5: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-cwd-9e73823f4ad6.txt: No space left on device
-/bin/bash: line 4: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-snap-9e73823f4ad6.sh: No space left on device
-/bin/bash: line 5: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-cwd-9e73823f4ad6.txt: No space left on device
-/bin/bash: line 4: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-snap-9e73823f4ad6.sh: No space left on device
-/bin/bash: line 5: /var/folders/9g/q9vh1btn7wqdzh95619wmlh80000gn/T/hermes-cwd-9e73823f4ad6.txt: No space left on device
