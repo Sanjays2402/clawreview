@@ -60,8 +60,77 @@ export interface WebhookStore {
    * Filters apply BEFORE the limit so dashboards can paginate cleanly.
    */
   list(opts?: number | WebhookListOptions): WebhookEntry[];
+  /**
+   * Aggregate counts over the stored entries grouped by event, by
+   * (event, action), and bucketed by hour. Used by the
+   * `/api/internal/webhook/stats` endpoint to render dashboards
+   * without shipping the full payload list.
+   */
+  stats(opts?: WebhookStatsOptions): WebhookStats;
   size(): number;
   clear(): void;
+}
+
+/**
+ * Options for `WebhookStore.stats`.
+ *
+ * Mirrors `WebhookListOptions` filters so a dashboard can ask "how many
+ * push events on team/api in the last hour?" with the same vocabulary
+ * it uses for /recent.
+ */
+export interface WebhookStatsOptions {
+  /** Only count entries with `event === this`. */
+  event?: string;
+  /** Only count entries with `repoFullName === this`. */
+  repoFullName?: string;
+  /**
+   * Lower bound on `receivedAt`, in ms since epoch. Entries with an
+   * unparseable `receivedAt` are kept (consistent with `list`).
+   */
+  sinceMs?: number;
+  /**
+   * Number of hourly buckets to roll up at the end of the response,
+   * counting back from `nowMs` (or `Date.now()`). Default: 24.
+   * Capped at 168 (one week) so a misconfigured caller cannot ask the
+   * store for an unbounded sparkline.
+   */
+  hourBuckets?: number;
+  /**
+   * Override "now" for deterministic tests. Production callers should
+   * leave this undefined; tests pin it so the hourly bucket alignment
+   * is stable.
+   */
+  nowMs?: number;
+}
+
+/**
+ * Aggregate summary of the store. The shape is intentionally compact
+ * (counts only, no payloads) because the primary consumer is a small
+ * sparkline / counter widget in the operator dashboard.
+ */
+export interface WebhookStats {
+  /** Total entries that matched the filter set. */
+  total: number;
+  /** Entry count keyed by event (e.g. `pull_request`, `push`). */
+  byEvent: Record<string, number>;
+  /**
+   * Entry count keyed by `event/action`. The slash separator keeps the
+   * key flat and JSON-safe; downstream consumers can split it back. An
+   * entry with no `action` lands under `event/(none)`.
+   */
+  byEventAction: Record<string, number>;
+  /**
+   * Hourly histogram of receivedAt timestamps. `buckets` is ordered
+   * newest-first: index 0 is the bucket ending at `now`, index 1 is
+   * the bucket one hour earlier, and so on. `bucketSizeMs` is fixed at
+   * 3,600,000 today but exposed so consumers don't hard-code it.
+   */
+  hourly: {
+    bucketSizeMs: number;
+    buckets: number[];
+    /** Right edge of the newest bucket (exclusive), in ms since epoch. */
+    nowMs: number;
+  };
 }
 
 const MAX_ENTRIES = 200;
@@ -106,6 +175,45 @@ export class InMemoryWebhookStore implements WebhookStore {
       out.push(e);
     }
     return out;
+  }
+
+  stats(opts: WebhookStatsOptions = {}): WebhookStats {
+    const HOUR_MS = 3_600_000;
+    const nowMs = opts.nowMs ?? Date.now();
+    const hourBuckets = Math.max(1, Math.min(168, opts.hourBuckets ?? 24));
+    const buckets = new Array<number>(hourBuckets).fill(0);
+    const byEvent: Record<string, number> = {};
+    const byEventAction: Record<string, number> = {};
+    let total = 0;
+
+    for (const e of this.entries.values()) {
+      if (opts.event !== undefined && e.event !== opts.event) continue;
+      if (opts.repoFullName !== undefined && e.repoFullName !== opts.repoFullName) continue;
+      const parsed = Date.parse(e.receivedAt);
+      const t = Number.isFinite(parsed) ? parsed : nowMs;
+      if (opts.sinceMs !== undefined && Number.isFinite(parsed) && t < opts.sinceMs) continue;
+      total += 1;
+      byEvent[e.event] = (byEvent[e.event] ?? 0) + 1;
+      const actionKey = `${e.event}/${e.action ?? '(none)'}`;
+      byEventAction[actionKey] = (byEventAction[actionKey] ?? 0) + 1;
+      // Drop into the right hour bucket (newest-first index). Entries
+      // older than the rendered window are still counted toward the
+      // grand totals but excluded from the sparkline.
+      const ageMs = nowMs - t;
+      if (ageMs >= 0) {
+        const idx = Math.floor(ageMs / HOUR_MS);
+        if (idx < hourBuckets) {
+          buckets[idx] = (buckets[idx] ?? 0) + 1;
+        }
+      }
+    }
+
+    return {
+      total,
+      byEvent,
+      byEventAction,
+      hourly: { bucketSizeMs: HOUR_MS, buckets, nowMs },
+    };
   }
 
   size(): number {

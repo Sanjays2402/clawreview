@@ -93,6 +93,51 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
     },
   );
 
+  app.get(
+    '/api/internal/webhook/stats',
+    { preHandler: [app.requireRole('readonly')] },
+    async (req) => {
+      const q = (req.query ?? {}) as {
+        event?: unknown;
+        repo?: unknown;
+        repoFullName?: unknown;
+        sinceMs?: unknown;
+        since?: unknown;
+        hourBuckets?: unknown;
+        hours?: unknown;
+      };
+      const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
+      const repoFullName =
+        typeof q.repoFullName === 'string'
+          ? q.repoFullName
+          : typeof q.repo === 'string'
+            ? q.repo
+            : undefined;
+      let sinceMs: number | undefined;
+      const sinceMsRaw = q.sinceMs;
+      const sinceRaw = q.since;
+      if (typeof sinceMsRaw === 'string' || typeof sinceMsRaw === 'number') {
+        const n = Number(sinceMsRaw);
+        if (Number.isFinite(n) && n >= 0) sinceMs = n;
+      } else if (typeof sinceRaw === 'string' && sinceRaw.length > 0) {
+        const n = Date.parse(sinceRaw);
+        if (Number.isFinite(n)) sinceMs = n;
+      }
+      // Accept `hourBuckets` (matches the store option name) or the
+      // shorter `hours` alias an operator is more likely to type.
+      const hbRaw = q.hourBuckets ?? q.hours;
+      const hourBuckets =
+        hbRaw === undefined ? undefined : Math.max(1, Math.min(168, Number(hbRaw) || 24));
+      const stats = getWebhookStore().stats({ event, repoFullName, sinceMs, hourBuckets });
+      return {
+        requestId: req.id,
+        size: getWebhookStore().size(),
+        appliedFilters: { event, sinceMs, repoFullName, hourBuckets: hourBuckets ?? 24 },
+        ...stats,
+      };
+    },
+  );
+
   app.post(
     '/api/internal/webhook/replay/:deliveryId',
     { preHandler: [app.requireRole('operator')] },
