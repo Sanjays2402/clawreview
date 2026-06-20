@@ -46,6 +46,24 @@ export interface WebhookListOptions {
   sinceMs?: number;
   /** Restrict to entries whose `repoFullName` equals this string. */
   repoFullName?: string;
+  /**
+   * Pagination cursor. When set, the listing skips entries up to AND
+   * INCLUDING the entry with this `deliveryId`, then returns the next
+   * page (still newest-first). Pair with a small `limit` to walk the
+   * store one page at a time:
+   *
+   *   page1 = list({ limit: 25 })
+   *   page2 = list({ limit: 25, after: page1[page1.length-1].deliveryId })
+   *
+   * Cursor semantics on stale or unknown ids: if `after` does not match
+   * a currently-stored entry (e.g. it has been evicted, or the client
+   * fabricated it), the listing returns an empty array rather than
+   * silently restarting from the newest entry. This keeps a slow poll
+   * loop from accidentally re-reading deliveries it has already
+   * processed -- the caller sees the empty page, drops the stale
+   * cursor, and re-fetches without one.
+   */
+  after?: string;
 }
 
 export interface WebhookStore {
@@ -162,7 +180,22 @@ export class InMemoryWebhookStore implements WebhookStore {
     const limit = Math.max(1, Math.min(MAX_ENTRIES, o.limit ?? 50));
     const out: WebhookEntry[] = [];
     const all = [...this.entries.values()];
-    for (let i = all.length - 1; i >= 0 && out.length < limit; i -= 1) {
+
+    // Resolve the cursor up front. The cursor identifies a starting
+    // INDEX in the newest-first walk; we look it up once and use the
+    // index in the loop below. An unknown cursor short-circuits to an
+    // empty page (see the WebhookListOptions.after docs for why).
+    let startIdx = all.length - 1;
+    if (o.after !== undefined && o.after.length > 0) {
+      const cursorIdx = all.findIndex((e) => e.deliveryId === o.after);
+      if (cursorIdx === -1) return [];
+      // Walk newest-first means we want indices STRICTLY below the
+      // cursor (older than it).
+      startIdx = cursorIdx - 1;
+      if (startIdx < 0) return [];
+    }
+
+    for (let i = startIdx; i >= 0 && out.length < limit; i -= 1) {
       const e = all[i]!;
       if (o.event !== undefined && e.event !== o.event) continue;
       if (o.repoFullName !== undefined && e.repoFullName !== o.repoFullName) continue;

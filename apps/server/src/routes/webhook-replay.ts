@@ -51,6 +51,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         since?: unknown;
         repo?: unknown;
         repoFullName?: unknown;
+        after?: unknown;
       };
       const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
       const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
@@ -73,8 +74,12 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         const n = Date.parse(sinceRaw);
         if (Number.isFinite(n)) sinceMs = n;
       }
+      // `after=<deliveryId>` lets a polling client walk the store one
+      // page at a time without re-reading deliveries it has already
+      // processed. See WebhookListOptions.after for the semantics.
+      const after = typeof q.after === 'string' && q.after.length > 0 ? q.after : undefined;
       const entries = getWebhookStore()
-        .list({ limit, event, sinceMs, repoFullName })
+        .list({ limit, event, sinceMs, repoFullName, after })
         .map((e) => ({
           deliveryId: e.deliveryId,
           event: e.event,
@@ -83,11 +88,20 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
           repoFullName: e.repoFullName,
           installationId: e.installationId,
         }));
+      // Return a nextCursor when the page filled completely, so the
+      // caller can paginate without inspecting `limit`. A null cursor
+      // means "no more pages": either fewer entries than `limit`, or
+      // the store is exhausted past the last returned id.
+      const nextCursor =
+        entries.length === limit && entries.length > 0
+          ? entries[entries.length - 1]!.deliveryId
+          : null;
       return {
         requestId: req.id,
         size: getWebhookStore().size(),
         limit,
-        appliedFilters: { event, sinceMs, repoFullName },
+        appliedFilters: { event, sinceMs, repoFullName, after },
+        nextCursor,
         entries,
       };
     },

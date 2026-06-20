@@ -280,6 +280,130 @@ describe('/api/internal/webhook/recent + /replay/:deliveryId', () => {
     const ids = res.json().entries.map((e: { deliveryId: string }) => e.deliveryId);
     expect(ids).toEqual(['newpr']);
   });
+
+  it('paginates with ?after=<deliveryId>: walks the store newest-first one page at a time', async () => {
+    _resetWebhookStoreForTests();
+    // Seed 5 entries; insertion order is oldest -> newest, so the
+    // newest-first list is e5, e4, e3, e2, e1.
+    for (const id of ['e1', 'e2', 'e3', 'e4', 'e5']) {
+      getWebhookStore().put({
+        deliveryId: id,
+        event: 'pull_request',
+        payload: {},
+        receivedAt: new Date().toISOString(),
+      });
+    }
+    const page1 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?limit=2',
+    });
+    expect(page1.statusCode).toBe(200);
+    let body = page1.json();
+    expect(body.entries.map((e: { deliveryId: string }) => e.deliveryId)).toEqual(['e5', 'e4']);
+    expect(body.nextCursor).toBe('e4');
+
+    const page2 = await app.inject({
+      method: 'GET',
+      url: `/api/internal/webhook/recent?limit=2&after=${body.nextCursor}`,
+    });
+    body = page2.json();
+    expect(body.entries.map((e: { deliveryId: string }) => e.deliveryId)).toEqual(['e3', 'e2']);
+    expect(body.nextCursor).toBe('e2');
+    expect(body.appliedFilters.after).toBe('e4');
+
+    const page3 = await app.inject({
+      method: 'GET',
+      url: `/api/internal/webhook/recent?limit=2&after=${body.nextCursor}`,
+    });
+    body = page3.json();
+    expect(body.entries.map((e: { deliveryId: string }) => e.deliveryId)).toEqual(['e1']);
+    // Page didn't fill -> no further cursor.
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it('returns an empty page (and null cursor) for a stale or unknown ?after=', async () => {
+    _resetWebhookStoreForTests();
+    getWebhookStore().put({
+      deliveryId: 'alive',
+      event: 'pull_request',
+      payload: {},
+      receivedAt: new Date().toISOString(),
+    });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?after=evicted-or-fake',
+    });
+    expect(res.statusCode).toBe(200);
+    const body = res.json();
+    expect(body.entries).toEqual([]);
+    expect(body.nextCursor).toBeNull();
+  });
+
+  it('emits a nextCursor only when the page filled to the limit', async () => {
+    _resetWebhookStoreForTests();
+    for (const id of ['a', 'b', 'c']) {
+      getWebhookStore().put({
+        deliveryId: id,
+        event: 'pull_request',
+        payload: {},
+        receivedAt: new Date().toISOString(),
+      });
+    }
+    // limit > size -> page doesn't fill -> nextCursor null.
+    const partial = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?limit=10',
+    });
+    expect(partial.json().entries).toHaveLength(3);
+    expect(partial.json().nextCursor).toBeNull();
+    // limit == size -> page fills exactly -> nextCursor is the
+    // oldest returned id (next request will get an empty page).
+    const exact = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?limit=3',
+    });
+    expect(exact.json().entries).toHaveLength(3);
+    expect(exact.json().nextCursor).toBe('a');
+    const followup = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?limit=3&after=a',
+    });
+    expect(followup.json().entries).toEqual([]);
+    expect(followup.json().nextCursor).toBeNull();
+  });
+
+  it('composes ?after= with event/repo filters', async () => {
+    _resetWebhookStoreForTests();
+    // Mix events so the filter has work to do during pagination.
+    getWebhookStore().put({
+      deliveryId: 'pr1', event: 'pull_request', payload: {}, receivedAt: new Date().toISOString(),
+    });
+    getWebhookStore().put({
+      deliveryId: 'push1', event: 'push', payload: {}, receivedAt: new Date().toISOString(),
+    });
+    getWebhookStore().put({
+      deliveryId: 'pr2', event: 'pull_request', payload: {}, receivedAt: new Date().toISOString(),
+    });
+    getWebhookStore().put({
+      deliveryId: 'push2', event: 'push', payload: {}, receivedAt: new Date().toISOString(),
+    });
+    // First page: pull_request only, limit 1 -> pr2 (newest), nextCursor pr2.
+    const page1 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?event=pull_request&limit=1',
+    });
+    let body = page1.json();
+    expect(body.entries.map((e: { deliveryId: string }) => e.deliveryId)).toEqual(['pr2']);
+    expect(body.nextCursor).toBe('pr2');
+    // Second page: keep the event filter, advance past pr2 -> pr1.
+    const page2 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?event=pull_request&limit=1&after=pr2',
+    });
+    body = page2.json();
+    expect(body.entries.map((e: { deliveryId: string }) => e.deliveryId)).toEqual(['pr1']);
+    expect(body.nextCursor).toBe('pr1');
+  });
 });
 
 describe('/api/internal/webhook/stats', () => {
