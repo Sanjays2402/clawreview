@@ -10,6 +10,7 @@ import {
   buildSuppressionMap,
   calibrateConfidence,
   renderReviewReport,
+  similarityMerge,
   toCsv,
   toGitlabCodeQuality,
   toJUnitXml,
@@ -137,7 +138,20 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     );
   }
 
-  const result = aggregate(calibrated.findings, {
+  // Cross-agent similarity merge: collapses findings that two different
+  // agents report on the same line with overlapping rationale (e.g.
+  // security + sql-injection both flagging the same query). Runs AFTER
+  // calibration so the winner is chosen against post-calibration
+  // severity, and BEFORE aggregate so the per-file cap doesn't waste
+  // a slot on a merged-away duplicate.
+  const sim = similarityMerge(calibrated.findings);
+  if (sim.merged.length > 0) {
+    process.stderr.write(
+      kleur.gray(`  merged ${sim.merged.length} cross-agent duplicate(s)\n`),
+    );
+  }
+
+  const result = aggregate(sim.findings, {
     threshold: cfg.severity_threshold,
     maxPerFile: cfg.max_findings_per_file,
   });

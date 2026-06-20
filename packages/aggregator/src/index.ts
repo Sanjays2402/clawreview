@@ -10,6 +10,7 @@ export * from './csv.js';
 export * from './gitlab.js';
 export * from './rdjsonl.js';
 export * from './severity-rules.js';
+export * from './similarity.js';
 export * from './suppress.js';
 export * from './fingerprint.js';
 export * from './report.js';

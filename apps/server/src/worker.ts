@@ -6,7 +6,7 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
+import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment, similarityMerge } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { getMetrics, observeAgentExecutions } from '@clawreview/telemetry';
@@ -219,7 +219,22 @@ export async function startWorker(logger: Logger): Promise<void> {
       );
     }
 
-    const aggregated = aggregate(calibrated.findings, {
+    // Cross-agent similarity merge: collapse findings that two different
+    // agents reported on the same line with overlapping rationale. The
+    // CLI runs the same step so a local run and a server-driven run
+    // produce identical aggregated output for the same diff.
+    const sim = similarityMerge(calibrated.findings);
+    if (sim.merged.length > 0) {
+      log.info(
+        {
+          mergedCount: sim.merged.length,
+          examples: sim.merged.slice(0, 5),
+        },
+        'similarity_merge_applied',
+      );
+    }
+
+    const aggregated = aggregate(sim.findings, {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
     });
