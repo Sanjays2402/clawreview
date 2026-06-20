@@ -7,6 +7,7 @@ Usage:
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
+  clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
   clawreview explain <fingerprint> [--input <report.json>]
   clawreview version
 
@@ -35,6 +36,9 @@ Examples:
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new
+  clawreview diff-stats --base main --head HEAD
+  clawreview diff-stats --format json | jq '.totals'
+  git diff main...HEAD | clawreview diff-stats --diff -
   clawreview run --format json > report.json && clawreview explain 9d3c4f --input report.json
 `;
 }
