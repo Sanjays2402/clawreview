@@ -2,6 +2,7 @@ import { parseArgs } from './args.js';
 import { runReview } from './commands/run.js';
 import { runStats } from './commands/stats.js';
 import { runBaseline } from './commands/baseline.js';
+import { runExplain } from './commands/explain.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -25,6 +26,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case 'baseline':
       await runBaseline(args);
+      return;
+    case 'explain':
+      await runExplain(args);
       return;
     case 'version':
     case '--version':
