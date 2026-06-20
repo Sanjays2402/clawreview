@@ -64,26 +64,33 @@ First tick: 2026-06-20
 9. ~~Hotspot detection~~ — DONE tick 2 (0517234)
 10. **Per-author finding breakdown** — when git blame is available, attribute findings to authors.
 11. **Finding similarity-merge across agents** — second-pass dedupe by rationale embedding distance (lex).
-12. **Confidence calibration** — auto-floor low-confidence nits; bump high-confidence security to medium+.
+12. ~~Confidence calibration~~ — DONE tick 3 (42dfa40)
 
 ### Pipeline / agents
 13. ~~Per-language prompt rules injection~~ — DONE tick 2 (58eb06b)
 14. **Skip-file allowlist agent guard** — short-circuit agents whose `postFilter` would drop everything.
-15. **Cost-budget pre-flight** — estimate cost from token-count heuristic; fail fast when over `budget.monthly_usd`.
+15. ~~Cost-budget pre-flight~~ — DONE tick 3 (f928a99)
 
 ### CLI / DX
 16. ~~`clawreview explain <fingerprint>`~~ — DONE tick 2 (fa12f29)
-17. **`clawreview diff-stats`** — summarize the file/line shape of a diff without running agents.
+17. ~~`clawreview diff-stats`~~ — DONE tick 3 (d951ecd)
 
 ### Server / queue / telemetry
-18. **Queue introspection endpoint** — `/internal/queue` returns pending/inflight counts + recent failures.
-19. **Per-agent latency histogram** — Prometheus `clawreview_agent_duration_seconds{agent,outcome}`.
+18. ~~Queue introspection endpoint~~ — DONE tick 3 (57599bc)
+19. ~~Per-agent latency histogram~~ — DONE tick 3 (b2063ec)
 20. **Webhook replay endpoint** — `POST /internal/webhook/replay` re-dispatches a stored event payload.
 
 ### Backlog seeded for tick 3
 - **Foundational infra fix** — wire `@types/node` into `packages/diff`, `packages/llm`, `packages/ui`, `packages/db`, and `packages/aggregator` so `pnpm typecheck`/`pnpm build` flip green on the baseline. Required before any test gate can be run end-to-end via turbo.
 - **Aggregate-level helper for hotspot opts** — promote `hotspots: HotspotOptions` from CommentOptions into an `AggregateOptions.hotspots` so the CLI's text/markdown renderers can pull the same clusters without re-computing.
 - **CLI `clawreview explain` + dashboard parity** — once item 19 (per-agent metrics) lands, wire `explain` to fetch a single finding from the server's review-store endpoint instead of needing the JSON report on disk.
+
+### Backlog seeded for tick 4 (refill — items below + remaining 8, 10, 11, 14, 20 above)
+- **Cost-budget pre-flight visibility on dashboard** — surface tick 3's `preflightBudget` estimate as a "skipped because preflight" reason in apps/dashboard's review list.
+- **Per-agent histograms in dashboard** — consume `clawreview_agent_duration_seconds` from /metrics and chart it.
+- **Queue introspection in dashboard** — admin page that polls /api/internal/queue and shows pending/inflight + recent failures.
+- **Calibration audit log** — extend the worker's `confidence_calibration_applied` log line into the review-store record so the dashboard can show "n findings auto-promoted/floored".
+- **`clawreview diff-stats --threshold` CI gate** — exit non-zero when changedLines exceeds a configurable cap, for "PR too large to review" enforcement.
 
 ## TICK LOG
 
@@ -113,5 +120,17 @@ Gate results: aggregator 88/88, cli 15/15, diff 24/24, agents 37/37, types 7/7, 
 
 Gate results: aggregator 117/117 (+29 new), agents 49/49 (+12 new), cli 36/36 (+21 new), diff 24/24, types 7/7, llm 12/12, github 14/14, queue 3/3, telemetry 6/6, server 179/179 — total 447 tests verified passing (+62 over tick 1). Touched-package typecheck delta: `@clawreview/cli` clean; `@clawreview/aggregator` and `@clawreview/agents` red only on the documented baseline (`@types/node` missing on a couple of cross-package deps); no new typecheck errors introduced by this tick. Push verified: `git ls-remote origin feature/autoship` -> `fa12f29`.
 
+### Tick 3 — 2026-06-20 05:15 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | CLI `clawreview diff-stats` (text + json, --input/--diff/git modes) | d951ecd | +387/-0 | 8 new |
+| 2 | Aggregator confidence calibration (worker + CLI wiring) | 42dfa40 | +330/-3 | 12 new |
+| 3 | Telemetry per-agent histogram + invocations/findings counters (worker wiring) | b2063ec | +197/-1 | 5 new (telemetry) + 1 new (server) |
+| 4 | Queue introspection endpoint + adapter `details()` (memory + bullmq) | 57599bc | +376/-3 | 5 new (queue) + 1 new (server) |
+| 5 | Agents cost-budget pre-flight estimator + worker + CLI integration | f928a99 | +510/-2 | 16 new |
+
+Gate results: aggregator 129/129 (+12 new), agents 65/65 (+16 new), telemetry 11/11 (+5 new), queue 8/8 (+5 new), cli 44/44 (+8 new), server 181/181 (+2 new — internal-queue + worker-metrics agent-histogram), diff 24/24, types 7/7, llm 12/12, github 14/14 — total 495 tests verified passing (+48 over tick 2). Touched-package typecheck: `@clawreview/telemetry` and `@clawreview/queue` clean; `@clawreview/agents` red only on the existing `@types/node`-missing-in-@clawreview/llm baseline (new file `cost-estimator.ts` clean); `apps/cli` clean; `apps/server` adds 10 lines of pre-existing FastifyInstance type-mismatch noise from the new `registerInternalQueueRoutes(app)` call (zero errors in the new route/test files themselves). Push verified: `git ls-remote origin feature/autoship` -> `f928a99`.
+
 ## Done
-- 1, 2, 3, 4, 5, 6, 7, 9, 13, 16 (and CLI wiring item 4)
+- 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 15, 16, 17, 18, 19 (and CLI wiring item 4)
