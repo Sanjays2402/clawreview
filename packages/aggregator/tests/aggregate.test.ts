@@ -79,4 +79,74 @@ describe('aggregate', () => {
     expect(out.categoryTotals.security).toBe(1);
     expect(out.categoryTotals.performance).toBeUndefined();
   });
+
+  describe('minConfidence floor', () => {
+    it('drops findings below the configured floor regardless of severity', () => {
+      const findings = [
+        f({ title: 'noise', confidence: 0.1, severity: 'medium' }),
+        f({ title: 'maybe', confidence: 0.3, severity: 'medium', startLine: 50 }),
+        f({ title: 'solid', confidence: 0.7, severity: 'medium', startLine: 100 }),
+      ];
+      const out = aggregate(findings, { minConfidence: 0.4 });
+      expect(out.findings).toHaveLength(1);
+      expect(out.findings[0]!.title).toBe('solid');
+    });
+
+    it('does not floor findings exactly at the threshold (inclusive >=)', () => {
+      const findings = [
+        f({ title: 'edge', confidence: 0.5 }),
+        f({ title: 'just under', confidence: 0.49, startLine: 50 }),
+      ];
+      const out = aggregate(findings, { minConfidence: 0.5 });
+      expect(out.findings).toHaveLength(1);
+      expect(out.findings[0]!.title).toBe('edge');
+    });
+
+    it('defaults to 0 (no floor)', () => {
+      const findings = [f({ confidence: 0.01 })];
+      const out = aggregate(findings, {});
+      expect(out.findings).toHaveLength(1);
+    });
+
+    it('clamps a misconfigured value into [0, 1] rather than dropping everything', () => {
+      const findings = [f({ confidence: 0.7 }), f({ confidence: 0.5, startLine: 50 })];
+      // A value >1 would otherwise drop every finding (none has conf=2).
+      const tooHigh = aggregate(findings, { minConfidence: 2 as number });
+      // Confidence is clamped to 1.0, so everything below 1.0 is dropped.
+      expect(tooHigh.findings).toHaveLength(0);
+      // Negative inputs clamp to 0 (no floor).
+      const tooLow = aggregate(findings, { minConfidence: -3 as number });
+      expect(tooLow.findings).toHaveLength(2);
+      // NaN clamps to 0 (no floor) -- guards against `Number(undefined)` leakage.
+      const nan = aggregate(findings, { minConfidence: Number.NaN });
+      expect(nan.findings).toHaveLength(2);
+    });
+
+    it('floored findings are not counted toward maxPerFile (cap means "best N kept")', () => {
+      // Two real findings + 10 low-confidence noise -- with floor on,
+      // maxPerFile=2 should keep both real ones, not be eaten by noise.
+      const findings: Finding[] = [];
+      for (let i = 0; i < 10; i += 1) {
+        findings.push(f({ confidence: 0.1, startLine: i + 1, severity: 'low', title: `noise-${i}` }));
+      }
+      findings.push(f({ confidence: 0.9, startLine: 50, severity: 'low', title: 'real-1' }));
+      findings.push(f({ confidence: 0.9, startLine: 60, severity: 'low', title: 'real-2' }));
+      const out = aggregate(findings, { minConfidence: 0.5, maxPerFile: 2 });
+      expect(out.findings.map((x) => x.title).sort()).toEqual(['real-1', 'real-2']);
+    });
+
+    it('composes with the severity threshold (both must pass)', () => {
+      const findings = [
+        f({ severity: 'medium', confidence: 0.8 }),
+        f({ severity: 'nit', confidence: 0.9, startLine: 50 }),
+        f({ severity: 'medium', confidence: 0.2, startLine: 100 }),
+      ];
+      // threshold=low keeps low+up, drops nit. minConfidence=0.5 drops
+      // the third finding. Only the first survives.
+      const out = aggregate(findings, { threshold: 'low', minConfidence: 0.5 });
+      expect(out.findings).toHaveLength(1);
+      expect(out.findings[0]!.severity).toBe('medium');
+      expect(out.findings[0]!.confidence).toBe(0.8);
+    });
+  });
 });

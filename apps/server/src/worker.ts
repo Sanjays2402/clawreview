@@ -241,7 +241,17 @@ export async function startWorker(logger: Logger): Promise<void> {
     const aggregated = aggregate(sim.findings, {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
+      minConfidence: cfg.min_confidence,
     });
+    if (cfg.min_confidence > 0) {
+      const droppedByFloor = sim.findings.filter((f) => f.confidence < cfg.min_confidence).length;
+      if (droppedByFloor > 0) {
+        log.info(
+          { droppedByFloor, minConfidence: cfg.min_confidence },
+          'min_confidence floor applied',
+        );
+      }
+    }
 
     // Honor inline `clawreview-ignore` / `clawreview-ignore-next-line`
     // markers in the diff. Suppressed findings are recorded for telemetry

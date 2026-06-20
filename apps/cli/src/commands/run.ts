@@ -64,6 +64,23 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   if (args.flags.threshold) {
     cfg.severity_threshold = String(args.flags.threshold) as Severity;
   }
+  // `--min-confidence <n>` lets a one-off run override the configured
+  // floor without editing .clawreview.yml. Clamped to [0, 1] on the
+  // CLI side too so a bad input fails loudly here rather than silently
+  // disabling the floor in aggregate().
+  if (args.flags['min-confidence'] !== undefined) {
+    const raw = Number(args.flags['min-confidence']);
+    if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
+      process.stderr.write(
+        kleur.red(
+          `clawreview: --min-confidence must be a number in [0, 1] (got '${String(args.flags['min-confidence'])}')\n`,
+        ),
+      );
+      process.exitCode = 1;
+      return;
+    }
+    cfg.min_confidence = raw;
+  }
   const concurrency = args.flags.concurrency ? Number(args.flags.concurrency) : 6;
 
   const [headSha, baseSha] = await Promise.all([revParse(head, cwd), revParse(base, cwd)]);
@@ -154,7 +171,20 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   const result = aggregate(sim.findings, {
     threshold: cfg.severity_threshold,
     maxPerFile: cfg.max_findings_per_file,
+    minConfidence: cfg.min_confidence,
   });
+
+  if (cfg.min_confidence > 0) {
+    // Count findings the floor dropped (independent of dedup/truncation
+    // counts so the number a user sees here is the one tied to the
+    // knob they tuned).
+    const dropped = sim.findings.filter((f) => f.confidence < cfg.min_confidence).length;
+    if (dropped > 0) {
+      process.stderr.write(
+        kleur.gray(`  dropped ${dropped} finding(s) below min_confidence=${cfg.min_confidence}\n`),
+      );
+    }
+  }
 
   // Honor inline clawreview-ignore markers in the diff so local runs match
   // what the server-side worker would post on a real PR.

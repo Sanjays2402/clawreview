@@ -15,6 +15,13 @@ export type AgentName = z.infer<typeof AgentNameSchema>;
 export const ClawReviewConfigSchema = z.object({
   agents: z.array(AgentNameSchema).default(['security', 'performance', 'style', 'secrets']),
   severity_threshold: SeveritySchema.default('low'),
+  /**
+   * Floor on a finding's `confidence`. Findings strictly below this
+   * value are dropped during aggregation, regardless of severity.
+   * Independent of severity calibration (which only NUDGES severity).
+   * Range [0, 1]; default 0 (no floor).
+   */
+  min_confidence: z.number().min(0).max(1).default(0),
   ignore: z.array(z.string()).default([]),
   models: z.record(AgentNameSchema, z.string()).default({}),
   budget: z

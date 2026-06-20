@@ -11,6 +11,23 @@ export interface AggregateOptions {
   maxPerFile?: number;
   /** Lines distance to treat two findings as duplicates. */
   dedupRadius?: number;
+  /**
+   * Floor on a finding's `confidence` field. Findings strictly below
+   * this value are dropped, regardless of severity. Independent of the
+   * `calibrateConfidence` pass: calibration NUDGES severity (and adds
+   * a `calibrated:*` tag); `minConfidence` HARD-DROPS noise that is so
+   * low-confidence it shouldn't reach the reviewer at all.
+   *
+   * Default `0` (no floor). A typical production knob lands around
+   * `0.25-0.4` -- low enough to keep most genuine findings, high
+   * enough to silence a model that hallucinates a `severity: medium`
+   * with `confidence: 0.1`.
+   *
+   * Findings dropped here are not counted toward `maxPerFile` so the
+   * cap continues to mean "best N per file" rather than "first N to
+   * survive the floor".
+   */
+  minConfidence?: number;
 }
 
 export interface AggregateResult {
@@ -83,6 +100,18 @@ function sharedWords(wa: string[], wb: string[]): number {
   return hits;
 }
 
+/**
+ * Clamp a confidence-shaped option into [0, 1]. Mirrors the helper in
+ * `calibrate.ts`; kept local so this file's only cross-module dep
+ * stays `@clawreview/types`.
+ */
+function clampConfidence(n: number | undefined): number {
+  if (n === undefined || !Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
 export function rankFindings(findings: Finding[]): Finding[] {
   return [...findings].sort((a, b) => {
     const sev = compareSeverity(a.severity, b.severity);
@@ -97,9 +126,14 @@ export function aggregate(findings: Finding[], opts: AggregateOptions = {}): Agg
   const threshold = opts.threshold ?? 'low';
   const maxPerFile = opts.maxPerFile ?? 8;
   const radius = opts.dedupRadius ?? 2;
+  // Clamp the floor into [0, 1] so a misconfigured `1.5` or `-2`
+  // doesn't either drop everything or surface a confusing negative.
+  const minConfidence = clampConfidence(opts.minConfidence);
 
   const filtered = findings.filter(
-    (f) => SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold],
+    (f) =>
+      SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold] &&
+      f.confidence >= minConfidence,
   );
   const deduped = dedupFindings(filtered, radius);
   const ranked = rankFindings(deduped);

@@ -18,4 +18,24 @@ describe('ClawReviewConfigSchema', () => {
     const result = ClawReviewConfigSchema.parse({ models: { security: 'gpt-4o-mini' } });
     expect(result.models.security).toBe('gpt-4o-mini');
   });
+
+  describe('min_confidence', () => {
+    it('defaults to 0 (no floor)', () => {
+      expect(DEFAULT_CONFIG.min_confidence).toBe(0);
+    });
+
+    it('accepts a value in [0, 1]', () => {
+      const r = ClawReviewConfigSchema.parse({ min_confidence: 0.35 });
+      expect(r.min_confidence).toBe(0.35);
+    });
+
+    it('rejects values outside [0, 1]', () => {
+      expect(ClawReviewConfigSchema.safeParse({ min_confidence: -0.1 }).success).toBe(false);
+      expect(ClawReviewConfigSchema.safeParse({ min_confidence: 1.5 }).success).toBe(false);
+    });
+
+    it('rejects non-numeric values', () => {
+      expect(ClawReviewConfigSchema.safeParse({ min_confidence: 'high' }).success).toBe(false);
+    });
+  });
 });
