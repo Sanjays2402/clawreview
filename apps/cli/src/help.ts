@@ -20,6 +20,9 @@ Flags:
   --concurrency <n>  Max parallel (chunk x agent) tasks.
   --input <path>     Read a previously-generated JSON report from a file (stats / explain).
   --no-color         Disable colored output.
+  --fail-on-budget   Exit non-zero (3) when 'clawreview run' estimates the review will
+                     exceed the configured monthly budget. Off by default; the estimate
+                     is still printed to stderr either way.
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.

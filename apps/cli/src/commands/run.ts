@@ -2,7 +2,7 @@ import { cwd as getCwd } from 'node:process';
 
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
-import { runPipeline } from '@clawreview/agents';
+import { preflightBudget, runPipeline } from '@clawreview/agents';
 import {
   aggregate,
   applySeverityRules,
@@ -71,6 +71,23 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   const diff = await gitDiff(base, head, cwd);
   if (!diff.trim()) {
     console.log('No changes between refs.');
+    return;
+  }
+
+  // Cost pre-flight: estimate spend and either bail (when --fail-on-budget
+  // is set) or just print the estimate for visibility. Defaults to print-only
+  // so CI runs don't suddenly fail after upgrading clawreview.
+  const failOnBudget = Boolean(args.flags['fail-on-budget']);
+  const preflight = preflightBudget({ diffText: diff, config: cfg, spentUsd: 0 });
+  process.stderr.write(
+    kleur.gray(
+      `  estimated cost: $${preflight.estimate.totalUsd.toFixed(4)}  ` +
+        `(${preflight.estimate.chunks} chunks across ${preflight.estimate.byAgent.length} agent(s))\n`,
+    ),
+  );
+  if (failOnBudget && !preflight.ok) {
+    process.stderr.write(kleur.red(`  preflight blocked: ${preflight.reason}\n`));
+    process.exitCode = 3;
     return;
   }
 

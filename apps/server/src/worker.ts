@@ -7,7 +7,7 @@ import {
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
 import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
-import { runPipeline } from '@clawreview/agents';
+import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { getMetrics, observeAgentExecutions } from '@clawreview/telemetry';
 
@@ -26,6 +26,20 @@ const BUDGET_BLOCKED_BODY = (limitUsd: number, spentUsd: number, periodKey: stri
       `($${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} spent).`,
     '',
     'Raise `budget.monthly_usd` in `.clawreview.yml`, or wait for the next billing month.',
+  ].join('\n');
+
+const PREFLIGHT_BLOCKED_BODY = (estimateUsd: number, spentUsd: number, limitUsd: number) =>
+  [
+    '### ClawReview',
+    '',
+    `Skipping this review. The estimated LLM cost for this PR ($${estimateUsd.toFixed(2)}) plus ` +
+      `prior spend this month ($${spentUsd.toFixed(2)}) would exceed the monthly budget ` +
+      `($${limitUsd.toFixed(2)}).`,
+    '',
+    'Options:',
+    '- Split the PR into smaller changes so each one fits the remaining budget',
+    '- Raise `budget.monthly_usd` in `.clawreview.yml`',
+    '- Disable agents you do not need via `agents:` in `.clawreview.yml`',
   ].join('\n');
 
 export async function startWorker(logger: Logger): Promise<void> {
@@ -104,6 +118,42 @@ export async function startWorker(logger: Logger): Promise<void> {
     }
 
     const diff = await gh.fetchPrDiff({ owner: data.owner, repo: data.repo, number: data.prNumber });
+
+    // Cost pre-flight: estimate the LLM spend for this PR from the diff
+    // shape + configured agents, and bail before any tokens are spent
+    // when the estimate would push the installation past its monthly
+    // budget. This catches cases the post-hoc `budget.wouldExceed(.., 0)`
+    // check misses (an installation that is under budget but where a
+    // very large PR would push it over in a single run).
+    const preflightSpent = budget.snapshot(data.installationId, limit).spentUsd;
+    const preflight = preflightBudget({
+      diffText: diff,
+      config: cfg,
+      spentUsd: preflightSpent,
+    });
+    if (!preflight.ok) {
+      log.warn(
+        {
+          estimateUsd: preflight.estimate.totalUsd,
+          spentUsd: preflight.spentUsd,
+          limitUsd: preflight.limitUsd,
+          chunks: preflight.estimate.chunks,
+        },
+        'cost preflight blocked review',
+      );
+      const skipBody = `${COMMENT_MARKER}\n${PREFLIGHT_BLOCKED_BODY(
+        preflight.estimate.totalUsd,
+        preflight.spentUsd,
+        preflight.limitUsd,
+      )}`;
+      await gh.upsertReviewComment(
+        { owner: data.owner, repo: data.repo, number: data.prNumber },
+        { marker: COMMENT_MARKER, body: skipBody },
+      );
+      await store.fail(data.reviewId, new Error('budget_preflight_blocked'));
+      recordOutcome('budget_exhausted');
+      return;
+    }
 
     // Surface progress on the PR immediately so a long review run doesn't
     // look like silence. We create the check-run as `in_progress` here and
