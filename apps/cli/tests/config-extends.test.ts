@@ -1,10 +1,10 @@
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { loadConfig, mergeWithExtends } from '../src/config.js';
+import { loadConfig, loadLocalPresets, mergeWithExtends } from '../src/config.js';
 
 async function tmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'clawreview-cfg-'));
@@ -93,5 +93,132 @@ describe('loadConfig with extends', () => {
     const cfg = await loadConfig(undefined, dir);
     expect(cfg.severity_threshold).toBe('low');
     expect(cfg.agents).toContain('security');
+  });
+});
+
+describe('loadLocalPresets', () => {
+  it('returns {} when .clawreview/presets is absent', async () => {
+    const dir = await tmpDir();
+    const out = await loadLocalPresets(dir);
+    expect(out).toEqual({});
+  });
+
+  it('discovers *.yml files and uses the basename as the preset name', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/team-strict.yml'),
+      ['severity_threshold: critical', 'max_findings_per_file: 1', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/team-loose.yaml'),
+      ['severity_threshold: high', ''].join('\n'),
+      'utf8',
+    );
+    // Non-YAML files must be ignored.
+    await writeFile(join(dir, '.clawreview/presets/README.md'), '# notes\n', 'utf8');
+    const out = await loadLocalPresets(dir);
+    expect(Object.keys(out).sort()).toEqual(['team-loose', 'team-strict']);
+    expect(out['team-strict']!.severity_threshold).toBe('critical');
+    expect(out['team-strict']!.max_findings_per_file).toBe(1);
+    expect(out['team-loose']!.severity_threshold).toBe('high');
+  });
+
+  it('throws on malformed YAML inside a local preset, naming the file', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/broken.yml'),
+      'severity_threshold: [unterminated\n',
+      'utf8',
+    );
+    await expect(loadLocalPresets(dir)).rejects.toThrow(/invalid YAML in local preset 'broken'/);
+  });
+
+  it('rejects non-mapping YAML at the top level', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(join(dir, '.clawreview/presets/list.yml'), '- one\n- two\n', 'utf8');
+    await expect(loadLocalPresets(dir)).rejects.toThrow(/must be a YAML mapping/);
+  });
+
+  it('treats an empty file as an empty preset (no error)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(join(dir, '.clawreview/presets/empty.yml'), '', 'utf8');
+    const out = await loadLocalPresets(dir);
+    expect(out.empty).toEqual({});
+  });
+});
+
+describe('loadConfig with project-local presets', () => {
+  it('extends:my-team resolves to the local preset under .clawreview/presets/my-team.yml', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/my-team.yml'),
+      ['severity_threshold: high', 'max_findings_per_file: 2', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview.yml'),
+      [
+        'extends: my-team',
+        'agents: [security]',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const cfg = await loadConfig(undefined, dir);
+    expect(cfg.severity_threshold).toBe('high');
+    expect(cfg.max_findings_per_file).toBe(2);
+    expect(cfg.agents).toEqual(['security']);
+  });
+
+  it('local presets shadow built-ins on name collision so teams can override', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // The built-in `strict` preset uses severity_threshold=low; the local
+    // override flips it to critical. Layered on top of the user file (no
+    // overrides), the local value must win.
+    await writeFile(
+      join(dir, '.clawreview/presets/strict.yml'),
+      ['severity_threshold: critical', 'max_findings_per_file: 7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview.yml'),
+      ['extends: strict', ''].join('\n'),
+      'utf8',
+    );
+    const cfg = await loadConfig(undefined, dir);
+    expect(cfg.severity_threshold).toBe('critical');
+    expect(cfg.max_findings_per_file).toBe(7);
+  });
+
+  it('mixed extends: [built-in, local] resolves both in order', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/agents-only.yml'),
+      ['agents: [security]', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview.yml'),
+      [
+        'extends:',
+        '  - strict',
+        '  - agents-only',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const cfg = await loadConfig(undefined, dir);
+    // strict from built-in
+    expect(cfg.severity_threshold).toBe('low');
+    // local overrides agents (arrays REPLACE)
+    expect(cfg.agents).toEqual(['security']);
   });
 });

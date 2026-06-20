@@ -5,7 +5,7 @@ import YAML from 'yaml';
 import { ClawReviewConfigSchema, listPresets } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
-import { mergeWithExtends } from '../config.js';
+import { loadLocalPresets, mergeWithExtends } from '../config.js';
 
 export async function runValidate(args: ParsedArgs): Promise<void> {
   const path = String(args.flags.config ?? '.clawreview.yml');
@@ -15,13 +15,19 @@ export async function runValidate(args: ParsedArgs): Promise<void> {
   // Resolve `extends:` to the same merged shape `loadConfig` would feed
   // the pipeline. This way `clawreview validate` proves the *effective*
   // config will pass schema validation, not just the literal file.
+  // Local presets under .clawreview/presets/*.yml are honored too.
+  const localPresets = await loadLocalPresets(getCwd());
   let withExtends: Record<string, unknown>;
   try {
-    withExtends = mergeWithExtends(parsed);
+    withExtends = mergeWithExtends(parsed, { localPresets });
   } catch (err) {
     console.error(`Config invalid: ${path}`);
     console.error(`  ${(err as Error).message}`);
-    console.error(`  available presets: ${listPresets().join(', ')}`);
+    const available = [
+      ...listPresets(),
+      ...Object.keys(localPresets).map((n) => `${n} (local)`),
+    ];
+    console.error(`  available presets: ${available.sort().join(', ')}`);
     process.exitCode = 2;
     return;
   }
@@ -40,6 +46,9 @@ export async function runValidate(args: ParsedArgs): Promise<void> {
       ? (parsed.extends as unknown[]).map(String)
       : [String(parsed.extends)];
     console.log(`  extends:   ${names.join(', ')}`);
+  }
+  if (Object.keys(localPresets).length > 0) {
+    console.log(`  local presets: ${Object.keys(localPresets).sort().join(', ')}`);
   }
   console.log(`  agents:    ${result.data.agents.join(', ')}`);
   console.log(`  threshold: ${result.data.severity_threshold}`);
