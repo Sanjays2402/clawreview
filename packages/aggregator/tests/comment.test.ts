@@ -42,7 +42,8 @@ describe('comment + check', () => {
     expect(md).toMatch(/`performance` 1/);
   });
 
-  it('chooses failure for any critical finding', () => {    const result = aggregate([
+  it('chooses failure for any critical finding', () => {
+    const result = aggregate([
       {
         agent: 'security',
         category: 'security',
@@ -58,5 +59,68 @@ describe('comment + check', () => {
     const check = deriveCheckRun(result, 'abc1234');
     expect(check.conclusion).toBe('failure');
     expect(check.output.title).toMatch(/finding/);
+  });
+
+  it('renders a Run summary block when runSummary is provided', () => {
+    const result = aggregate([]);
+    const md = renderPrComment(result, {
+      prNumber: 7,
+      headSha: 'abc1234',
+      runSummary: {
+        durationMs: 4321,
+        totalCostUsd: 0.1234,
+        skippedCount: 2,
+        agentExecutions: [
+          { agent: 'security', status: 'ok', durationMs: 1500, findings: 0 },
+          { agent: 'style', status: 'ok', durationMs: 800, findings: 0 },
+        ],
+      },
+    });
+    expect(md).toMatch(/Run summary/);
+    expect(md).toMatch(/Duration: 4\.3s/);
+    expect(md).toMatch(/Cost: \$0\.1234/);
+    expect(md).toMatch(/Skipped files: 2/);
+    expect(md).toMatch(/`security`/);
+    expect(md).toMatch(/1\.5s/);
+  });
+
+  it('omits Run summary block entirely when runSummary is absent', () => {
+    const result = aggregate([
+      {
+        agent: 'security',
+        category: 'security',
+        severity: 'high',
+        title: 'x',
+        rationale: 'y',
+        file: 'a.ts',
+        startLine: 1,
+        confidence: 0.7,
+        tags: [],
+      },
+    ]);
+    const md = renderPrComment(result, { prNumber: 1, headSha: 'abc1234' });
+    expect(md).not.toMatch(/Run summary/);
+  });
+
+  it('formats long durations as minutes', () => {
+    const md = renderPrComment(aggregate([]), {
+      prNumber: 1,
+      headSha: 'abc1234',
+      runSummary: { durationMs: 125_000 },
+    });
+    expect(md).toMatch(/Duration: 2m05s/);
+  });
+
+  it('surfaces an agent error message in the breakdown', () => {
+    const md = renderPrComment(aggregate([]), {
+      prNumber: 1,
+      headSha: 'abc1234',
+      runSummary: {
+        agentExecutions: [
+          { agent: 'security', status: 'error', durationMs: 50, findings: 0, error: 'timeout' },
+        ],
+      },
+    });
+    expect(md).toMatch(/error: timeout/);
   });
 });

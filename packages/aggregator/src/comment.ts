@@ -11,12 +11,35 @@ const SEV_EMOJI: Record<Severity, string> = {
   nit: '🔹',
 };
 
+export interface CommentRunSummary {
+  /** Total review wall-clock time in milliseconds. */
+  durationMs?: number;
+  /** Total estimated LLM cost in USD. */
+  totalCostUsd?: number;
+  /** Per-agent timings/findings for the breakdown table. */
+  agentExecutions?: Array<{
+    agent: string;
+    status?: 'ok' | 'error' | 'skipped';
+    durationMs: number;
+    findings: number;
+    error?: string;
+  }>;
+  /** Files skipped during selection (binary, oversize, generated, ...). */
+  skippedCount?: number;
+}
+
 export interface CommentOptions {
   prNumber: number;
   headSha: string;
   runId?: string;
   style?: 'compact' | 'detailed';
   dashboardUrl?: string;
+  /**
+   * Optional summary of the review run. When supplied, renders a "Run summary"
+   * footer block (timings, cost, skipped count, per-agent breakdown) below
+   * the findings. Designed to be cheap for reviewers to skim without scrolling.
+   */
+  runSummary?: CommentRunSummary;
 }
 
 export function renderPrComment(result: AggregateResult, opts: CommentOptions): string {
@@ -28,6 +51,7 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
       '### ClawReview',
       '',
       'No findings above the configured severity threshold. Nice diff.',
+      ...renderRunSummaryBlock(opts.runSummary),
       '',
       footer(opts),
     ].join('\n');
@@ -62,8 +86,66 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     body.push('');
   }
 
+  body.push(...renderRunSummaryBlock(opts.runSummary));
   body.push(footer(opts));
   return body.join('\n');
+}
+
+function renderRunSummaryBlock(rs: CommentRunSummary | undefined): string[] {
+  if (!rs) return [];
+  const lines: string[] = [];
+  // The header is collapsed by default so the comment scans cleanly even
+  // when the run produced a lot of agent executions.
+  lines.push('<details><summary>Run summary</summary>');
+  lines.push('');
+  const meta: string[] = [];
+  if (typeof rs.durationMs === 'number') {
+    meta.push(`Duration: ${formatDuration(rs.durationMs)}`);
+  }
+  if (typeof rs.totalCostUsd === 'number') {
+    meta.push(`Cost: $${rs.totalCostUsd.toFixed(4)}`);
+  }
+  if (typeof rs.skippedCount === 'number' && rs.skippedCount > 0) {
+    meta.push(`Skipped files: ${rs.skippedCount}`);
+  }
+  if (meta.length > 0) {
+    lines.push(meta.join(' · '));
+    lines.push('');
+  }
+
+  const execs = rs.agentExecutions ?? [];
+  if (execs.length > 0) {
+    lines.push('| Agent | Status | Findings | Duration |');
+    lines.push('|---|---|---|---|');
+    for (const e of execs) {
+      const status = e.status === 'error'
+        ? `error${e.error ? `: ${truncate(e.error, 60)}` : ''}`
+        : (e.status ?? 'ok');
+      lines.push(
+        `| \`${escapeMd(e.agent)}\` | ${status} | ${e.findings} | ${formatDuration(e.durationMs)} |`,
+      );
+    }
+    lines.push('');
+  }
+
+  lines.push('</details>');
+  lines.push('');
+  return lines;
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '0ms';
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const sec = ms / 1000;
+  if (sec < 60) return `${sec.toFixed(1)}s`;
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec - m * 60);
+  return `${m}m${s.toString().padStart(2, '0')}s`;
+}
+
+function truncate(s: string, max: number): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max - 1)}…`;
 }
 
 function renderFinding(f: Finding, _opts: CommentOptions): string {
