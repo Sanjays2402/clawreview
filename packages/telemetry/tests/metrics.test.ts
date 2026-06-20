@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   getMetrics,
   observeAgentExecutions,
+  observeSimilarityMerges,
   resetMetricsForTests,
 } from '../src/metrics.js';
 
@@ -82,5 +83,46 @@ describe('observeAgentExecutions', () => {
     expect(text).toMatch(/clawreview_agent_invocations_total\{[^}]*agent="security"[^}]*outcome="ok"[^}]*\} 2/);
     expect(text).toMatch(/clawreview_agent_invocations_total\{[^}]*agent="security"[^}]*outcome="error"[^}]*\} 1/);
     expect(text).toMatch(/clawreview_agent_findings_total\{[^}]*agent="security"[^}]*\} 3/);
+  });
+});
+
+describe('observeSimilarityMerges', () => {
+  it('emits clawreview_similarity_merges_total{winner_agent,loser_agent}', async () => {
+    const metrics = getMetrics({ service: 'clawreview-sim-1', defaultMetrics: false });
+    observeSimilarityMerges(metrics, [
+      { winner: 'sql-injection', losers: ['security'] },
+      { winner: 'sql-injection', losers: ['security'] },
+      { winner: 'performance', losers: ['style'] },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_similarity_merges_total counter');
+    expect(text).toMatch(
+      /clawreview_similarity_merges_total\{[^}]*winner_agent="sql-injection"[^}]*loser_agent="security"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_similarity_merges_total\{[^}]*winner_agent="performance"[^}]*loser_agent="style"[^}]*\} 1/,
+    );
+  });
+
+  it('fans out N-way merges into one counter per (winner, loser) pair', async () => {
+    const metrics = getMetrics({ service: 'clawreview-sim-2', defaultMetrics: false });
+    observeSimilarityMerges(metrics, [
+      { winner: 'security', losers: ['style', 'performance'] },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_similarity_merges_total\{[^}]*winner_agent="security"[^}]*loser_agent="style"[^}]*\} 1/,
+    );
+    expect(text).toMatch(
+      /clawreview_similarity_merges_total\{[^}]*winner_agent="security"[^}]*loser_agent="performance"[^}]*\} 1/,
+    );
+  });
+
+  it('is a safe no-op on an empty list', async () => {
+    const metrics = getMetrics({ service: 'clawreview-sim-3', defaultMetrics: false });
+    observeSimilarityMerges(metrics, []);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_similarity_merges_total counter');
+    expect(text).not.toMatch(/clawreview_similarity_merges_total\{[^}]*winner_agent=/);
   });
 });

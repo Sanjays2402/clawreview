@@ -9,7 +9,7 @@ import { ProviderRegistry } from '@clawreview/llm';
 import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment, similarityMerge } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics, observeAgentExecutions } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeSimilarityMerges } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -232,6 +232,10 @@ export async function startWorker(logger: Logger): Promise<void> {
         },
         'similarity_merge_applied',
       );
+      // Emit a Prometheus counter per (winner, loser) pair so dashboards
+      // can graph which agent pairs duplicate most often -- those are the
+      // best candidates for prompt consolidation.
+      observeSimilarityMerges(metrics, sim.merged);
     }
 
     const aggregated = aggregate(sim.findings, {

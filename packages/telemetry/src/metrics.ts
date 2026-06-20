@@ -37,6 +37,17 @@ export interface MetricsBundle {
   agentInvocationsTotal: Counter<string>;
   /** Total findings emitted by an agent before dedup/threshold pruning. */
   agentFindingsTotal: Counter<string>;
+  /**
+   * Total cross-agent similarity merges performed by the aggregator's
+   * similarity pass, labeled by `winner_agent` and `loser_agent`. Use
+   * this to track which agent pairs duplicate most often -- the most
+   * common pair is usually the next prompt-merge candidate.
+   *
+   * The label set is bounded by the number of agents in AGENT_REGISTRY
+   * (currently <20) so cardinality stays well under Prometheus's
+   * recommended ceiling.
+   */
+  similarityMergesTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -145,6 +156,13 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const similarityMergesTotal = new Counter({
+    name: 'clawreview_similarity_merges_total',
+    help: 'Cross-agent similarity merges, labeled by winning and losing agent.',
+    labelNames: ['winner_agent', 'loser_agent'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -198,6 +216,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     agentDurationSeconds,
     agentInvocationsTotal,
     agentFindingsTotal,
+    similarityMergesTotal,
     queueDepth,
     queueInflight,
   };
@@ -290,6 +309,42 @@ export function observeAgentExecutions(
       typeof e.findings === 'number' ? e.findings : e.findings.length;
     if (findingsCount > 0) {
       metrics.agentFindingsTotal.inc({ agent: e.agent }, findingsCount);
+    }
+  }
+}
+
+/**
+ * Shape compatible with `SimilarityMergeResult.merged[number]` so the
+ * worker can hand the same array used for logging directly to the
+ * metrics recorder. Kept structural so telemetry stays free of an
+ * `@clawreview/aggregator` dependency.
+ */
+export interface SimilarityMergeLike {
+  /** Winning agent — the one whose finding survived the merge. */
+  winner: string;
+  /**
+   * Losing agents — the ones whose findings were collapsed. Almost
+   * always a single-element array today, but modeled as a list because
+   * the aggregator's contract allows N-way merges.
+   */
+  losers: readonly string[];
+}
+
+/**
+ * Record per-pair similarity-merge counters. One increment fires per
+ * (winner, loser) pair so an N-way merge fans out into N-1 counter
+ * increments. Safe to call with an empty array (no-op).
+ */
+export function observeSimilarityMerges(
+  metrics: MetricsBundle,
+  merges: readonly SimilarityMergeLike[],
+): void {
+  for (const m of merges) {
+    for (const loser of m.losers) {
+      metrics.similarityMergesTotal.inc({
+        winner_agent: m.winner,
+        loser_agent: loser,
+      });
     }
   }
 }
