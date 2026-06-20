@@ -8,6 +8,7 @@ import {
   applySeverityRules,
   applySuppressions,
   buildSuppressionMap,
+  calibrateConfidence,
   renderReviewReport,
   toCsv,
   toGitlabCodeQuality,
@@ -109,7 +110,17 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     );
   }
 
-  const result = aggregate(ruled.findings, {
+  // Confidence calibration mirrors the worker's behaviour so local runs
+  // produce identical severity calls. Floors low-confidence nits and
+  // promotes high-confidence security findings before aggregation.
+  const calibrated = calibrateConfidence(ruled.findings);
+  if (calibrated.applied.length > 0) {
+    process.stderr.write(
+      kleur.gray(`  calibrated ${calibrated.applied.length} finding(s) by confidence\n`),
+    );
+  }
+
+  const result = aggregate(calibrated.findings, {
     threshold: cfg.severity_threshold,
     maxPerFile: cfg.max_findings_per_file,
   });

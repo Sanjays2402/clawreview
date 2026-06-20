@@ -6,7 +6,7 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
+import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
 import { runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { getMetrics } from '@clawreview/telemetry';
@@ -152,7 +152,24 @@ export async function startWorker(logger: Logger): Promise<void> {
       );
     }
 
-    const aggregated = aggregate(ruled.findings, {
+    // Confidence calibration: floor low-confidence nits, promote
+    // high-confidence security findings. Runs BEFORE aggregate so the
+    // promoted severities compete on the maxPerFile cap.
+    const calibrated = calibrateConfidence(ruled.findings);
+    if (calibrated.applied.length > 0) {
+      log.info(
+        {
+          calibrationApplied: calibrated.applied.length,
+          rules: calibrated.applied.reduce<Record<string, number>>((acc, c) => {
+            acc[c.rule] = (acc[c.rule] ?? 0) + 1;
+            return acc;
+          }, {}),
+        },
+        'confidence_calibration_applied',
+      );
+    }
+
+    const aggregated = aggregate(calibrated.findings, {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
     });
