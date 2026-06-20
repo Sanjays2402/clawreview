@@ -123,4 +123,48 @@ describe('comment + check', () => {
     });
     expect(md).toMatch(/error: timeout/);
   });
+
+  it('renders a Hotspots block when hotspots:true and clusters exist', () => {
+    const result = aggregate([
+      { agent: 'security', category: 'security', severity: 'high', title: 'a', rationale: 'x', file: 'src/a.ts', startLine: 5, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'medium', title: 'b', rationale: 'x', file: 'src/a.ts', startLine: 9, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'low', title: 'c', rationale: 'x', file: 'src/a.ts', startLine: 11, confidence: 0.8, tags: [] },
+    ]);
+    const md = renderPrComment(result, { prNumber: 1, headSha: 'abc1234', hotspots: true });
+    expect(md).toMatch(/\*\*Hotspots\*\*/);
+    expect(md).toContain('`src/a.ts` L5-11');
+    expect(md).toContain('3 findings');
+    expect(md).toContain('top: high');
+  });
+
+  it('omits the Hotspots block when hotspots is absent', () => {
+    const result = aggregate([
+      { agent: 'security', category: 'security', severity: 'high', title: 'a', rationale: 'x', file: 'src/a.ts', startLine: 5, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'medium', title: 'b', rationale: 'x', file: 'src/a.ts', startLine: 9, confidence: 0.8, tags: [] },
+    ]);
+    const md = renderPrComment(result, { prNumber: 1, headSha: 'abc1234' });
+    expect(md).not.toMatch(/\*\*Hotspots\*\*/);
+  });
+
+  it('omits the Hotspots block when no cluster reaches minFindings', () => {
+    const result = aggregate([
+      { agent: 'security', category: 'security', severity: 'high', title: 'a', rationale: 'x', file: 'src/a.ts', startLine: 5, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'medium', title: 'b', rationale: 'x', file: 'src/b.ts', startLine: 9, confidence: 0.8, tags: [] },
+    ]);
+    const md = renderPrComment(result, { prNumber: 1, headSha: 'abc1234', hotspots: true });
+    expect(md).not.toMatch(/\*\*Hotspots\*\*/);
+  });
+
+  it('honors a tightened hotspot windowLines via the options object', () => {
+    const result = aggregate([
+      { agent: 'security', category: 'security', severity: 'high', title: 'a', rationale: 'x', file: 'src/a.ts', startLine: 5, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'medium', title: 'b', rationale: 'x', file: 'src/a.ts', startLine: 30, confidence: 0.8, tags: [] },
+    ]);
+    const md = renderPrComment(result, {
+      prNumber: 1,
+      headSha: 'abc1234',
+      hotspots: { windowLines: 2 },
+    });
+    expect(md).not.toMatch(/\*\*Hotspots\*\*/);
+  });
 });

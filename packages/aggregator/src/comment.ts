@@ -2,6 +2,7 @@ import type { Finding, Severity } from '@clawreview/types';
 import { SEVERITY_LABELS } from '@clawreview/types';
 
 import type { AggregateResult } from './aggregate.js';
+import { detectHotspots, renderHotspotLine, type HotspotOptions } from './hotspots.js';
 
 const SEV_EMOJI: Record<Severity, string> = {
   critical: '🛑',
@@ -40,6 +41,13 @@ export interface CommentOptions {
    * the findings. Designed to be cheap for reviewers to skim without scrolling.
    */
   runSummary?: CommentRunSummary;
+  /**
+   * Optional hotspot detection. When provided, the renderer inserts a
+   * "Hotspots" block between the totals summary and the per-file detail.
+   * Pass `false` (or omit) to disable, `true` for defaults, or an options
+   * object to tune `windowLines` / `minFindings` / `limit`.
+   */
+  hotspots?: boolean | HotspotOptions;
 }
 
 export function renderPrComment(result: AggregateResult, opts: CommentOptions): string {
@@ -75,6 +83,17 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     body.push('', categoryLine);
   }
   body.push('');
+
+  if (opts.hotspots) {
+    const hotspotOpts: HotspotOptions = opts.hotspots === true ? {} : opts.hotspots;
+    const hotspots = detectHotspots(result.findings, hotspotOpts);
+    if (hotspots.length > 0) {
+      body.push('**Hotspots**');
+      body.push('');
+      for (const h of hotspots) body.push(`- ${renderHotspotLine(h)}`);
+      body.push('');
+    }
+  }
 
   for (const group of result.groupedByFile) {
     body.push(`<details><summary><code>${escapeMd(group.file)}</code> (${group.findings.length})</summary>`);
