@@ -4,6 +4,7 @@ export function renderHelp(): string {
 Usage:
   clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
   clawreview validate [--config <path>]
+  clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -24,6 +25,9 @@ Flags:
   --fail-on-budget   Exit non-zero (3) when 'clawreview run' estimates the review will
                      exceed the configured monthly budget. Off by default; the estimate
                      is still printed to stderr either way.
+  --root <dir>       lint-config: root directory to scan (default: cwd).
+  --pattern <name>   lint-config: filenames to match (default: .clawreview.yml). Comma-separated
+                     for multiple, e.g. --pattern .clawreview.yml,clawreview.config.yml.
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
@@ -37,6 +41,8 @@ Examples:
   clawreview run --format gitlab > gl-code-quality-report.json
   clawreview run --format rdjsonl | reviewdog -f rdjsonl -reporter=github-pr-review
   clawreview validate --config examples/strict.clawreview.yml
+  clawreview lint-config --root . --pattern .clawreview.yml
+  clawreview lint-config --format json | jq '.invalid'
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new

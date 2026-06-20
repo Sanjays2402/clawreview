@@ -5,6 +5,7 @@ import { runBaseline } from './commands/baseline.js';
 import { runDiffStats } from './commands/diff-stats.js';
 import { runExplain } from './commands/explain.js';
 import { runAuthors } from './commands/authors.js';
+import { runLintConfig } from './commands/lint-config.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -22,6 +23,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case 'validate':
       await runValidate(args);
+      return;
+    case 'lint-config':
+      await runLintConfig(args);
       return;
     case 'stats':
       await runStats(args);
