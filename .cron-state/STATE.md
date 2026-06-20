@@ -58,17 +58,17 @@ First tick: 2026-06-20
 ### Suppressions / config
 6. ~~File-level inline suppressions — `clawreview-disable-file[:rules]` marker~~ — DONE tick 1 (f5a7a6a)
 7. ~~`.clawreviewignore` finding-level path filter~~ — DONE tick 2 (eda6c4e)
-8. **Config preset import** — `extends: [preset-name]` resolution in ClawReviewConfig loader.
+8. ~~Config preset import (`extends:` chain in CLI loader)~~ — DONE tick 4 (8a95772)
 
 ### Aggregator analysis
 9. ~~Hotspot detection~~ — DONE tick 2 (0517234)
-10. **Per-author finding breakdown** — when git blame is available, attribute findings to authors.
-11. **Finding similarity-merge across agents** — second-pass dedupe by rationale embedding distance (lex).
+10. ~~Per-author finding breakdown (git blame attribution + CLI)~~ — DONE tick 4 (2ff2dd8)
+11. ~~Cross-agent finding similarity-merge (rationale lexical overlap)~~ — DONE tick 4 (63d5277)
 12. ~~Confidence calibration~~ — DONE tick 3 (42dfa40)
 
 ### Pipeline / agents
 13. ~~Per-language prompt rules injection~~ — DONE tick 2 (58eb06b)
-14. **Skip-file allowlist agent guard** — short-circuit agents whose `postFilter` would drop everything.
+14. ~~Skip-file allowlist agent guard (preFilter short-circuit)~~ — DONE tick 4 (8c6f66f)
 15. ~~Cost-budget pre-flight~~ — DONE tick 3 (f928a99)
 
 ### CLI / DX
@@ -78,19 +78,26 @@ First tick: 2026-06-20
 ### Server / queue / telemetry
 18. ~~Queue introspection endpoint~~ — DONE tick 3 (57599bc)
 19. ~~Per-agent latency histogram~~ — DONE tick 3 (b2063ec)
-20. **Webhook replay endpoint** — `POST /internal/webhook/replay` re-dispatches a stored event payload.
+20. ~~Webhook replay endpoint (POST /api/internal/webhook/replay/:deliveryId)~~ — DONE tick 4 (7d9390a)
 
-### Backlog seeded for tick 3
+### Backlog seeded for tick 3 (still open after tick 4)
 - **Foundational infra fix** — wire `@types/node` into `packages/diff`, `packages/llm`, `packages/ui`, `packages/db`, and `packages/aggregator` so `pnpm typecheck`/`pnpm build` flip green on the baseline. Required before any test gate can be run end-to-end via turbo.
 - **Aggregate-level helper for hotspot opts** — promote `hotspots: HotspotOptions` from CommentOptions into an `AggregateOptions.hotspots` so the CLI's text/markdown renderers can pull the same clusters without re-computing.
 - **CLI `clawreview explain` + dashboard parity** — once item 19 (per-agent metrics) lands, wire `explain` to fetch a single finding from the server's review-store endpoint instead of needing the JSON report on disk.
 
-### Backlog seeded for tick 4 (refill — items below + remaining 8, 10, 11, 14, 20 above)
+### Backlog seeded for tick 4 (still open after tick 4 — these are dashboard work, not aggregator)
 - **Cost-budget pre-flight visibility on dashboard** — surface tick 3's `preflightBudget` estimate as a "skipped because preflight" reason in apps/dashboard's review list.
 - **Per-agent histograms in dashboard** — consume `clawreview_agent_duration_seconds` from /metrics and chart it.
 - **Queue introspection in dashboard** — admin page that polls /api/internal/queue and shows pending/inflight + recent failures.
 - **Calibration audit log** — extend the worker's `confidence_calibration_applied` log line into the review-store record so the dashboard can show "n findings auto-promoted/floored".
 - **`clawreview diff-stats --threshold` CI gate** — exit non-zero when changedLines exceeds a configurable cap, for "PR too large to review" enforcement.
+
+### Backlog seeded for tick 5 (refill — original roadmap is now 20/20 done!)
+- **Webhook replay dashboard view** — consume /api/internal/webhook/recent + /replay so on-calls can re-fire stuck deliveries from the dashboard, not curl.
+- **Authors breakdown in PR comment** — append a compact "Top 3 contributors by severity" block at the bottom of the PR comment when the worker has cached blame.
+- **Worker-side similarity merge metrics** — emit a `clawreview_similarity_merges_total{winner_agent,loser_agent}` counter so we can track which agent pairs duplicate most often.
+- **Preset auto-loading from `.clawreview/presets/*.yml`** — let teams ship project-local presets alongside the built-in library.
+- **`clawreview lint-config`** — schema-validate every config file in a repo (find them with a glob) in one CLI invocation, so monorepos with per-package configs can gate them.
 
 ## TICK LOG
 
@@ -132,5 +139,17 @@ Gate results: aggregator 117/117 (+29 new), agents 49/49 (+12 new), cli 36/36 (+
 
 Gate results: aggregator 129/129 (+12 new), agents 65/65 (+16 new), telemetry 11/11 (+5 new), queue 8/8 (+5 new), cli 44/44 (+8 new), server 181/181 (+2 new — internal-queue + worker-metrics agent-histogram), diff 24/24, types 7/7, llm 12/12, github 14/14 — total 495 tests verified passing (+48 over tick 2). Touched-package typecheck: `@clawreview/telemetry` and `@clawreview/queue` clean; `@clawreview/agents` red only on the existing `@types/node`-missing-in-@clawreview/llm baseline (new file `cost-estimator.ts` clean); `apps/cli` clean; `apps/server` adds 10 lines of pre-existing FastifyInstance type-mismatch noise from the new `registerInternalQueueRoutes(app)` call (zero errors in the new route/test files themselves). Push verified: `git ls-remote origin feature/autoship` -> `f928a99`.
 
+### Tick 4 — 2026-06-20 08:32 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Built-in config presets + `extends:` chain in CLI loader | 8a95772 | +425/-8 | 11 new (types) + 7 new (cli) |
+| 2 | Server webhook replay endpoint + bounded in-memory store | 7d9390a | +483/-26 | 6 new (server, with dispatch refactor) |
+| 3 | Agents preFilter short-circuit + UI/backend allowlists | 8c6f66f | +227/-4 | 7 new (agents) |
+| 4 | Aggregator cross-agent similarity merge (rationale overlap) | 63d5277 | +338/-3 | 13 new (aggregator, worker + CLI wired) |
+| 5 | Per-author finding breakdown via git blame + `clawreview authors` | 2ff2dd8 | +638/-0 | 11 new (aggregator) + 3 new (cli) |
+
+Gate results: types 18/18 (+11 new), aggregator 153/153 (+24 new = 13 similarity + 11 authors), agents 72/72 (+7 new), cli 54/54 (+10 new = 7 extends + 3 authors), server 187/187 (+6 new, no regressions after webhook dispatch refactor), diff 24/24, llm 12/12, github 14/14, queue 8/8, telemetry 11/11 — total 553 tests verified passing (+58 over tick 3). Touched-package typecheck delta: `@clawreview/types` clean (presets.ts has zero new errors); `@clawreview/aggregator` similarity.ts and authors.ts clean (only the pre-existing `node:crypto` baseline noise on fingerprint.ts remains); `@clawreview/cli` clean across all new files (authors.ts, config-extends-aware config.ts, git.ts addition); `@clawreview/agents` clean on the modified files (the LLM `@types/node` baseline still shows when typechecking through the workspace graph but `agents.ts`/`prompted-agent.ts`/`prefilter.test.ts` introduce zero new errors); `apps/server` adds 1 line of FastifyInstance type-mismatch noise from the new `registerWebhookReplayRoutes(app)` call mirroring the existing internal-queue baseline pattern (zero errors in the new route/store/test files themselves). Push verified: `git ls-remote origin feature/autoship` -> `2ff2dd8`. **Original roadmap is now 20/20 — refilled with 5 fresh items for tick 5.**
+
 ## Done
-- 1, 2, 3, 4, 5, 6, 7, 9, 12, 13, 15, 16, 17, 18, 19 (and CLI wiring item 4)
+- 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20 — every original roadmap item shipped.
