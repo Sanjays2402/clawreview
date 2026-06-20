@@ -3,6 +3,11 @@ import { SEVERITY_LABELS } from '@clawreview/types';
 
 import type { AggregateResult } from './aggregate.js';
 import { detectHotspots, renderHotspotLine, type HotspotOptions } from './hotspots.js';
+import {
+  attributeFindingsToAuthors,
+  type AuthorAttribution,
+  type BlameMap,
+} from './authors.js';
 
 const SEV_EMOJI: Record<Severity, string> = {
   critical: '🛑',
@@ -29,6 +34,30 @@ export interface CommentRunSummary {
   skippedCount?: number;
 }
 
+/**
+ * Optional author attribution block for the PR comment.
+ *
+ * Two shapes are supported because the worker may either (a) already have
+ * computed the breakdown (the dashboard worker has cached blame) or
+ * (b) hold a raw blame map and want the renderer to compute it. Either way
+ * the renderer emits a compact "Top contributors by severity" list,
+ * collapsed inside a <details> so it doesn't dominate the comment.
+ *
+ * Use `top` to cap the rendered list (default: 3). Authors with zero
+ * findings are silently dropped.
+ */
+export interface CommentAuthorsBlock {
+  /** Pre-computed breakdown (sorted worst-first by `attributeFindingsToAuthors`). */
+  breakdown?: { authors: AuthorAttribution[]; unknown?: { length: number } };
+  /**
+   * Raw blame map — when supplied (and `breakdown` is absent) the renderer
+   * runs `attributeFindingsToAuthors` against the aggregate's findings.
+   */
+  blame?: BlameMap;
+  /** Cap on rendered author rows. Default: 3. */
+  top?: number;
+}
+
 export interface CommentOptions {
   prNumber: number;
   headSha: string;
@@ -48,6 +77,13 @@ export interface CommentOptions {
    * object to tune `windowLines` / `minFindings` / `limit`.
    */
   hotspots?: boolean | HotspotOptions;
+  /**
+   * Optional author attribution. When supplied (and yields >=1 author),
+   * appends a collapsed "Top contributors by severity" block to the
+   * comment so reviewers know who likely introduced the noise. Silent
+   * no-op when blame is empty or only the unknown bucket has entries.
+   */
+  authors?: CommentAuthorsBlock;
 }
 
 export function renderPrComment(result: AggregateResult, opts: CommentOptions): string {
@@ -60,6 +96,7 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
       '',
       'No findings above the configured severity threshold. Nice diff.',
       ...renderRunSummaryBlock(opts.runSummary),
+      ...renderAuthorsBlock(result.findings, opts.authors),
       '',
       footer(opts),
     ].join('\n');
@@ -106,6 +143,7 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
   }
 
   body.push(...renderRunSummaryBlock(opts.runSummary));
+  body.push(...renderAuthorsBlock(result.findings, opts.authors));
   body.push(footer(opts));
   return body.join('\n');
 }
@@ -147,6 +185,70 @@ function renderRunSummaryBlock(rs: CommentRunSummary | undefined): string[] {
     lines.push('');
   }
 
+  lines.push('</details>');
+  lines.push('');
+  return lines;
+}
+
+/**
+ * Render the "Top contributors by severity" block.
+ *
+ * Resolves whichever shape the caller supplied:
+ *   - `authors.breakdown` — already computed, used as-is.
+ *   - `authors.blame` — raw map; we compute the breakdown here.
+ *
+ * Returns `[]` (renders nothing) when:
+ *   - `authors` is unset
+ *   - the resolved breakdown is empty
+ *   - only the unknown bucket has entries
+ */
+function renderAuthorsBlock(
+  findings: readonly Finding[],
+  authors: CommentAuthorsBlock | undefined,
+): string[] {
+  if (!authors) return [];
+
+  let authorRows: AuthorAttribution[];
+  let unknownCount = 0;
+  if (authors.breakdown) {
+    authorRows = authors.breakdown.authors;
+    unknownCount = authors.breakdown.unknown?.length ?? 0;
+  } else if (authors.blame) {
+    const computed = attributeFindingsToAuthors([...findings], authors.blame);
+    authorRows = computed.authors;
+    unknownCount = computed.unknown.length;
+  } else {
+    return [];
+  }
+
+  if (authorRows.length === 0) return [];
+
+  const cap = Math.max(1, authors.top ?? 3);
+  const rows = authorRows.slice(0, cap);
+
+  const lines: string[] = [];
+  lines.push('<details><summary>Top contributors by severity</summary>');
+  lines.push('');
+  lines.push('| Author | Findings | Worst | Breakdown |');
+  lines.push('|---|---|---|---|');
+  for (const a of rows) {
+    const breakdown = (['critical', 'high', 'medium', 'low', 'nit'] as Severity[])
+      .filter((sev) => a.bySeverity[sev] > 0)
+      .map((sev) => `${SEVERITY_LABELS[sev]} ${a.bySeverity[sev]}`)
+      .join(' · ');
+    lines.push(
+      `| ${escapeMd(a.authorName)} | ${a.total} | ${SEV_EMOJI[a.worstSeverity]} ${SEVERITY_LABELS[a.worstSeverity]} | ${breakdown} |`,
+    );
+  }
+  if (authorRows.length > cap) {
+    lines.push('');
+    lines.push(`_… and ${authorRows.length - cap} more author(s)_`);
+  }
+  if (unknownCount > 0) {
+    lines.push('');
+    lines.push(`_${unknownCount} finding(s) had no blame entry (new or generated files)_`);
+  }
+  lines.push('');
   lines.push('</details>');
   lines.push('');
   return lines;
