@@ -1,0 +1,22 @@
+feat(aggregator): PR comment Run summary footer
+
+Extends renderPrComment with an optional runSummary that produces a
+collapsed "Run summary" block at the bottom of the comment. It carries
+wall-clock duration, total LLM cost, skipped-file count, and a
+per-agent breakdown table (status, findings, duration). Reviewers can
+ignore it by default and expand it when they want context: "why did
+this take so long" or "which agent flagged the most issues".
+
+Implementation notes:
+- The block is wrapped in <details><summary>Run summary</summary>
+  so it stays out of the way for tiny diffs.
+- Duration formatting promotes to seconds at >=1s and to "Mm SSs"
+  at >=60s, which is the convention the dashboard already uses.
+- An error agent's row surfaces the error message (truncated at 60
+  chars) so reviewers don't have to dig through logs to see what
+  failed.
+- When runSummary is undefined the block is omitted entirely, so
+  existing callers see no change in output.
+
+Test: 3 new cases cover the happy path, the omission case, and the
+m+s duration formatting; plus an agent-error rendering case.

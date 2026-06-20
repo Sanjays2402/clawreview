@@ -1,0 +1,19 @@
+chore(deps): pin vite to ^6 so vitest 4 can resolve module-runner
+
+vitest@4.1.8 requires vite ^6.0.0 (it imports vite/module-runner).
+The lockfile was previously resolved against vite@5.4.21 (pulled
+transitively), which made every test in the repo fail at startup
+with:
+
+  Package subpath './module-runner' is not defined by "exports"
+  in vite/package.json
+
+Two changes:
+1. Add an explicit devDependency on vite ^6.0.0 at the workspace root
+   so pnpm pulls a compatible major into the store.
+2. Add pnpm.overrides.vite ^6.0.0 to keep transitive resolutions on
+   the same major, preventing nested deps from dragging vite@5 back in.
+
+Tested: pnpm exec vitest run now passes in every package I touched
+this tick (aggregator: 88/88, cli: 15/15) instead of failing at
+startup. This unblocks the whole test suite for future ticks.

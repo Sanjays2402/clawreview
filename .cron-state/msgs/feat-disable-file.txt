@@ -1,0 +1,26 @@
+feat(aggregator): file-level inline suppression marker
+
+Adds a clawreview-disable-file marker that suppresses every finding
+in the entire new-file path the marker appears in, with the same
+optional rule scoping as the existing line-level markers:
+
+  // clawreview-disable-file              suppress all findings in file
+  // clawreview-disable-file: style       suppress only style findings
+
+Useful for vendored copies, generated stubs, or fixture data the
+author knows the agents will flag uselessly, without having to either
+add a marker on every line or maintain a .clawreviewignore entry.
+
+Implementation:
+- SuppressionMap gains a fileLevel: Map<path, Suppression>.
+- buildSuppressionMap records file-level markers on every added line
+  carrying the comment, merging scopes the same way per-line markers
+  merge (any unscoped marker widens to "all rules").
+- A disable-file line is intentionally NOT also recorded as a same-line
+  ignore, since the "ignore" prefix would otherwise silently double-
+  account it and widen the per-line map.
+- applySuppressions short-circuits the line-range walk when a matching
+  file-level entry exists; rule scope is still honoured.
+
+Test: 4 new cases cover file-level discovery, scoped suppression,
+cross-file isolation, and the double-account guard.

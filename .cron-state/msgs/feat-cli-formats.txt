@@ -1,0 +1,21 @@
+feat(cli): --format markdown and --format gitlab in clawreview run
+
+Wires two new output formats into the CLI so the new aggregator
+exporters are reachable end-to-end:
+
+  clawreview run --format markdown > review.md
+  clawreview run --format gitlab > gl-code-quality-report.json
+
+--format markdown produces the standalone renderReviewReport() output,
+useful for pasting into Notion, attaching to chat, or storing as a CI
+artifact. The pipeline summary (status, timings, agent breakdown,
+total cost) is funneled into ReportMetadata so the heading and the
+agent table reflect the exact run that produced the findings.
+
+--format gitlab emits the GitLab Code Quality JSON array consumed by
+GitLab CI's merge-request Code Quality widget. Indented output makes
+the artifact human-readable when diffed across runs.
+
+Help text is updated with both new formats and example invocations.
+The format type union is widened to match; existing formats (text,
+json, sarif, junit, csv) are unchanged.

@@ -1,0 +1,20 @@
+feat(aggregator): GitLab Code Quality JSON exporter
+
+Adds toGitlabCodeQuality() alongside the existing SARIF/JUnit/CSV
+exporters. GitLab CI consumes this JSON shape natively in its Code
+Quality widget; teams using GitLab pipelines can now wire ClawReview
+findings into the merge-request UI without writing a translator.
+
+The exporter:
+- Maps ClawReview severities to GitLab severities (critical=blocker,
+  high=critical, medium=major, low=minor, nit=info).
+- Reuses the aggregator fingerprint so re-runs collapse the same
+  finding across pipeline executions, matching GitLab's expectation.
+- Forwards endLine when present, surfaces an opt-in Security/
+  Performance/Style/Bug-Risk category, and embeds a content body
+  with rationale, CWE reference, and suggested patch.
+- Accepts a severityMap override so policy-driven teams can pin
+  their own mapping.
+
+Test: 9 cases cover the field shape, severity mapping, category
+heuristic, content body, custom override, and AggregateResult input.

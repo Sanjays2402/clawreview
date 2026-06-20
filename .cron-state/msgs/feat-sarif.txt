@@ -1,0 +1,28 @@
+feat(aggregator): enrich SARIF with fingerprints, helpUri, suppressions
+
+Three additive SARIF improvements that make ClawReview's SARIF output
+play better with downstream code-scanning tools:
+
+1. partialFingerprints on every result, populated with the same content
+   fingerprint the aggregator uses for baseline diffing. GitHub code
+   scanning and other SARIF consumers use this key to collapse "the
+   same finding" across re-runs and force-pushes, so two paths
+   (CSV/baseline and SARIF/code-scanning) now agree on identity.
+   We emit both clawreviewFingerprint and primaryLocationLineHash
+   (the GitHub-recognised key) with the same value.
+
+2. helpUriFor option lets callers attach a per-rule documentation URL,
+   e.g. helpUriFor: ({ ruleId }) => `https://docs.../rules/${ruleId}`.
+   Exceptions thrown inside the callback and empty-string returns are
+   swallowed so a stale doc map cannot break SARIF emission.
+
+3. suppressions[] is now emitted on results whose finding was suppressed
+   by clawreview-ignore markers. Code-scanning tools render suppressed
+   findings differently (greyed-out, not gating); previously we just
+   dropped them from the report, losing the audit trail. Callers pass
+   the same Finding objects that the suppressor returned, and we match
+   by fingerprint.
+
+Test: 4 new cases cover partialFingerprints equality, helpUri happy
+path, exception swallowing, empty-string handling, and per-result
+suppression attachment.
