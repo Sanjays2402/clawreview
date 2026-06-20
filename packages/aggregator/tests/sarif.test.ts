@@ -2,6 +2,7 @@ import type { Finding } from '@clawreview/types';
 import { describe, expect, it } from 'vitest';
 
 import { aggregate } from '../src/aggregate.js';
+import { fingerprint } from '../src/fingerprint.js';
 import { toSarif } from '../src/sarif.js';
 
 function f(over: Partial<Finding> = {}): Finding {
@@ -70,5 +71,55 @@ describe('toSarif', () => {
   it('maps severity nit to SARIF note', () => {
     const log = toSarif([f({ severity: 'nit' })]);
     expect(log.runs[0]!.results[0]!.level).toBe('note');
+  });
+
+  it('emits partialFingerprints matching the aggregator fingerprint', () => {
+    const finding = f();
+    const log = toSarif([finding]);
+    const r = log.runs[0]!.results[0]!;
+    expect(r.partialFingerprints?.clawreviewFingerprint).toBe(fingerprint(finding));
+    expect(r.partialFingerprints?.primaryLocationLineHash).toBe(fingerprint(finding));
+  });
+
+  it('attaches helpUri via helpUriFor callback', () => {
+    const log = toSarif([f()], {
+      helpUriFor: ({ ruleId }) => `https://docs.clawreview.dev/rules/${ruleId}`,
+    });
+    const rule = log.runs[0]!.tool.driver.rules[0]!;
+    expect(rule.helpUri).toBe('https://docs.clawreview.dev/rules/security.security');
+  });
+
+  it('swallows helpUriFor exceptions without breaking SARIF emission', () => {
+    const log = toSarif([f()], {
+      helpUriFor: () => {
+        throw new Error('boom');
+      },
+    });
+    expect(log.runs[0]!.tool.driver.rules[0]!.helpUri).toBeUndefined();
+    expect(log.runs[0]!.results).toHaveLength(1);
+  });
+
+  it('omits helpUri when helpUriFor returns an empty string', () => {
+    const log = toSarif([f()], { helpUriFor: () => '' });
+    expect(log.runs[0]!.tool.driver.rules[0]!.helpUri).toBeUndefined();
+  });
+
+  it('records suppressions on matching results', () => {
+    const finding = f();
+    const log = toSarif([finding], {
+      suppressions: [{ finding, kind: 'inSource', justification: 'clawreview-ignore' }],
+    });
+    const r = log.runs[0]!.results[0]!;
+    expect(r.suppressions).toEqual([{ kind: 'inSource', justification: 'clawreview-ignore' }]);
+  });
+
+  it('does not attach suppressions on findings outside the suppression list', () => {
+    const a = f();
+    const b = f({ file: 'src/other.ts', startLine: 99 });
+    const log = toSarif([a, b], {
+      suppressions: [{ finding: a, justification: 'inline' }],
+    });
+    expect(log.runs[0]!.results[0]!.suppressions).toBeDefined();
+    expect(log.runs[0]!.results[1]!.suppressions).toBeUndefined();
   });
 });

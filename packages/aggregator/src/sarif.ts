@@ -1,6 +1,7 @@
 import type { Finding, Severity } from '@clawreview/types';
 
 import type { AggregateResult } from './aggregate.js';
+import { fingerprint } from './fingerprint.js';
 
 export interface SarifOptions {
   toolName?: string;
@@ -10,7 +11,25 @@ export interface SarifOptions {
   commitSha?: string;
   /** Optional repository root URI baked into versionControlProvenance. */
   repositoryUri?: string;
+  /**
+   * Optional template producing the `helpUri` for each rule. Receives the
+   * rule id (e.g. `security.security`) and finding agent + category and
+   * returns a URL string. When omitted, `helpUri` is not emitted.
+   *
+   * Typical use: link findings back to the dashboard's per-agent docs:
+   *   helpUriFor: (id) => `https://docs.clawreview.dev/rules/${id}`
+   */
+  helpUriFor?: (info: { ruleId: string; agent: string; category: string }) => string;
+  /**
+   * Findings that were suppressed (e.g. by inline markers or .clawreviewignore).
+   * Emitted as a separate SARIF `suppressions[]` array on each result, keeping
+   * the audit trail visible while still letting consumers respect the
+   * suppression. Pass the same Finding objects that the suppressor returned.
+   */
+  suppressions?: ReadonlyArray<{ finding: Finding; kind?: SarifSuppressionKind; justification?: string }>;
 }
+
+export type SarifSuppressionKind = 'inSource' | 'external';
 
 const DEFAULT_TOOL_NAME = 'clawreview';
 const DEFAULT_TOOL_VERSION = '0.1.0';
@@ -34,11 +53,13 @@ export function toSarif(
   const toolVersion = opts.toolVersion ?? DEFAULT_TOOL_VERSION;
   const informationUri = opts.informationUri ?? DEFAULT_INFORMATION_URI;
 
-  const rules = buildRules(findings);
+  const rules = buildRules(findings, opts);
   const ruleIndex = new Map(rules.map((r, i) => [r.id, i]));
+  const suppressionByFp = indexSuppressionsByFingerprint(opts.suppressions ?? []);
 
   const results: SarifResult[] = findings.map((f) => {
     const ruleId = ruleIdFor(f);
+    const fp = fingerprint(f);
     const r: SarifResult = {
       ruleId,
       ruleIndex: ruleIndex.get(ruleId) ?? -1,
@@ -55,6 +76,15 @@ export function toSarif(
           },
         },
       ],
+      // partialFingerprints lets code-scanning UIs collapse the same finding
+      // across re-runs/force-pushes; we use the same content fingerprint
+      // the aggregator uses for baseline diffing so the two views agree.
+      partialFingerprints: {
+        clawreviewFingerprint: fp,
+        // GitHub's "primaryLocationLineHash" key, with our stable fingerprint
+        // value, is the most widely recognised cross-tool key.
+        primaryLocationLineHash: fp,
+      },
       properties: {
         severity: f.severity,
         confidence: f.confidence,
@@ -82,6 +112,15 @@ export function toSarif(
               ],
             },
           ],
+        },
+      ];
+    }
+    const suppression = suppressionByFp.get(fp);
+    if (suppression) {
+      r.suppressions = [
+        {
+          kind: suppression.kind ?? 'inSource',
+          ...(suppression.justification ? { justification: suppression.justification } : {}),
         },
       ];
     }
@@ -124,12 +163,12 @@ function messageText(f: Finding): string {
   return f.cwe ? `${f.title}\n${f.rationale}\nReference: ${f.cwe}` : `${f.title}\n${f.rationale}`;
 }
 
-function buildRules(findings: Finding[]): SarifRule[] {
+function buildRules(findings: Finding[], opts: SarifOptions): SarifRule[] {
   const seen = new Map<string, SarifRule>();
   for (const f of findings) {
     const id = ruleIdFor(f);
     if (seen.has(id)) continue;
-    seen.set(id, {
+    const rule: SarifRule = {
       id,
       name: id,
       shortDescription: { text: `${f.category} finding from ${f.agent}` },
@@ -139,9 +178,28 @@ function buildRules(findings: Finding[]): SarifRule[] {
         agent: f.agent,
         ...(f.cwe ? { cwe: f.cwe } : {}),
       },
-    });
+    };
+    if (opts.helpUriFor) {
+      try {
+        const uri = opts.helpUriFor({ ruleId: id, agent: f.agent, category: f.category });
+        if (uri) rule.helpUri = uri;
+      } catch {
+        // helpUriFor is best-effort. Never let it block SARIF emission.
+      }
+    }
+    seen.set(id, rule);
   }
   return [...seen.values()];
+}
+
+function indexSuppressionsByFingerprint(
+  list: ReadonlyArray<{ finding: Finding; kind?: SarifSuppressionKind; justification?: string }>,
+): Map<string, { kind?: SarifSuppressionKind; justification?: string }> {
+  const map = new Map<string, { kind?: SarifSuppressionKind; justification?: string }>();
+  for (const s of list) {
+    map.set(fingerprint(s.finding), { kind: s.kind, justification: s.justification });
+  }
+  return map;
 }
 
 export function levelFor(severity: Severity): 'error' | 'warning' | 'note' {
@@ -177,6 +235,7 @@ export interface SarifRule {
   name: string;
   shortDescription: { text: string };
   defaultConfiguration: { level: 'error' | 'warning' | 'note' };
+  helpUri?: string;
   properties?: Record<string, unknown>;
 }
 
@@ -191,7 +250,9 @@ export interface SarifResult {
       region: { startLine: number; endLine: number };
     };
   }>;
+  partialFingerprints?: Record<string, string>;
   properties?: Record<string, unknown>;
+  suppressions?: Array<{ kind: SarifSuppressionKind; justification?: string }>;
   fixes?: Array<{
     description: { text: string };
     artifactChanges: Array<{
