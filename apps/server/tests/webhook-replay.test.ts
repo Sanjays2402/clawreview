@@ -162,4 +162,122 @@ describe('/api/internal/webhook/recent + /replay/:deliveryId', () => {
       reason: 'draft',
     });
   });
+
+  it('filters /recent by ?event=', async () => {
+    _resetWebhookStoreForTests();
+    await deliver(app, 'pr-1', BASE_PR);
+    await deliver(app, 'pr-2', BASE_PR);
+    // Push a non-pull_request entry directly into the store so we don't
+    // need a second receiver path. The route still walks the same store.
+    getWebhookStore().put({
+      deliveryId: 'push-1',
+      event: 'push',
+      action: undefined,
+      payload: {},
+      receivedAt: new Date().toISOString(),
+      repoFullName: 'sanjay/demo',
+    });
+
+    const all = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent',
+    });
+    expect(all.json().entries.length).toBe(3);
+
+    const onlyPush = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?event=push',
+    });
+    expect(onlyPush.json().entries.length).toBe(1);
+    expect(onlyPush.json().entries[0].event).toBe('push');
+    expect(onlyPush.json().appliedFilters).toMatchObject({ event: 'push' });
+
+    const onlyPr = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?event=pull_request',
+    });
+    expect(onlyPr.json().entries.length).toBe(2);
+    for (const e of onlyPr.json().entries) {
+      expect(e.event).toBe('pull_request');
+    }
+  });
+
+  it('filters /recent by ?sinceMs= (only entries newer than the cutoff)', async () => {
+    _resetWebhookStoreForTests();
+    // Manually populate so we can control receivedAt; the receiver
+    // stamps it with `now`, which is fine for the cutoff = "now - 1h"
+    // case below.
+    const now = Date.now();
+    const oneDayAgo = new Date(now - 24 * 3600_000).toISOString();
+    const oneHourAgo = new Date(now - 3600_000).toISOString();
+    const recent = new Date(now - 60_000).toISOString();
+    getWebhookStore().put({
+      deliveryId: 'old', event: 'pull_request', payload: {}, receivedAt: oneDayAgo, repoFullName: 'a/b',
+    });
+    getWebhookStore().put({
+      deliveryId: 'mid', event: 'pull_request', payload: {}, receivedAt: oneHourAgo, repoFullName: 'a/b',
+    });
+    getWebhookStore().put({
+      deliveryId: 'new', event: 'pull_request', payload: {}, receivedAt: recent, repoFullName: 'a/b',
+    });
+
+    const cutoff = now - 30 * 60_000; // 30 minutes ago
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/internal/webhook/recent?sinceMs=${cutoff}`,
+    });
+    const ids = res.json().entries.map((e: { deliveryId: string }) => e.deliveryId);
+    expect(ids).toEqual(['new']);
+    expect(res.json().appliedFilters.sinceMs).toBe(cutoff);
+  });
+
+  it('accepts ?since= as an ISO-8601 alternative to ?sinceMs=', async () => {
+    _resetWebhookStoreForTests();
+    const now = Date.now();
+    const earlier = new Date(now - 2 * 3600_000).toISOString();
+    const later = new Date(now - 60_000).toISOString();
+    getWebhookStore().put({ deliveryId: 'a', event: 'pull_request', payload: {}, receivedAt: earlier });
+    getWebhookStore().put({ deliveryId: 'b', event: 'pull_request', payload: {}, receivedAt: later });
+    const cutoffIso = new Date(now - 3600_000).toISOString();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/internal/webhook/recent?since=${encodeURIComponent(cutoffIso)}`,
+    });
+    const ids = res.json().entries.map((e: { deliveryId: string }) => e.deliveryId);
+    expect(ids).toEqual(['b']);
+  });
+
+  it('filters /recent by ?repo= (repoFullName equality)', async () => {
+    _resetWebhookStoreForTests();
+    const t = new Date().toISOString();
+    getWebhookStore().put({
+      deliveryId: 'a', event: 'pull_request', payload: {}, receivedAt: t, repoFullName: 'team/web',
+    });
+    getWebhookStore().put({
+      deliveryId: 'b', event: 'pull_request', payload: {}, receivedAt: t, repoFullName: 'team/api',
+    });
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?repo=team/api',
+    });
+    const ids = res.json().entries.map((e: { deliveryId: string }) => e.deliveryId);
+    expect(ids).toEqual(['b']);
+  });
+
+  it('combines event + sinceMs filters with AND semantics', async () => {
+    _resetWebhookStoreForTests();
+    const now = Date.now();
+    const oldPr = new Date(now - 24 * 3600_000).toISOString();
+    const newPr = new Date(now - 60_000).toISOString();
+    const newPush = new Date(now - 30_000).toISOString();
+    getWebhookStore().put({ deliveryId: 'oldpr', event: 'pull_request', payload: {}, receivedAt: oldPr });
+    getWebhookStore().put({ deliveryId: 'newpr', event: 'pull_request', payload: {}, receivedAt: newPr });
+    getWebhookStore().put({ deliveryId: 'newpush', event: 'push', payload: {}, receivedAt: newPush });
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/internal/webhook/recent?event=pull_request&sinceMs=${now - 3600_000}`,
+    });
+    const ids = res.json().entries.map((e: { deliveryId: string }) => e.deliveryId);
+    expect(ids).toEqual(['newpr']);
+  });
 });

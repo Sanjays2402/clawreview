@@ -44,20 +44,50 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
     '/api/internal/webhook/recent',
     { preHandler: [app.requireRole('readonly')] },
     async (req) => {
-      const limitRaw = (req.query as { limit?: unknown } | undefined)?.limit;
-      const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
-      const entries = getWebhookStore().list(limit).map((e) => ({
-        deliveryId: e.deliveryId,
-        event: e.event,
-        action: e.action,
-        receivedAt: e.receivedAt,
-        repoFullName: e.repoFullName,
-        installationId: e.installationId,
-      }));
+      const q = (req.query ?? {}) as {
+        limit?: unknown;
+        event?: unknown;
+        sinceMs?: unknown;
+        since?: unknown;
+        repo?: unknown;
+        repoFullName?: unknown;
+      };
+      const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
+      const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
+      const repoFullName =
+        typeof q.repoFullName === 'string'
+          ? q.repoFullName
+          : typeof q.repo === 'string'
+            ? q.repo
+            : undefined;
+      // Accept either `?sinceMs=<unix-ms>` or `?since=<ISO-8601>`. The ISO
+      // form is friendlier when an operator is poking at it from a
+      // browser; the ms form is friendlier from code.
+      let sinceMs: number | undefined;
+      const sinceMsRaw = q.sinceMs;
+      const sinceRaw = q.since;
+      if (typeof sinceMsRaw === 'string' || typeof sinceMsRaw === 'number') {
+        const n = Number(sinceMsRaw);
+        if (Number.isFinite(n) && n >= 0) sinceMs = n;
+      } else if (typeof sinceRaw === 'string' && sinceRaw.length > 0) {
+        const n = Date.parse(sinceRaw);
+        if (Number.isFinite(n)) sinceMs = n;
+      }
+      const entries = getWebhookStore()
+        .list({ limit, event, sinceMs, repoFullName })
+        .map((e) => ({
+          deliveryId: e.deliveryId,
+          event: e.event,
+          action: e.action,
+          receivedAt: e.receivedAt,
+          repoFullName: e.repoFullName,
+          installationId: e.installationId,
+        }));
       return {
         requestId: req.id,
         size: getWebhookStore().size(),
         limit,
+        appliedFilters: { event, sinceMs, repoFullName },
         entries,
       };
     },

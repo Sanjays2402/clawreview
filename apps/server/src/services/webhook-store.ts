@@ -26,11 +26,40 @@ export interface WebhookEntry {
   installationId?: number;
 }
 
+/**
+ * Filter options for `WebhookStore.list`.
+ *
+ * All filters AND together. Applied BEFORE the `limit` cap, so e.g.
+ * `list({ event: 'push', limit: 50 })` returns up to 50 push deliveries,
+ * not "the 50 most recent of any kind, filtered to push".
+ */
+export interface WebhookListOptions {
+  /** Cap on returned entries (default: 50, hard ceiling: 200). */
+  limit?: number;
+  /** Restrict to entries whose `event` equals this string. */
+  event?: string;
+  /**
+   * Lower-bound on `receivedAt`, milliseconds since epoch. Entries with
+   * a parse-failed `receivedAt` are kept (we'd rather over-include than
+   * silently drop on a bad ISO string).
+   */
+  sinceMs?: number;
+  /** Restrict to entries whose `repoFullName` equals this string. */
+  repoFullName?: string;
+}
+
 export interface WebhookStore {
   put(entry: WebhookEntry): void;
   get(deliveryId: string): WebhookEntry | undefined;
-  /** Newest-first list of entries, capped at `limit`. */
-  list(limit?: number): WebhookEntry[];
+  /**
+   * Newest-first list of entries, capped at `limit`. Accepts either:
+   *   - a numeric limit (back-compat with the original signature), or
+   *   - a `WebhookListOptions` bag with event/sinceMs/repoFullName
+   *     filters and an explicit `limit`.
+   *
+   * Filters apply BEFORE the limit so dashboards can paginate cleanly.
+   */
+  list(opts?: number | WebhookListOptions): WebhookEntry[];
   size(): number;
   clear(): void;
 }
@@ -59,11 +88,22 @@ export class InMemoryWebhookStore implements WebhookStore {
     return this.entries.get(deliveryId);
   }
 
-  list(limit = 50): WebhookEntry[] {
+  list(opts?: number | WebhookListOptions): WebhookEntry[] {
+    const o: WebhookListOptions = typeof opts === 'number' ? { limit: opts } : opts ?? {};
+    const limit = Math.max(1, Math.min(MAX_ENTRIES, o.limit ?? 50));
     const out: WebhookEntry[] = [];
     const all = [...this.entries.values()];
     for (let i = all.length - 1; i >= 0 && out.length < limit; i -= 1) {
-      out.push(all[i]!);
+      const e = all[i]!;
+      if (o.event !== undefined && e.event !== o.event) continue;
+      if (o.repoFullName !== undefined && e.repoFullName !== o.repoFullName) continue;
+      if (o.sinceMs !== undefined) {
+        const t = Date.parse(e.receivedAt);
+        // NaN (unparseable) is kept rather than dropped to bias toward
+        // showing the operator more rather than less in a degraded state.
+        if (Number.isFinite(t) && t < o.sinceMs) continue;
+      }
+      out.push(e);
     }
     return out;
   }
