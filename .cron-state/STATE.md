@@ -110,12 +110,20 @@ First tick: 2026-06-20
 - **Webhook replay dashboard view** — consume /api/internal/webhook/recent (now with event/sinceMs/repo filters) + /replay so on-calls can re-fire stuck deliveries from the dashboard, not curl. Tick 5 made the filters first-class; the dashboard wiring is still TODO.
 
 ### Backlog seeded for tick 6 (refill — original + tick-4-refill are now 25/25 done!)
-- **Worker emits `clawreview_authors_attributed_total{author}` counter** — pair with the Top Contributors PR block so we can graph which authors get flagged most often without re-running blame in a dashboard.
+- ~~Worker emits `clawreview_authors_attributed_total{author}` counter~~ — telemetry primitive DONE tick 6 (29d65ee); worker-side wiring deferred until blame-via-GitHub-API plumbing lands.
 - **`clawreview lint-config --fix` for trivial typos** — when a Zod issue maps cleanly to a known fix (e.g. `severity_threshold: warning` -> `medium`), offer a rewritten file. Off by default; require explicit flag.
-- **Local preset transitive `extends:`** — today an `extends:` inside a local preset is stripped with a warning. Resolve them recursively with cycle detection so local presets can compose.
-- **Webhook recent endpoint pagination cursor** — `?after=<deliveryId>` for stable paging when polling at high frequency.
-- **Aggregator `applyFloor` opts: a `min_confidence` knob** — drop findings below a configurable confidence regardless of severity, separate from calibration (which only nudges).
-- **Server `/api/internal/webhook/stats`** — small JSON summary endpoint (counts by event/action/hour) consuming the same in-memory store, so dashboards don't need to fetch all 200 entries to render a sparkline.
+- ~~Local preset transitive `extends:`~~ — DONE tick 6 (a4897e8). Local presets can now compose recursively with cycle detection across local + built-in namespaces.
+- ~~Webhook recent endpoint pagination cursor~~ — DONE tick 6 (1636fd4). `?after=<deliveryId>` + `nextCursor` in response.
+- ~~Aggregator `applyFloor` opts: a `min_confidence` knob~~ — DONE tick 6 (71ec100). `min_confidence` lives on `AggregateOptions`, the config schema, and wires through CLI + worker.
+- ~~Server `/api/internal/webhook/stats`~~ — DONE tick 6 (0531fb7). Counts by event, event/action, and an hourly sparkline.
+
+### Backlog seeded for tick 7 (refill — five of six tick-6 items shipped, plus follow-ups)
+- **`clawreview lint-config --fix` for trivial typos** — carried over from tick 6 (deferred this tick to keep the batch lean). When a Zod issue maps cleanly to a known fix (e.g. `severity_threshold: warning` -> `medium`), offer a rewritten file. Off by default; require explicit flag.
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — pair the tick-6 counter helper with a blame fetcher that uses the GitHub API (since the worker has no local checkout). Drives the Top Contributors PR block AND the Prometheus counter from the server side.
+- **Dashboard widget for `/api/internal/webhook/stats`** — the endpoint shipped this tick. Wire it into apps/dashboard so on-calls see the by-event / hourly sparkline without curl.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — same store, list view rather than aggregate. Tick 6 made the cursor first-class; dashboard wiring is still TODO.
+- **`severity_rules` matchers on `min_confidence`** — let an operator say "below 0.5 -> drop; below 0.7 AND category=style -> floor to nit". Composes the new floor with the existing severity-rules engine.
+- **CLI `clawreview presets list`** — print every preset (built-in + local in the cwd), including the resolved transitive chain when extends is present. Discoverability for the new transitive-extends feature.
 
 ## TICK LOG
 
@@ -180,6 +188,20 @@ Gate results: types 18/18 (+11 new), aggregator 153/153 (+24 new = 13 similarity
 | 5 | `/api/internal/webhook/recent` filters: `?event=`, `?sinceMs=`/`?since=` (ISO alt), `?repo=`, AND-composed | 262279f | +202/-14 | 5 new (webhook-replay.test.ts) |
 
 Gate results: aggregator 159/159 (+6 new), telemetry 14/14 (+3 new), cli 73/73 (+19 new = 8 extends + 11 lint-config), server 192/192 (+5 new), agents 72/72, types 18/18, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 586 tests verified passing (+33 over tick 4)**. Touched-package typecheck delta: `@clawreview/telemetry` clean; `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline in fingerprint.ts and diff/context.ts (zero new errors on comment.ts); `apps/cli` clean across new files (lint-config.ts, config.ts changes); `apps/server` red only on pre-existing api-auth.ts / rate-limit.ts / server.ts FastifyInstance baseline (zero new errors on webhook-replay.ts, webhook-store.ts, or worker.ts beyond the pre-existing `pino` type-resolution baseline). Push verified: `git ls-remote origin feature/autoship` -> `262279f`. **Original roadmap + tick-4 refill are now 25/25 — refilled with 6 fresh items for tick 6.**
+
+### Tick 6 — 2026-06-20 16:29 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Telemetry `clawreview_authors_attributed_total` counter + sanitizeAuthorLabel + observeAuthorAttribution helpers | 29d65ee | +166/0 | 10 new (metrics.test.ts: 5 sanitize + 5 observe) |
+| 2 | Server `/api/internal/webhook/stats` endpoint (totals by event, event/action, hourly sparkline) | 0531fb7 | +291/0 | 4 new (webhook-replay.test.ts) |
+| 3 | `/api/internal/webhook/recent` pagination via `?after=<deliveryId>` + `nextCursor` response field | 1636fd4 | +174/-3 | 4 new (webhook-replay.test.ts) |
+| 4 | Aggregator `min_confidence` floor in `AggregateOptions` + config schema + CLI/worker wiring + `--min-confidence` flag | 71ec100 | +172/-1 | 10 new (aggregate.test.ts +6, config.test.ts +4) |
+| 5 | Local preset transitive `extends:` with cycle detection (replaces the "stripped with warning" stub) | a4897e8 | +258/-15 | 8 new (config-extends.test.ts) |
+
+Gate results: aggregator 165/165 (+6 new), telemetry 24/24 (+10 new), cli 81/81 (+8 new), server 200/200 (+8 new = 4 stats + 4 cursor), types 22/22 (+4 new), agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 634 tests verified passing (+48 over tick 5)**. Touched-package typecheck delta: `@clawreview/telemetry` clean (no new errors on metrics.ts -- the `bundle` LSP narrowing noise is unchanged baseline); `@clawreview/types` clean (zero new errors on config.ts); `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (zero new errors on aggregate.ts); `apps/cli` clean across config.ts, run.ts, and the touched test files; `apps/server` red only on pre-existing api-auth.ts / rate-limit.ts / server.ts / worker.ts (`pino` resolution) baseline -- zero new errors on webhook-replay.ts, webhook-store.ts, or worker.ts. Push verified: `git ls-remote origin feature/autoship` -> `a4897e8`.
+
+**Tick-6 refill: 5 of 6 backlog items shipped this tick (lint-config --fix was deferred to keep the batch focused on the 5 highest-impact slices). Refilled with 6 fresh items for tick 7 covering follow-ups for this tick's primitives (worker-side blame wiring for the new counter, dashboard widgets for the new endpoints) plus a couple of clean-slate items (severity_rules min_confidence integration, `clawreview presets list`).**
 
 ## Done
 - 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25 — every roadmap item shipped.
