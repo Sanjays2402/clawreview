@@ -13,7 +13,7 @@ Flags:
   --base <ref>       Git base ref. Defaults to origin/main if reachable, otherwise main.
   --head <ref>       Git head ref. Defaults to HEAD.
   --config <path>    Path to a .clawreview.yml. Defaults to ./.clawreview.yml.
-  --format <fmt>     Output format: text (default), json, sarif, junit, csv.
+  --format <fmt>     Output format: text (default), json, sarif, junit, csv, gitlab, markdown.
   --threshold <sev>  Override severity threshold: critical|high|medium|low|nit.
   --concurrency <n>  Max parallel (chunk x agent) tasks.
   --no-color         Disable colored output.
@@ -26,6 +26,8 @@ Environment:
 Examples:
   clawreview run --base main --head HEAD
   clawreview run --config .clawreview.yml --format json
+  clawreview run --format markdown > review.md
+  clawreview run --format gitlab > gl-code-quality-report.json
   clawreview validate --config examples/strict.clawreview.yml
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json

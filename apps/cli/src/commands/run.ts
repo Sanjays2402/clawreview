@@ -3,7 +3,18 @@ import { cwd as getCwd } from 'node:process';
 import kleur from 'kleur';
 import { ProviderRegistry } from '@clawreview/llm';
 import { runPipeline } from '@clawreview/agents';
-import { aggregate, applySeverityRules, applySuppressions, buildSuppressionMap, toSarif, toJUnitXml, toCsv } from '@clawreview/aggregator';
+import {
+  aggregate,
+  applySeverityRules,
+  applySuppressions,
+  buildSuppressionMap,
+  renderReviewReport,
+  toCsv,
+  toGitlabCodeQuality,
+  toJUnitXml,
+  toSarif,
+  type ReportMetadata,
+} from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -21,7 +32,14 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   const cwd = getCwd();
   const base = String(args.flags.base ?? (await detectBase(cwd)));
   const head = String(args.flags.head ?? 'HEAD');
-  const format = String(args.flags.format ?? 'text') as 'text' | 'json' | 'sarif' | 'junit' | 'csv';
+  const format = String(args.flags.format ?? 'text') as
+    | 'text'
+    | 'json'
+    | 'sarif'
+    | 'junit'
+    | 'csv'
+    | 'gitlab'
+    | 'markdown';
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
 
   const cfg = await loadConfig(args.flags.config ? String(args.flags.config) : undefined, cwd);
@@ -113,9 +131,53 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     process.stdout.write(toCsv(result));
     return;
   }
+  if (format === 'gitlab') {
+    // GitLab Code Quality expects a JSON array; emit with indentation so
+    // the artifact is human-readable when diffed across runs.
+    console.log(JSON.stringify(toGitlabCodeQuality(result), null, 2));
+    return;
+  }
+  if (format === 'markdown') {
+    // Standalone Markdown report. Useful for pasting into Notion, attaching
+    // to a chat, or producing a CI artifact. We derive ReviewMetadata from
+    // the pipeline summary so the heading, agent table, and totals reflect
+    // the exact run that produced the findings.
+    const meta = toReportMetadata(summary, cwd);
+    process.stdout.write(renderReviewReport(meta, result.findings));
+    return;
+  }
   console.log(renderTextReport(result, { noColor }));
   if (result.totals.critical > 0) process.exitCode = 2;
   else if (result.totals.high > 0) process.exitCode = 1;
+}
+
+function toReportMetadata(
+  summary: Awaited<ReturnType<typeof runPipeline>>['summary'],
+  cwd: string,
+): ReportMetadata {
+  const completed = summary.completedAt ? new Date(summary.completedAt) : undefined;
+  const started = new Date(summary.startedAt);
+  const durationMs = completed ? completed.getTime() - started.getTime() : undefined;
+  return {
+    reviewId: `local-${started.getTime().toString(36)}`,
+    owner: summary.pullRequest.owner,
+    repo: summary.pullRequest.repo || (cwd.split('/').pop() ?? 'repo'),
+    prNumber: summary.pullRequest.number,
+    headSha: summary.pullRequest.headSha,
+    baseSha: summary.pullRequest.baseSha,
+    status: summary.status,
+    createdAt: summary.startedAt,
+    completedAt: summary.completedAt,
+    durationMs,
+    totalCostUsd: summary.totalCostUsd,
+    agentExecutions: summary.agentExecutions.map((e) => ({
+      agent: e.agent,
+      status: e.status,
+      durationMs: e.durationMs,
+      findings: e.findings.length,
+      error: e.error,
+    })),
+  };
 }
 
 async function safeRevParse(cwd: string, ref: string): Promise<string | undefined> {
@@ -125,4 +187,3 @@ async function safeRevParse(cwd: string, ref: string): Promise<string | undefine
     return undefined;
   }
 }
-
