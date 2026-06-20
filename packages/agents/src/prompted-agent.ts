@@ -13,6 +13,18 @@ export interface PromptedAgentOptions {
   /** Optional post-filter applied to findings emitted by the model. */
   postFilter?: (f: Finding, input: AgentRunInput) => boolean;
   /**
+   * Optional pre-flight chunk filter. If supplied AND returns false for
+   * the current chunk, the agent SKIPS the model call entirely and
+   * returns `{ findings: [], promptTokens: 0, completionTokens: 0 }`.
+   *
+   * This is the cheap, fast cousin of `postFilter`: it lets agents that
+   * only care about a narrow language/path subset (accessibility on
+   * UI files, sql-injection on backend code) bow out before paying for
+   * an LLM round trip. When omitted the agent runs against every chunk
+   * the pipeline routes to it, exactly like before.
+   */
+  preFilter?: (input: AgentRunInput) => boolean;
+  /**
    * Auto-attach `language-rules/<lang>.md` to the system prompt when a
    * matching sheet exists for the current chunk's language. Defaults to
    * `true`. Set to `false` for agents that operate on raw bytes / non
@@ -71,6 +83,13 @@ export class PromptedAgent implements Agent {
   }
 
   async run(input: AgentRunInput): Promise<AgentRunResult> {
+    // Pre-flight: if the agent has a chunk filter and it rejects this
+    // chunk, skip the model call entirely. The pipeline still records
+    // the (zero-cost, zero-finding) execution so the metrics counter
+    // reflects the actual chunk x agent pairing fan-out.
+    if (this.opts.preFilter && !this.opts.preFilter(input)) {
+      return { findings: [], promptTokens: 0, completionTokens: 0 };
+    }
     const systemPrompt = await this.buildSystemPrompt(input);
     const { value, raw } = await chatJson<unknown>(input.provider, {
       model: input.model || this.defaultModel,
