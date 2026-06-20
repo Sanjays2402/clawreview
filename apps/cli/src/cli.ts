@@ -4,6 +4,7 @@ import { runStats } from './commands/stats.js';
 import { runBaseline } from './commands/baseline.js';
 import { runDiffStats } from './commands/diff-stats.js';
 import { runExplain } from './commands/explain.js';
+import { runAuthors } from './commands/authors.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -33,6 +34,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case 'explain':
       await runExplain(args);
+      return;
+    case 'authors':
+      await runAuthors(args);
       return;
     case 'version':
     case '--version':

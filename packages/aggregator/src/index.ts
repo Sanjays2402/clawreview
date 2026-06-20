@@ -1,4 +1,5 @@
 export * from './aggregate.js';
+export * from './authors.js';
 export * from './calibrate.js';
 export * from './check.js';
 export * from './comment.js';

@@ -9,6 +9,7 @@ Usage:
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
   clawreview explain <fingerprint> [--input <report.json>]
+  clawreview authors [--input <report.json>] [--ref <ref>] [--format text|json] [--top <n>]
   clawreview version
 
 Flags:
@@ -43,5 +44,6 @@ Examples:
   clawreview diff-stats --format json | jq '.totals'
   git diff main...HEAD | clawreview diff-stats --diff -
   clawreview run --format json > report.json && clawreview explain 9d3c4f --input report.json
+  clawreview run --format json | clawreview authors --top 5
 `;
 }
