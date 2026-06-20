@@ -1,8 +1,16 @@
-import type { JobHandle, QueueAdapter, QueueHealth } from './adapter.js';
+import type {
+  JobHandle,
+  QueueAdapter,
+  QueueDetails,
+  QueueFailure,
+  QueueHealth,
+} from './adapter.js';
 
 export interface BullAdapterOptions {
   redisUrl: string;
   queueName: string;
+  /** Max failed jobs to fetch from BullMQ for the details() response. */
+  detailsFailedLimit?: number;
 }
 
 /**
@@ -60,6 +68,62 @@ export class BullQueueAdapter implements QueueAdapter {
       };
     } catch (err) {
       return { ok: false, backend: 'bullmq', error: (err as Error).message };
+    }
+  }
+
+  async details(): Promise<QueueDetails> {
+    const base = await this.health();
+    const failedLimit = this.opts.detailsFailedLimit ?? 25;
+    try {
+      const queue = await this.getQueue();
+      const q = queue as unknown as {
+        getJobCounts?: () => Promise<Record<string, number>>;
+        getFailed?: (
+          start?: number,
+          end?: number,
+        ) => Promise<
+          Array<{
+            id?: string;
+            name?: string;
+            failedReason?: string;
+            finishedOn?: number;
+            attemptsMade?: number;
+          }>
+        >;
+      };
+      const failedJobs = (await q.getFailed?.(0, failedLimit - 1)) ?? [];
+      const recentFailures: QueueFailure[] = failedJobs
+        .map((j) => ({
+          id: j.id ?? 'unknown',
+          name: j.name ?? this.opts.queueName,
+          error: j.failedReason ?? 'unknown',
+          failedAt: j.finishedOn ?? Date.now(),
+          attempts: j.attemptsMade ?? 1,
+        }))
+        .sort((a, b) => b.failedAt - a.failedAt);
+      // BullMQ aggregates per-queue, not per-job-name, so byName collapses
+      // to a single row representing the queue's overall pending/inflight.
+      // Operators wanting finer detail should run BullMQ's own UI.
+      const byName = [
+        {
+          name: this.opts.queueName,
+          pending: base.pending ?? 0,
+          inflight: base.inflight ?? 0,
+        },
+      ];
+      return {
+        ...base,
+        byName,
+        recentFailures,
+        sampledAt: new Date().toISOString(),
+      };
+    } catch (err) {
+      return {
+        ...base,
+        ok: false,
+        error: (err as Error).message,
+        sampledAt: new Date().toISOString(),
+      };
     }
   }
 
