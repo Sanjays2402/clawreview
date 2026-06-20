@@ -222,3 +222,161 @@ describe('loadConfig with project-local presets', () => {
     expect(cfg.agents).toEqual(['security']);
   });
 });
+
+describe('local preset transitive extends', () => {
+  it('resolves a local preset that extends another local preset', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // base.yml provides defaults; team.yml extends it and overrides one field.
+    await writeFile(
+      join(dir, '.clawreview/presets/base.yml'),
+      ['severity_threshold: high', 'max_findings_per_file: 5', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/team.yml'),
+      ['extends: base', 'max_findings_per_file: 3', ''].join('\n'),
+      'utf8',
+    );
+    const out = await loadLocalPresets(dir);
+    // team inherits severity_threshold from base, overrides max_findings_per_file.
+    expect(out.team!.severity_threshold).toBe('high');
+    expect(out.team!.max_findings_per_file).toBe(3);
+    // base passes through unchanged.
+    expect(out.base!.severity_threshold).toBe('high');
+    expect(out.base!.max_findings_per_file).toBe(5);
+    // The resolved preset has no `extends` field -- it's flattened.
+    expect((out.team as Record<string, unknown>).extends).toBeUndefined();
+  });
+
+  it('resolves a local preset that extends a built-in', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // strict (built-in) -> severity_threshold=low + max_findings_per_file=4
+    // team adds an agents override on top.
+    await writeFile(
+      join(dir, '.clawreview/presets/team.yml'),
+      ['extends: strict', 'agents: [security, performance]', ''].join('\n'),
+      'utf8',
+    );
+    const out = await loadLocalPresets(dir);
+    expect(out.team!.severity_threshold).toBe('low');
+    expect(out.team!.max_findings_per_file).toBe(4);
+    expect(out.team!.agents).toEqual(['security', 'performance']);
+  });
+
+  it('walks a multi-step chain (a -> b -> c)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/c.yml'),
+      ['severity_threshold: critical', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['extends: c', 'max_findings_per_file: 2', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['extends: b', 'agents: [security]', ''].join('\n'),
+      'utf8',
+    );
+    const out = await loadLocalPresets(dir);
+    expect(out.a!.severity_threshold).toBe('critical');
+    expect(out.a!.max_findings_per_file).toBe(2);
+    expect(out.a!.agents).toEqual(['security']);
+  });
+
+  it('throws on a direct cycle (a extends a)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['extends: a', 'severity_threshold: high', ''].join('\n'),
+      'utf8',
+    );
+    await expect(loadLocalPresets(dir)).rejects.toThrow(/local preset extends cycle: a -> a/);
+  });
+
+  it('throws on an indirect cycle (a -> b -> a)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['extends: b', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['extends: a', ''].join('\n'),
+      'utf8',
+    );
+    await expect(loadLocalPresets(dir)).rejects.toThrow(/local preset extends cycle:/);
+  });
+
+  it('reports unknown-preset errors with the available local list for hints', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/team.yml'),
+      ['extends: not-a-real-base', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/sibling.yml'),
+      ['severity_threshold: low', ''].join('\n'),
+      'utf8',
+    );
+    await expect(loadLocalPresets(dir)).rejects.toThrow(
+      /local preset 'team' references unknown preset 'not-a-real-base'.*Available local: sibling, team/,
+    );
+  });
+
+  it('supports a local preset that extends [built-in, sibling-local]', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/agents-only.yml'),
+      ['agents: [security]', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/team.yml'),
+      ['extends:', '  - strict', '  - agents-only', ''].join('\n'),
+      'utf8',
+    );
+    const out = await loadLocalPresets(dir);
+    // strict (built-in) sets severity_threshold=low + max_findings_per_file=4
+    // agents-only (local sibling) sets agents=[security]
+    expect(out.team!.severity_threshold).toBe('low');
+    expect(out.team!.max_findings_per_file).toBe(4);
+    expect(out.team!.agents).toEqual(['security']);
+  });
+
+  it('a top-level config can extend a local preset that itself extends another local preset', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/base.yml'),
+      ['severity_threshold: medium', 'max_findings_per_file: 6', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/team.yml'),
+      ['extends: base', 'agents: [security]', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview.yml'),
+      ['extends: team', 'max_findings_per_file: 9', ''].join('\n'),
+      'utf8',
+    );
+    const cfg = await loadConfig(undefined, dir);
+    // base provides severity_threshold; team provides agents; user overrides max_findings_per_file.
+    expect(cfg.severity_threshold).toBe('medium');
+    expect(cfg.agents).toEqual(['security']);
+    expect(cfg.max_findings_per_file).toBe(9);
+  });
+});
