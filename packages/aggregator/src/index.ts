@@ -5,6 +5,7 @@ export * from './inline.js';
 export * from './sarif.js';
 export * from './junit.js';
 export * from './csv.js';
+export * from './gitlab.js';
 export * from './severity-rules.js';
 export * from './suppress.js';
 export * from './fingerprint.js';
