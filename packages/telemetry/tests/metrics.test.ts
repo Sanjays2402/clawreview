@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   getMetrics,
   observeAgentExecutions,
+  observeAuthorAttribution,
   observeSimilarityMerges,
   resetMetricsForTests,
+  sanitizeAuthorLabel,
 } from '../src/metrics.js';
 
 afterEach(() => {
@@ -124,5 +126,89 @@ describe('observeSimilarityMerges', () => {
     const text = await metrics.registry.metrics();
     expect(text).toContain('# TYPE clawreview_similarity_merges_total counter');
     expect(text).not.toMatch(/clawreview_similarity_merges_total\{[^}]*winner_agent=/);
+  });
+});
+
+describe('sanitizeAuthorLabel', () => {
+  it('prefers email when present and lowercases it', () => {
+    expect(sanitizeAuthorLabel('Sanjay Singh', 'Sanjay@Example.COM')).toBe('sanjay@example.com');
+  });
+
+  it('falls back to a slugified name when email is blank', () => {
+    expect(sanitizeAuthorLabel('Sanjay Singh', '')).toBe('sanjay-singh');
+    expect(sanitizeAuthorLabel('Sanjay Singh', '   ')).toBe('sanjay-singh');
+  });
+
+  it('strips control characters and angle brackets', () => {
+    expect(sanitizeAuthorLabel('weird', '<bad\nname>@x')).toBe('badname@x');
+  });
+
+  it('caps the label at 80 characters', () => {
+    const long = 'a'.repeat(200) + '@example.com';
+    const out = sanitizeAuthorLabel('', long);
+    expect(out.length).toBe(80);
+  });
+
+  it('returns "unknown" when both inputs sanitize to empty', () => {
+    expect(sanitizeAuthorLabel('', '')).toBe('unknown');
+    expect(sanitizeAuthorLabel('\n\t', '   ')).toBe('unknown');
+  });
+});
+
+describe('observeAuthorAttribution', () => {
+  it('emits clawreview_authors_attributed_total per (sanitized author) with the total findings count', async () => {
+    const metrics = getMetrics({ service: 'clawreview-authors-1', defaultMetrics: false });
+    observeAuthorAttribution(metrics, [
+      { authorName: 'Sanjay Singh', authorEmail: 'sanjay@example.com', total: 5 },
+      { authorName: 'Alex', authorEmail: 'alex@example.com', total: 2 },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_authors_attributed_total counter');
+    expect(text).toMatch(
+      /clawreview_authors_attributed_total\{[^}]*author="sanjay@example.com"[^}]*\} 5/,
+    );
+    expect(text).toMatch(
+      /clawreview_authors_attributed_total\{[^}]*author="alex@example.com"[^}]*\} 2/,
+    );
+  });
+
+  it('uses findings.length when total is not pre-computed', async () => {
+    const metrics = getMetrics({ service: 'clawreview-authors-2', defaultMetrics: false });
+    observeAuthorAttribution(metrics, [
+      { authorName: 'X', authorEmail: 'x@example.com', findings: { length: 3 } },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_authors_attributed_total\{[^}]*author="x@example.com"[^}]*\} 3/);
+  });
+
+  it('skips authors with zero findings rather than emitting a zero sample', async () => {
+    const metrics = getMetrics({ service: 'clawreview-authors-3', defaultMetrics: false });
+    observeAuthorAttribution(metrics, [
+      { authorName: 'Empty', authorEmail: 'empty@example.com', total: 0 },
+      { authorName: 'Other', authorEmail: 'other@example.com', total: 1 },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).not.toMatch(/clawreview_authors_attributed_total\{[^}]*author="empty@example.com"/);
+    expect(text).toMatch(/clawreview_authors_attributed_total\{[^}]*author="other@example.com"[^}]*\} 1/);
+  });
+
+  it('accumulates across multiple calls (counter, not gauge)', async () => {
+    const metrics = getMetrics({ service: 'clawreview-authors-4', defaultMetrics: false });
+    observeAuthorAttribution(metrics, [
+      { authorName: 'Alex', authorEmail: 'alex@example.com', total: 2 },
+    ]);
+    observeAuthorAttribution(metrics, [
+      { authorName: 'Alex', authorEmail: 'alex@example.com', total: 3 },
+    ]);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_authors_attributed_total\{[^}]*author="alex@example.com"[^}]*\} 5/);
+  });
+
+  it('is a safe no-op on an empty list', async () => {
+    const metrics = getMetrics({ service: 'clawreview-authors-5', defaultMetrics: false });
+    observeAuthorAttribution(metrics, []);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_authors_attributed_total counter');
+    expect(text).not.toMatch(/clawreview_authors_attributed_total\{[^}]*author=/);
   });
 });

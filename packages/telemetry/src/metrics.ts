@@ -48,6 +48,20 @@ export interface MetricsBundle {
    * recommended ceiling.
    */
   similarityMergesTotal: Counter<string>;
+  /**
+   * Findings attributed to a given author by the aggregator's blame
+   * pass, labeled by `author` (sanitized: lower-cased, hostile chars
+   * stripped, capped at 80 chars). Pairs with the Top Contributors PR
+   * block so dashboards can graph which authors get flagged most often
+   * without re-running blame in a separate pipeline.
+   *
+   * Cardinality is bounded in practice by the contributor list of any
+   * given installation; very large monorepos still tend to have well
+   * under 1k distinct blame authors per month. The sanitizer prevents
+   * a malformed `git config user.name` from blowing up cardinality with
+   * whitespace or newline noise.
+   */
+  authorsAttributedTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -163,6 +177,13 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const authorsAttributedTotal = new Counter({
+    name: 'clawreview_authors_attributed_total',
+    help: 'Findings attributed to an author by the aggregator blame pass, labeled by sanitized author key.',
+    labelNames: ['author'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -217,6 +238,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     agentInvocationsTotal,
     agentFindingsTotal,
     similarityMergesTotal,
+    authorsAttributedTotal,
     queueDepth,
     queueInflight,
   };
@@ -346,5 +368,63 @@ export function observeSimilarityMerges(
         loser_agent: loser,
       });
     }
+  }
+}
+
+/**
+ * Shape compatible with the aggregator's `AuthorAttribution` so the
+ * worker can hand the same breakdown used for the PR comment to this
+ * recorder. Kept structural so telemetry stays free of an
+ * `@clawreview/aggregator` dependency.
+ */
+export interface AuthorAttributionLike {
+  authorName: string;
+  authorEmail: string;
+  /** Pre-computed total; an undefined value falls back to the array length. */
+  total?: number;
+  findings?: { length: number };
+}
+
+/**
+ * Sanitize a blame author into a Prometheus-safe label value:
+ *
+ *   - Prefer the email (deterministic, ASCII, low cardinality) if present.
+ *   - Fall back to the name, lower-cased.
+ *   - Strip whitespace, control characters, and surrounding angle brackets.
+ *   - Cap at 80 chars so a long `mailto:` header can't run the cardinality
+ *     budget into the ground.
+ *
+ * Exported so the worker can sanitize once and reuse the key for logging
+ * + counter increments.
+ */
+export function sanitizeAuthorLabel(name: string, email: string): string {
+  const base = email && email.trim().length > 0 ? email : name;
+  const cleaned = base
+    .toLowerCase()
+    .replace(/[\u0000-\u001f<>]/g, '')
+    .replace(/\s+/g, '-')
+    .trim();
+  if (cleaned.length === 0) return 'unknown';
+  return cleaned.length > 80 ? cleaned.slice(0, 80) : cleaned;
+}
+
+/**
+ * Record per-author attribution counters. One increment per attributed
+ * finding so the counter rolls up to "findings flagged on lines this
+ * author last touched". Safe to call with an empty array (no-op).
+ *
+ * Authors whose name+email both sanitize to `'unknown'` are still
+ * recorded under the `unknown` label so dashboards can show the size of
+ * the no-blame bucket explicitly rather than silently dropping it.
+ */
+export function observeAuthorAttribution(
+  metrics: MetricsBundle,
+  authors: readonly AuthorAttributionLike[],
+): void {
+  for (const a of authors) {
+    const total = typeof a.total === 'number' ? a.total : a.findings?.length ?? 0;
+    if (total <= 0) continue;
+    const label = sanitizeAuthorLabel(a.authorName, a.authorEmail);
+    metrics.authorsAttributedTotal.inc({ author: label }, total);
   }
 }
