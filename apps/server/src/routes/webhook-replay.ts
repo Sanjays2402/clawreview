@@ -5,7 +5,7 @@ import { audit } from '@clawreview/db';
 import { dispatchWebhook } from './webhooks.js';
 import { getWebhookStore } from '../services/webhook-store.js';
 import { getDeliveryCache } from '../services/delivery-cache.js';
-import { getMetrics } from '@clawreview/telemetry';
+import { getMetrics, observeWebhookStatsWindowAnchor } from '@clawreview/telemetry';
 
 /**
  * GET  /api/internal/webhook/recent
@@ -272,6 +272,15 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         topRepos,
         ...(bucketWindowMs !== undefined ? { nowMs: bucketWindowMs } : {}),
       });
+      // Tick 13: record the sparkline anchor mode on a dedicated counter
+      // (`clawreview_webhook_stats_window_anchor_total{mode}`) so an
+      // on-call can graph live vs snapshot reads in Prometheus. Same
+      // predicate the appliedFilters.bucketWindow echo uses, so the
+      // counter and the response shape can never drift.
+      observeWebhookStatsWindowAnchor(
+        getMetrics({ service: 'clawreview-server' }),
+        bucketWindowMs ?? null,
+      );
       return {
         requestId: req.id,
         size: getWebhookStore().size(),

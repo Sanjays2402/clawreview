@@ -4,6 +4,8 @@ import {
   FINDING_DROP_REASONS,
   OPERATOR_POLL_BYPASS_REASONS,
   OPERATOR_POLL_RESULTS,
+  WEBHOOK_STATS_WINDOW_MODES,
+  deriveWebhookStatsWindowMode,
   getMetrics,
   observeAgentExecutions,
   observeAuthorAttribution,
@@ -12,6 +14,7 @@ import {
   observeOperatorPollBypass,
   observeSimilarityMerges,
   observeWebhookDelivery,
+  observeWebhookStatsWindowAnchor,
   resetMetricsForTests,
   sanitizeAuthorLabel,
   sanitizeOperatorPollProbe,
@@ -518,6 +521,129 @@ describe('observeOperatorPollBypass', () => {
     const text = await m1.registry.metrics();
     expect(text).toMatch(
       /clawreview_operator_poll_bypass_total\{[^}]*probe="p1"[^}]*reason="force"[^}]*\} 2/,
+    );
+  });
+});
+
+// Tick 13: clawreview_webhook_stats_window_anchor_total{mode} counter
+// + deriveWebhookStatsWindowMode helper. Pairs with the tick-12
+// `?bucketWindow=` anchor override on /api/internal/webhook/stats so
+// Prom can graph live vs snapshot reads.
+describe('deriveWebhookStatsWindowMode', () => {
+  it('returns `live` for null / undefined / non-string non-number values', () => {
+    // No anchor supplied -> default behaviour -> live.
+    expect(deriveWebhookStatsWindowMode(null)).toBe('live');
+    expect(deriveWebhookStatsWindowMode(undefined)).toBe('live');
+  });
+
+  it('returns `snapshot` for a finite numeric anchor (epoch ms)', () => {
+    // A real anchor override -> snapshot. The number itself is
+    // never validated here -- the route layer rejects negatives /
+    // non-finite values up-front and silently falls back to the
+    // live clock, so a non-finite value reaches this helper as
+    // null (not a number).
+    expect(deriveWebhookStatsWindowMode(1718987400000)).toBe('snapshot');
+    expect(deriveWebhookStatsWindowMode(0)).toBe('snapshot');
+    expect(deriveWebhookStatsWindowMode(1)).toBe('snapshot');
+  });
+
+  it('falls back to `live` for non-finite numbers (defensive guard)', () => {
+    // A non-finite value should never reach this helper because the
+    // route layer rejects it earlier and substitutes null. The
+    // belt-and-braces guard ensures a bug in the route layer can't
+    // poison the counter with a `NaN` label value.
+    expect(deriveWebhookStatsWindowMode(NaN)).toBe('live');
+    expect(deriveWebhookStatsWindowMode(Infinity)).toBe('live');
+    expect(deriveWebhookStatsWindowMode(-Infinity)).toBe('live');
+  });
+
+  it('exposes a closed WEBHOOK_STATS_WINDOW_MODES literal so callers cannot drift', () => {
+    // Pin the runtime shape so a future tick can't quietly add a
+    // third mode without updating tests. Adding a new mode would
+    // need an explicit edit + a corresponding counter label slot.
+    expect(WEBHOOK_STATS_WINDOW_MODES).toEqual(['live', 'snapshot']);
+  });
+});
+
+describe('observeWebhookStatsWindowAnchor', () => {
+  it('records `live` reads when no anchor override is supplied', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wsa-1', defaultMetrics: false });
+    observeWebhookStatsWindowAnchor(metrics, null);
+    observeWebhookStatsWindowAnchor(metrics, undefined);
+    observeWebhookStatsWindowAnchor(metrics, null);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_webhook_stats_window_anchor_total counter');
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 3/,
+    );
+  });
+
+  it('records `snapshot` reads when a finite numeric anchor is supplied', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wsa-2', defaultMetrics: false });
+    observeWebhookStatsWindowAnchor(metrics, 1718987400000);
+    observeWebhookStatsWindowAnchor(metrics, 1718987500000);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="snapshot"[^}]*\} 2/,
+    );
+  });
+
+  it('partitions the two modes cleanly (a mix of live + snapshot reads)', async () => {
+    // Real dashboards mix the two: most reads live, a few snapshot
+    // during postmortems. The counter must give both buckets per
+    // scrape so a Grafana alert can compute the snapshot ratio.
+    const metrics = getMetrics({ service: 'clawreview-wsa-3', defaultMetrics: false });
+    for (let i = 0; i < 6; i++) observeWebhookStatsWindowAnchor(metrics, null);
+    for (let i = 0; i < 2; i++) observeWebhookStatsWindowAnchor(metrics, 1718987400000);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 6/,
+    );
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="snapshot"[^}]*\} 2/,
+    );
+  });
+
+  it('coerces non-finite numeric anchors to the `live` bucket (mirrors deriveWebhookStatsWindowMode)', async () => {
+    // The route layer never lets these through, but the counter
+    // helper's contract is "match the predicate", not "trust the
+    // caller". If a future route bug starts passing NaN through,
+    // the counter must NOT fragment the series with a `NaN` label.
+    const metrics = getMetrics({ service: 'clawreview-wsa-4', defaultMetrics: false });
+    observeWebhookStatsWindowAnchor(metrics, NaN);
+    observeWebhookStatsWindowAnchor(metrics, Infinity);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 2/,
+    );
+    // No `mode="NaN"` or similar leak.
+    expect(text).not.toMatch(/mode="NaN"/);
+    expect(text).not.toMatch(/mode="Infinity"/);
+  });
+
+  it('shares the bundle cache so the route hook does not double-create the counter', async () => {
+    // Same guard as the operator-poll counters: two getMetrics()
+    // calls return the same Counter object so increments from
+    // different request paths accumulate to the same series.
+    const m1 = getMetrics({ service: 'clawreview-wsa-5', defaultMetrics: false });
+    const m2 = getMetrics({ service: 'clawreview-wsa-5', defaultMetrics: false });
+    expect(m1.webhookStatsWindowAnchorTotal).toBe(m2.webhookStatsWindowAnchorTotal);
+    observeWebhookStatsWindowAnchor(m1, null);
+    observeWebhookStatsWindowAnchor(m2, null);
+    const text = await m1.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 2/,
+    );
+  });
+
+  it('accumulates across many reads (counter, not gauge)', async () => {
+    // The classic counter contract: the metric only goes up,
+    // never resets between scrapes within a single process.
+    const metrics = getMetrics({ service: 'clawreview-wsa-6', defaultMetrics: false });
+    for (let i = 0; i < 10; i++) observeWebhookStatsWindowAnchor(metrics, null);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 10/,
     );
   });
 });

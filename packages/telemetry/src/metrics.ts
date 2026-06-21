@@ -137,6 +137,37 @@ export interface MetricsBundle {
    */
   operatorPollBypassTotal: Counter<string>;
   /**
+   * Webhook-stats sparkline anchor traffic, labeled by `mode`:
+   *
+   *   - `live`     -- the dashboard polled `/api/internal/webhook/stats`
+   *                   without `?bucketWindow=` / `?bucketWindowAt=`;
+   *                   the sparkline walked back from the live clock.
+   *   - `snapshot` -- the dashboard pinned the sparkline to a specific
+   *                   end-time (postmortem mode); the response is
+   *                   reproducible regardless of when the dashboard
+   *                   was opened.
+   *
+   * Pairs with the tick-12 `?bucketWindow=<ms>` / `?bucketWindowAt=<ISO>`
+   * anchor override on `/api/internal/webhook/stats`. The volume of
+   * snapshot reads vs live reads tells an on-call WHICH dashboard
+   * views are pinned to incident snapshots and WHEN -- e.g. a Grafana
+   * alert can fire "30% of dashboard reads are snapshot-pinned in the
+   * last hour, expect stale numbers" when a major incident kicks in.
+   *
+   * Cardinality: exactly two label values (`live` | `snapshot`). The
+   * closed `WEBHOOK_STATS_WINDOW_MODES` constant guards against a typo
+   * silently fragmenting the series. Anonymous bucket is unnecessary
+   * because the mode is always derivable from the request shape.
+   *
+   * Distinct from `clawreview_webhook_deliveries_total` (ingress
+   * volume) and `clawreview_operator_poll_total{probe=stats-*}`
+   * (rate-limit class traffic): this counter records `/stats` reads
+   * only, sliced by the snapshot-vs-live distinction the new anchor
+   * override introduced, so a security-sensitive snapshot read can
+   * be tracked separately from the live polling background load.
+   */
+  webhookStatsWindowAnchorTotal: Counter<string>;
+  /**
    * Findings removed from the post-aggregation output before the PR
    * comment is rendered, labeled by `reason`:
    *
@@ -302,6 +333,18 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const webhookStatsWindowAnchorTotal = new Counter({
+    name: 'clawreview_webhook_stats_window_anchor_total',
+    help:
+      'Webhook-stats sparkline anchor traffic, labeled by mode ' +
+      '(live | snapshot). live = no anchor override (default); ' +
+      'snapshot = ?bucketWindow= / ?bucketWindowAt= override applied. ' +
+      'Pairs with the tick-12 anchor override so on-calls can see ' +
+      'how many dashboard reads are pinned to incident snapshots.',
+    labelNames: ['mode'],
+    registers: [registry],
+  });
+
   const findingsDroppedTotal = new Counter({
     name: 'clawreview_findings_dropped_total',
     help: 'Findings dropped after aggregation, labeled by reason (severity_rule | min_confidence | inline_suppression).',
@@ -367,6 +410,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     webhookDeliveriesTotal,
     operatorPollTotal,
     operatorPollBypassTotal,
+    webhookStatsWindowAnchorTotal,
     findingsDroppedTotal,
     queueDepth,
     queueInflight,
@@ -763,4 +807,76 @@ export function observeOperatorPollBypass(
 ): void {
   const probeLabel = sanitizeOperatorPollProbe(probe);
   metrics.operatorPollBypassTotal.inc({ probe: probeLabel, reason });
+}
+
+/**
+ * Closed set of modes the webhook-stats sparkline anchor can record:
+ *
+ *   - `live`     -- no `?bucketWindow=` / `?bucketWindowAt=` was
+ *                   supplied; the sparkline walked back from the live
+ *                   clock (the default behaviour).
+ *   - `snapshot` -- the request pinned the sparkline to a specific
+ *                   end-time (postmortem mode); the response is
+ *                   reproducible regardless of when the dashboard
+ *                   was opened.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series across
+ * two label values that both look correct in code review
+ * (`snapshot` vs `snapsht`).
+ */
+export const WEBHOOK_STATS_WINDOW_MODES = ['live', 'snapshot'] as const;
+export type WebhookStatsWindowMode = (typeof WEBHOOK_STATS_WINDOW_MODES)[number];
+
+/**
+ * Derive the closed-set mode from a caller-supplied bucketWindowMs.
+ * Exported pure so the rate-limit layer / route layer can consume
+ * the same predicate the counter helper would, avoiding the
+ * accidental drift between "what counter fired" and "what the
+ * appliedFilters echo claimed".
+ *
+ *   - `undefined` / `null` -> `live`     (no anchor override)
+ *   - any finite number     -> `snapshot` (anchor applied)
+ *
+ * Non-finite numbers (`NaN`, `Infinity`) collapse to `live` because
+ * the route layer rejects them up-front and silently falls back to
+ * the live clock, so the counter must mirror that contract.
+ */
+export function deriveWebhookStatsWindowMode(
+  bucketWindowMs: number | null | undefined,
+): WebhookStatsWindowMode {
+  if (typeof bucketWindowMs !== 'number') return 'live';
+  if (!Number.isFinite(bucketWindowMs)) return 'live';
+  return 'snapshot';
+}
+
+/**
+ * Record one `/api/internal/webhook/stats` read on the
+ * `clawreview_webhook_stats_window_anchor_total{mode}` counter.
+ *
+ * Fired once per accepted /stats request from the route handler.
+ * The mode is derived from the caller-supplied bucketWindowMs via
+ * `deriveWebhookStatsWindowMode` so the counter cannot drift from
+ * the route's appliedFilters echo: same predicate, two consumers.
+ *
+ * Why a dedicated counter (not just label `operatorPollTotal` with
+ * an extra dimension):
+ *   - `operatorPollTotal{probe,result}` already exists and is
+ *     keyed by probe + result; adding a `mode` label would multiply
+ *     the cardinality of the entire operator-poll metric.
+ *   - The snapshot/live distinction is `/stats`-specific (the
+ *     `/recent` endpoint has no anchor override) so a separate
+ *     counter keeps the labelset honest and the per-endpoint
+ *     attribution clear.
+ *
+ * Cheap to call from a hot Fastify hook: a single counter increment
+ * with one short label value per request. Bounded cardinality (two
+ * label values, ever).
+ */
+export function observeWebhookStatsWindowAnchor(
+  metrics: MetricsBundle,
+  bucketWindowMs: number | null | undefined,
+): void {
+  const mode = deriveWebhookStatsWindowMode(bucketWindowMs);
+  metrics.webhookStatsWindowAnchorTotal.inc({ mode });
 }

@@ -1067,6 +1067,108 @@ describe('/api/internal/webhook/stats', () => {
       expect(body.hourly.peakBucketIndex).toBe(5);
       expect(body.hourly.peakBucketCount).toBe(1);
     });
+
+    // Tick 13: each /stats read fires the
+    // clawreview_webhook_stats_window_anchor_total{mode} counter so
+    // an on-call can graph live vs snapshot reads in Prometheus. The
+    // mode is derived from the same bucketWindowMs the appliedFilters
+    // echo uses, so the two can never drift.
+    describe('clawreview_webhook_stats_window_anchor_total{mode} counter (tick 13)', () => {
+      it('records mode=live for a read with no anchor override', async () => {
+        _resetWebhookStoreForTests();
+        resetMetricsForTests();
+        const res = await app.inject({
+          method: 'GET',
+          url: '/api/internal/webhook/stats',
+        });
+        expect(res.statusCode).toBe(200);
+        // appliedFilters echoes null AND the counter fires `live`;
+        // the two surfaces must agree per request.
+        expect(res.json().appliedFilters.bucketWindow).toBeNull();
+        const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+        expect(text).toContain('# TYPE clawreview_webhook_stats_window_anchor_total counter');
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 1/,
+        );
+      });
+
+      it('records mode=snapshot for a read with ?bucketWindow=<ms>', async () => {
+        _resetWebhookStoreForTests();
+        resetMetricsForTests();
+        const incident = 1_718_987_400_000;
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/internal/webhook/stats?bucketWindow=${incident}`,
+        });
+        expect(res.statusCode).toBe(200);
+        // appliedFilters echoes the override AND the counter fires `snapshot`.
+        expect(res.json().appliedFilters.bucketWindow).toBe(incident);
+        const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="snapshot"[^}]*\} 1/,
+        );
+      });
+
+      it('records mode=snapshot for a read with ?bucketWindowAt=<ISO>', async () => {
+        // The ISO form must produce the same mode as the numeric form.
+        _resetWebhookStoreForTests();
+        resetMetricsForTests();
+        const incident = 1_718_987_400_000;
+        const incidentIso = new Date(incident).toISOString();
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/internal/webhook/stats?bucketWindowAt=${encodeURIComponent(incidentIso)}`,
+        });
+        expect(res.statusCode).toBe(200);
+        const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="snapshot"[^}]*\} 1/,
+        );
+      });
+
+      it('falls back to mode=live when ?bucketWindow= is malformed (mirrors appliedFilters fallback)', async () => {
+        // The route falls back to the live clock when the anchor is
+        // NaN / negative; the counter must observe the same fallback
+        // so the appliedFilters echo and the counter agree.
+        _resetWebhookStoreForTests();
+        resetMetricsForTests();
+        const res = await app.inject({
+          method: 'GET',
+          url: '/api/internal/webhook/stats?bucketWindow=-100',
+        });
+        expect(res.statusCode).toBe(200);
+        expect(res.json().appliedFilters.bucketWindow).toBeNull();
+        const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 1/,
+        );
+      });
+
+      it('partitions live vs snapshot across many reads (each request increments exactly one bucket)', async () => {
+        // The classic "two buckets, one increment per read" contract.
+        // After 4 live + 3 snapshot reads the counter must show the
+        // exact partition so a Grafana ratio query is meaningful.
+        _resetWebhookStoreForTests();
+        resetMetricsForTests();
+        const incident = 1_718_987_400_000;
+        for (let i = 0; i < 4; i++) {
+          await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+        }
+        for (let i = 0; i < 3; i++) {
+          await app.inject({
+            method: 'GET',
+            url: `/api/internal/webhook/stats?bucketWindow=${incident}`,
+          });
+        }
+        const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 4/,
+        );
+        expect(text).toMatch(
+          /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="snapshot"[^}]*\} 3/,
+        );
+      });
+    });
   });
 
   // Tick 10: ingress-side counter wired on the receiver's put() path
