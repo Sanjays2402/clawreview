@@ -8,7 +8,7 @@ import { env } from './env.js';
 import { registerHealthRoutes } from './routes/health.js';
 import { registerMetrics } from './plugins/metrics.js';
 import { registerApiAuth } from './plugins/api-auth.js';
-import { registerRateLimit } from './plugins/rate-limit.js';
+import { registerRateLimit, registerOperatorPollRateLimitWithEnv } from './plugins/rate-limit.js';
 import { registerWebhookRoutes } from './routes/webhooks.js';
 import { registerReviewsRoutes } from './routes/reviews.js';
 import { registerInstallationsRoutes } from './routes/installations.js';
@@ -52,6 +52,13 @@ export async function buildServer(): Promise<FastifyInstance> {
 
   await registerMetrics(app);
   await registerApiAuth(app);
+  // Operator-poll class is registered BEFORE the default per-token
+  // limiter so a dashboard hammering /api/internal/webhook/{recent,stats}
+  // consumes its dedicated bucket first. The default limiter still
+  // observes the same request afterwards (so a wildly misbehaving
+  // dashboard still trips the global ceiling), but normal polling
+  // traffic stays out of the operator's budget for rerun / replay work.
+  await registerOperatorPollRateLimitWithEnv(app);
   await registerRateLimit(app);
   await registerHealthRoutes(app);
   await registerWebhookRoutes(app);
