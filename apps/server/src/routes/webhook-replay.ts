@@ -41,11 +41,14 @@ function nextReplaySeq(): number {
 
 /**
  * Parse the `?payloadFields=` query parameter into an allowlist of
- * top-level keys for `WebhookStore.list({ payloadFields })`.
+ * keys for `WebhookStore.list({ payloadFields })`. Each entry may be
+ * a plain top-level key (`action`) OR a dotted path
+ * (`pull_request.title`); see the store's `payloadFields` doc for
+ * the path semantics, depth cap, and merge behaviour.
  *
  * Accepts:
- *   - Comma-separated string ("action,number,sender") -- the common form
- *     when a dashboard hand-builds the URL.
+ *   - Comma-separated string ("action,pull_request.title,sender.login")
+ *     -- the common form when a dashboard hand-builds the URL.
  *   - Repeated query keys (Fastify hands those as `string[]`).
  *   - undefined / non-string / non-array -> `undefined` (no projection,
  *     route falls back to the metadata-only shape).
@@ -55,6 +58,10 @@ function nextReplaySeq(): number {
  * as "explicit opt-out: ship without payload" (distinct from
  * undefined). Capped at 32 names so a runaway query string can't
  * blow up the per-entry copy cost.
+ *
+ * Dot characters are NOT a query delimiter -- the splitter only
+ * recognises `,` -- so a path like `pull_request.title` survives the
+ * parser intact and reaches the store, which interprets it.
  */
 function parsePayloadFieldsQuery(raw: unknown): string[] | undefined {
   if (raw === undefined || raw === null) return undefined;
@@ -122,13 +129,15 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
       // page at a time without re-reading deliveries it has already
       // processed. See WebhookListOptions.after for the semantics.
       const after = typeof q.after === 'string' && q.after.length > 0 ? q.after : undefined;
-      // `payloadFields` is a comma-separated allowlist of TOP-LEVEL
-      // keys to keep from each entry's payload (e.g. `action,number,
-      // sender`). When unset, the route returns the existing slim
-      // metadata-only shape (back-compat). When set, the named keys
-      // are surfaced as `payload` on each entry so a dashboard widget
-      // can render `action` / `sender` without paying for the full
-      // 50KB payload tree per row.
+      // `payloadFields` is a comma-separated allowlist of keys to
+      // keep from each entry's payload. Each entry may be a plain
+      // top-level key (`action`) OR a dotted path
+      // (`pull_request.title`). Without `payloadFields` the route
+      // returns the existing slim metadata-only shape (back-compat).
+      // With `payloadFields` set, the requested fields are surfaced
+      // as `payload` on each entry so a dashboard widget can render
+      // both top-level metadata AND a nested PR title without paying
+      // for the full 50KB payload tree per row.
       const payloadFields = parsePayloadFieldsQuery(q.payloadFields);
       const entries = getWebhookStore()
         .list({

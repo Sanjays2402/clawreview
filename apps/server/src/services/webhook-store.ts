@@ -69,26 +69,45 @@ export interface WebhookListOptions {
    * unset, `payload` is omitted from the returned entries (existing
    * default behaviour -- callers that want the full payload should
    * fetch the entry by id via `get()`). When set to a non-empty array,
-   * each named TOP-LEVEL field is copied from the original payload onto
-   * the returned entry's `payload` shape; missing fields are skipped
+   * each named field is copied from the original payload onto the
+   * returned entry's `payload` shape; missing fields are skipped
    * silently.
    *
-   * The shape is intentionally NOT a full JSON-pointer / dotted-path
-   * projection -- it's a shallow top-level allowlist. Reasons:
-   *   1. Bounded cost: the store's `list` walks every entry already,
-   *      and a shallow copy keeps the per-entry work proportional to
-   *      the allowlist size.
-   *   2. Predictable wire shape: dashboards know which top-level keys
-   *      they want (typically `action`, `number`, `sender`, `repository`)
-   *      and can pass them as-is without learning a path DSL.
-   *   3. Safe: a typo in the allowlist drops the field instead of
-   *      pulling a surprise subtree.
+   * Tick-10 shipped shallow-only allowlists (`['action', 'number']`).
+   * Tick-11 widens the contract to accept DOTTED PATHS so a dashboard
+   * row can pull a nested field (`pull_request.title`,
+   * `sender.login`) in one round-trip:
    *
-   * Use case: a dashboard's "recent deliveries" widget wants the
-   * action + sender + PR number for each row, but does NOT want the
-   * full 50KB payload tree per entry. Without projection it polls
-   * 50KB * 50 entries = 2.5MB per page; with `payloadFields:
-   * ['action', 'number', 'sender']` it polls ~5KB per page.
+   *   - `'action'`             -> top-level pick (back-compat)
+   *   - `'pull_request.title'` -> walks `payload.pull_request.title`
+   *                               and writes it onto
+   *                               `{ pull_request: { title: ... } }`
+   *                               so the wire shape mirrors the source
+   *                               tree rather than flattening.
+   *   - Multiple paths under one prefix merge naturally:
+   *     `['pull_request.title', 'pull_request.number']` ->
+   *     `{ pull_request: { title, number } }`. No duplicate prefix
+   *     in the wire shape.
+   *
+   * Path depth is capped at 6 segments so a runaway query string
+   * cannot make the projector walk an unbounded tree. An entry
+   * exceeding the cap is dropped silently (consistent with the
+   * tick-10 "missing key is silent" contract).
+   *
+   * Rationale for paths over a flatten ('pull_request.title' on the
+   * wire too):
+   *   1. Mirrors the source. Dashboards already consume the GitHub
+   *      payload shape; the projection is just a slice of it, not a
+   *      rename.
+   *   2. Safe merging: two paths under the same prefix don't collide
+   *      because the output is structured.
+   *   3. JSON-shape stable: a dashboard that adds a path doesn't
+   *      have to migrate its key names.
+   *
+   * The shape is NOT a full JSON-pointer (no array index syntax, no
+   * `~` escaping, no `*` glob). A caller that needs a deep slice of
+   * an array should fetch the full entry via `get(deliveryId)` and
+   * project client-side.
    *
    * Validation: caller-supplied values are coerced to strings; empty
    * names are dropped; the projection key set is deduped so a caller
@@ -320,20 +339,92 @@ export function sanitizeProjection(
 }
 
 /**
- * Copy the requested top-level keys from `payload` onto a fresh object.
- * Missing keys are skipped silently so a caller can request `['action',
- * 'sender', 'number']` against a payload that has only some of them
- * and still get back a usable subset.
+ * Maximum depth for a dotted path. Bounds the per-entry walk so a
+ * caller-supplied `?payloadFields=a.b.c.d.e.f.g.h.i.j` cannot turn the
+ * projector into an unbounded tree walk. Six is enough for the deepest
+ * useful GitHub payload slice (e.g. `pull_request.head.repo.owner.login`)
+ * without inviting abuse.
+ *
+ * Exported so the tests can pin the cap behaviour without re-deriving
+ * the threshold.
+ */
+export const PROJECTION_MAX_PATH_DEPTH = 6;
+
+/**
+ * Split a dotted path into trimmed segments. Returns `null` when:
+ *   - The input is empty or whitespace-only (the caller already
+ *     filtered these out, but this helper is robust).
+ *   - Any intermediate segment is empty (`'a..b'`, `'.a'`, `'a.'`).
+ *     A stray dot usually means a forgotten path piece; we'd rather
+ *     refuse than silently widen.
+ *   - The path exceeds `PROJECTION_MAX_PATH_DEPTH` segments.
+ *
+ * Pure / exported so the contract is testable independently of the
+ * projection walk.
+ */
+export function splitProjectionPath(path: string): string[] | null {
+  if (typeof path !== 'string') return null;
+  const trimmed = path.trim();
+  if (trimmed.length === 0) return null;
+  const parts = trimmed.split('.').map((s) => s.trim());
+  if (parts.some((p) => p.length === 0)) return null;
+  if (parts.length > PROJECTION_MAX_PATH_DEPTH) return null;
+  return parts;
+}
+
+/**
+ * Walk a dotted path through `src` and return the final value.
+ * Returns `undefined` when any intermediate segment is absent or
+ * resolves to a non-object value (so an attempt to walk
+ * `pull_request.title.length` against
+ * `{ pull_request: { title: 'X' } }` yields undefined rather than
+ * the string's `.length` accidentally).
+ *
+ * Own-property check on every hop so a payload that happens to share
+ * a key name with `Object.prototype` (e.g. `toString`) doesn't
+ * surface prototype-only values.
+ */
+function walkProjectionPath(src: unknown, segments: readonly string[]): unknown {
+  let cursor: unknown = src;
+  for (const seg of segments) {
+    if (
+      cursor === null ||
+      cursor === undefined ||
+      typeof cursor !== 'object' ||
+      Array.isArray(cursor)
+    ) {
+      return undefined;
+    }
+    const obj = cursor as Record<string, unknown>;
+    if (!Object.prototype.hasOwnProperty.call(obj, seg)) return undefined;
+    cursor = obj[seg];
+  }
+  return cursor;
+}
+
+/**
+ * Copy the requested keys (top-level OR dotted) from `payload` onto a
+ * fresh object. Missing keys are skipped silently so a caller can
+ * request `['action', 'sender', 'pull_request.title']` against a
+ * payload that has only some of them and still get back a usable
+ * subset.
  *
  * Returns:
  *   - `undefined` if `payload` is not a plain object (e.g. null, an
  *     array, or a primitive). The store entry's `payload` field is
  *     typed as `unknown`, so we can't safely shallow-pick non-objects.
- *   - A fresh object with only the requested keys otherwise.
+ *   - A fresh object whose shape mirrors the source tree for any
+ *     dotted paths in `fields`. Top-level entries land at the root;
+ *     dotted entries land at their nested position so a downstream
+ *     consumer sees `{ pull_request: { title: ... } }` rather than a
+ *     flattened `{ 'pull_request.title': ... }`.
  *
- * Shallow on purpose -- see WebhookListOptions.payloadFields docs for
- * the rationale. A caller that needs a deep slice should fetch the
- * full entry via `get(deliveryId)` and project client-side.
+ * Path-depth-bounded by `PROJECTION_MAX_PATH_DEPTH`; entries with a
+ * deeper path are dropped silently (consistent with the tick-10
+ * "missing key is silent" contract).
+ *
+ * Dotted-path support is additive: a tick-10 caller that ONLY uses
+ * top-level keys still sees byte-identical output.
  */
 export function projectPayload(payload: unknown, fields: Set<string>): unknown {
   if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -342,9 +433,35 @@ export function projectPayload(payload: unknown, fields: Set<string>): unknown {
   const src = payload as Record<string, unknown>;
   const dst: Record<string, unknown> = {};
   for (const key of fields) {
-    if (Object.prototype.hasOwnProperty.call(src, key)) {
-      dst[key] = src[key];
+    if (!key.includes('.')) {
+      // Tick-10 back-compat: plain top-level pick.
+      if (Object.prototype.hasOwnProperty.call(src, key)) {
+        dst[key] = src[key];
+      }
+      continue;
     }
+    // Dotted path: walk into the source tree, then mirror the path
+    // back into dst so the wire shape matches the source.
+    const segments = splitProjectionPath(key);
+    if (segments === null) continue; // Path too deep / malformed -> silently drop.
+    const value = walkProjectionPath(src, segments);
+    if (value === undefined) continue; // Missing along the path -> drop.
+    // Write `value` into dst at `segments`. Create intermediate
+    // objects as needed; merge with existing ones (so multiple paths
+    // under the same prefix combine cleanly).
+    let cursor: Record<string, unknown> = dst;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const seg = segments[i]!;
+      const existing = cursor[seg];
+      if (existing && typeof existing === 'object' && !Array.isArray(existing)) {
+        cursor = existing as Record<string, unknown>;
+      } else {
+        const fresh: Record<string, unknown> = {};
+        cursor[seg] = fresh;
+        cursor = fresh;
+      }
+    }
+    cursor[segments[segments.length - 1]!] = value;
   }
   return dst;
 }
