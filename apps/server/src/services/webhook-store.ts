@@ -107,16 +107,35 @@ export interface WebhookStatsOptions {
    */
   sinceMs?: number;
   /**
-   * Number of hourly buckets to roll up at the end of the response,
-   * counting back from `nowMs` (or `Date.now()`). Default: 24.
-   * Capped at 168 (one week) so a misconfigured caller cannot ask the
-   * store for an unbounded sparkline.
+   * Sparkline granularity. Default `hour`. The selected granularity
+   * controls both `bucketSizeMs` in the response AND the default
+   * bucket count (24 hours / 60 minutes / 14 days) so a caller that
+   * does not pin `buckets` still gets a useful window.
+   *
+   *   - `minute` -- 60_000 ms buckets, default 60 (last hour).
+   *   - `hour`   -- 3_600_000 ms buckets, default 24 (last day).
+   *   - `day`    -- 86_400_000 ms buckets, default 14 (last fortnight).
+   *
+   * Capped per-granularity so a misconfigured caller cannot ask the
+   * store for an unbounded sparkline (minute<=240, hour<=168, day<=90).
+   */
+  granularity?: 'minute' | 'hour' | 'day';
+  /**
+   * Number of buckets to roll up at the end of the response, counting
+   * back from `nowMs`. When unset, the default depends on
+   * `granularity` (see above). Hard-capped per granularity.
+   */
+  buckets?: number;
+  /**
+   * Legacy alias for `buckets` under the previous "hours only" stats
+   * API. Retained so existing callers keep working; new code should
+   * use `buckets`. When both are set, `buckets` wins.
    */
   hourBuckets?: number;
   /**
    * Override "now" for deterministic tests. Production callers should
-   * leave this undefined; tests pin it so the hourly bucket alignment
-   * is stable.
+   * leave this undefined; tests pin it so the bucket alignment is
+   * stable.
    */
   nowMs?: number;
 }
@@ -138,12 +157,17 @@ export interface WebhookStats {
    */
   byEventAction: Record<string, number>;
   /**
-   * Hourly histogram of receivedAt timestamps. `buckets` is ordered
-   * newest-first: index 0 is the bucket ending at `now`, index 1 is
-   * the bucket one hour earlier, and so on. `bucketSizeMs` is fixed at
-   * 3,600,000 today but exposed so consumers don't hard-code it.
+   * Sparkline of receivedAt timestamps at the requested granularity.
+   * `buckets` is ordered newest-first: index 0 is the bucket ending at
+   * `nowMs`, index 1 is one bucket earlier, and so on. `granularity`
+   * + `bucketSizeMs` together describe the bucket width; consumers
+   * should not assume either is fixed across releases.
    */
   hourly: {
+    /** `'minute' | 'hour' | 'day'`. The label `hourly` is retained for
+     *  back-compat with tick-6 consumers; new callers should use
+     *  `granularity` to interpret bucketSizeMs. */
+    granularity: 'minute' | 'hour' | 'day';
     bucketSizeMs: number;
     buckets: number[];
     /** Right edge of the newest bucket (exclusive), in ms since epoch. */
@@ -211,10 +235,21 @@ export class InMemoryWebhookStore implements WebhookStore {
   }
 
   stats(opts: WebhookStatsOptions = {}): WebhookStats {
-    const HOUR_MS = 3_600_000;
+    const granularity = opts.granularity ?? 'hour';
+    const bucketSizeMs =
+      granularity === 'minute' ? 60_000 : granularity === 'day' ? 86_400_000 : 3_600_000;
+    const defaultBucketCount =
+      granularity === 'minute' ? 60 : granularity === 'day' ? 14 : 24;
+    const maxBucketCount =
+      granularity === 'minute' ? 240 : granularity === 'day' ? 90 : 168;
     const nowMs = opts.nowMs ?? Date.now();
-    const hourBuckets = Math.max(1, Math.min(168, opts.hourBuckets ?? 24));
-    const buckets = new Array<number>(hourBuckets).fill(0);
+    // `buckets` is the modern knob; `hourBuckets` is the legacy alias
+    // (tick 6 shipped with only the hour granularity). Both clamp into
+    // the per-granularity cap so a misconfigured caller can't request
+    // an unbounded sparkline.
+    const requested = opts.buckets ?? opts.hourBuckets ?? defaultBucketCount;
+    const bucketCount = Math.max(1, Math.min(maxBucketCount, requested));
+    const buckets = new Array<number>(bucketCount).fill(0);
     const byEvent: Record<string, number> = {};
     const byEventAction: Record<string, number> = {};
     let total = 0;
@@ -229,13 +264,13 @@ export class InMemoryWebhookStore implements WebhookStore {
       byEvent[e.event] = (byEvent[e.event] ?? 0) + 1;
       const actionKey = `${e.event}/${e.action ?? '(none)'}`;
       byEventAction[actionKey] = (byEventAction[actionKey] ?? 0) + 1;
-      // Drop into the right hour bucket (newest-first index). Entries
-      // older than the rendered window are still counted toward the
-      // grand totals but excluded from the sparkline.
+      // Drop into the right bucket (newest-first index). Entries older
+      // than the rendered window are still counted toward the grand
+      // totals but excluded from the sparkline.
       const ageMs = nowMs - t;
       if (ageMs >= 0) {
-        const idx = Math.floor(ageMs / HOUR_MS);
-        if (idx < hourBuckets) {
+        const idx = Math.floor(ageMs / bucketSizeMs);
+        if (idx < bucketCount) {
           buckets[idx] = (buckets[idx] ?? 0) + 1;
         }
       }
@@ -245,7 +280,7 @@ export class InMemoryWebhookStore implements WebhookStore {
       total,
       byEvent,
       byEventAction,
-      hourly: { bucketSizeMs: HOUR_MS, buckets, nowMs },
+      hourly: { granularity, bucketSizeMs, buckets, nowMs },
     };
   }
 

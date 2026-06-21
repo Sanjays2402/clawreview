@@ -117,6 +117,8 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         repoFullName?: unknown;
         sinceMs?: unknown;
         since?: unknown;
+        granularity?: unknown;
+        buckets?: unknown;
         hourBuckets?: unknown;
         hours?: unknown;
       };
@@ -137,16 +139,36 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         const n = Date.parse(sinceRaw);
         if (Number.isFinite(n)) sinceMs = n;
       }
-      // Accept `hourBuckets` (matches the store option name) or the
-      // shorter `hours` alias an operator is more likely to type.
-      const hbRaw = q.hourBuckets ?? q.hours;
-      const hourBuckets =
-        hbRaw === undefined ? undefined : Math.max(1, Math.min(168, Number(hbRaw) || 24));
-      const stats = getWebhookStore().stats({ event, repoFullName, sinceMs, hourBuckets });
+      // Granularity: only the three documented values are accepted.
+      // Anything else (typo, omitted) falls back to `hour` so the
+      // endpoint stays backwards-compatible with tick 6.
+      const granRaw = typeof q.granularity === 'string' ? q.granularity : undefined;
+      const granularity: 'minute' | 'hour' | 'day' | undefined =
+        granRaw === 'minute' || granRaw === 'hour' || granRaw === 'day' ? granRaw : undefined;
+      // `buckets` is the modern knob; `hourBuckets` / `hours` are the
+      // legacy hour-only aliases. Per-granularity caps apply inside the
+      // store; we just clamp into a sane absolute range here so a wildly
+      // out-of-range value never reaches the cap logic.
+      const bucketsRaw = q.buckets ?? q.hourBuckets ?? q.hours;
+      const buckets =
+        bucketsRaw === undefined ? undefined : Math.max(1, Math.min(240, Number(bucketsRaw) || 24));
+      const stats = getWebhookStore().stats({
+        event,
+        repoFullName,
+        sinceMs,
+        granularity,
+        buckets,
+      });
       return {
         requestId: req.id,
         size: getWebhookStore().size(),
-        appliedFilters: { event, sinceMs, repoFullName, hourBuckets: hourBuckets ?? 24 },
+        appliedFilters: {
+          event,
+          sinceMs,
+          repoFullName,
+          granularity: granularity ?? 'hour',
+          buckets: buckets ?? (granularity === 'minute' ? 60 : granularity === 'day' ? 14 : 24),
+        },
         ...stats,
       };
     },

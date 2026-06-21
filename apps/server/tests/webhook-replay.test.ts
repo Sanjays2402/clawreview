@@ -456,7 +456,10 @@ describe('/api/internal/webhook/stats', () => {
       'push/(none)': 1,
     });
     expect(body.hourly.bucketSizeMs).toBe(3_600_000);
+    expect(body.hourly.granularity).toBe('hour');
     expect(body.hourly.buckets).toHaveLength(24);
+    expect(body.appliedFilters.granularity).toBe('hour');
+    expect(body.appliedFilters.buckets).toBe(24);
     // s-1 (10 min ago) lands in bucket 0; s-2 (1.5h ago) lands in bucket 1;
     // s-3 (3h ago) lands in bucket 3. Other buckets stay zero.
     expect(body.hourly.buckets[0]).toBe(1);
@@ -509,7 +512,7 @@ describe('/api/internal/webhook/stats', () => {
       url: '/api/internal/webhook/stats?hourBuckets=6',
     });
     expect(six.json().hourly.buckets).toHaveLength(6);
-    expect(six.json().appliedFilters.hourBuckets).toBe(6);
+    expect(six.json().appliedFilters.buckets).toBe(6);
 
     // hours alias works
     const aliased = await app.inject({
@@ -541,5 +544,93 @@ describe('/api/internal/webhook/stats', () => {
     expect(body.byEvent).toEqual({});
     expect(body.byEventAction).toEqual({});
     expect(body.hourly.buckets.every((n: number) => n === 0)).toBe(true);
+  });
+
+  describe('granularity', () => {
+    it('returns minute buckets when granularity=minute', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      getWebhookStore().put({
+        deliveryId: 'm-1', event: 'push', payload: {}, receivedAt: new Date(now - 90_000).toISOString(),
+      });
+      getWebhookStore().put({
+        deliveryId: 'm-2', event: 'push', payload: {}, receivedAt: new Date(now - 200_000).toISOString(),
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=minute',
+      });
+      const body = res.json();
+      expect(body.hourly.granularity).toBe('minute');
+      expect(body.hourly.bucketSizeMs).toBe(60_000);
+      expect(body.hourly.buckets).toHaveLength(60); // default for minute
+      expect(body.appliedFilters.granularity).toBe('minute');
+      expect(body.appliedFilters.buckets).toBe(60);
+      // 90s -> bucket 1; 200s -> bucket 3
+      expect(body.hourly.buckets[1]).toBe(1);
+      expect(body.hourly.buckets[3]).toBe(1);
+    });
+
+    it('returns day buckets when granularity=day', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      getWebhookStore().put({
+        deliveryId: 'd-1', event: 'push', payload: {}, receivedAt: new Date(now - 3 * 3600_000).toISOString(),
+      });
+      getWebhookStore().put({
+        deliveryId: 'd-2', event: 'push', payload: {}, receivedAt: new Date(now - 2 * 86_400_000 - 3600_000).toISOString(),
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=day',
+      });
+      const body = res.json();
+      expect(body.hourly.granularity).toBe('day');
+      expect(body.hourly.bucketSizeMs).toBe(86_400_000);
+      expect(body.hourly.buckets).toHaveLength(14); // default for day
+      expect(body.appliedFilters.granularity).toBe('day');
+      // 3h ago -> bucket 0; ~2d 1h ago -> bucket 2
+      expect(body.hourly.buckets[0]).toBe(1);
+      expect(body.hourly.buckets[2]).toBe(1);
+    });
+
+    it('falls back to hour granularity when granularity param is invalid', async () => {
+      _resetWebhookStoreForTests();
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=fortnight',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.hourly.granularity).toBe('hour');
+      expect(body.hourly.bucketSizeMs).toBe(3_600_000);
+      expect(body.appliedFilters.granularity).toBe('hour');
+    });
+
+    it('clamps per-granularity bucket count', async () => {
+      _resetWebhookStoreForTests();
+      // minute caps at 240
+      const mBig = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=minute&buckets=999',
+      });
+      expect(mBig.json().hourly.buckets).toHaveLength(240);
+      // day caps at 90
+      const dBig = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=day&buckets=999',
+      });
+      expect(dBig.json().hourly.buckets).toHaveLength(90);
+    });
+
+    it('the modern `buckets` query param wins over legacy hourBuckets/hours', async () => {
+      _resetWebhookStoreForTests();
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?buckets=7&hourBuckets=99&hours=99',
+      });
+      expect(res.json().hourly.buckets).toHaveLength(7);
+      expect(res.json().appliedFilters.buckets).toBe(7);
+    });
   });
 });
