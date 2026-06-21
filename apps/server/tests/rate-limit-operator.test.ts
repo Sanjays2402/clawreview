@@ -166,3 +166,116 @@ describe('operator-poll rate-limit class (wired into fastify)', () => {
     await ipApp.close();
   });
 });
+
+describe('operatorPollForceParam (pure)', () => {
+  it('returns true for the documented truthy values', () => {
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force=1')).toBe(true);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/stats?force=true')).toBe(true);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/stats?force=TRUE')).toBe(true);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/stats?force=yes')).toBe(true);
+  });
+
+  it('returns false in the absence of a force key', () => {
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?event=push')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/stats?')).toBe(false);
+  });
+
+  it('returns false for non-truthy force values', () => {
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force=0')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force=false')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force=')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force=maybe')).toBe(false);
+  });
+
+  it('parses force regardless of position in the query string', () => {
+    expect(
+      _internals.operatorPollForceParam('/api/internal/webhook/stats?event=push&force=1&buckets=24'),
+    ).toBe(true);
+    expect(
+      _internals.operatorPollForceParam('/api/internal/webhook/stats?force=1&event=push'),
+    ).toBe(true);
+    expect(
+      _internals.operatorPollForceParam('/api/internal/webhook/stats?event=push&buckets=24'),
+    ).toBe(false);
+  });
+
+  it('does not confuse `forcefully` or other longer keys with `force`', () => {
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?forcefully=1')).toBe(false);
+    expect(_internals.operatorPollForceParam('/api/internal/webhook/recent?force_me=1')).toBe(false);
+  });
+});
+
+describe('operator-poll bypass via ?force=1 (wired into fastify)', () => {
+  let app: ReturnType<typeof Fastify>;
+  beforeEach(async () => {
+    app = Fastify();
+    app.addHook('onRequest', async (req) => {
+      (req as unknown as { apiAuth?: { tokenName: string } }).apiAuth = {
+        tokenName: 'rl-op-bypass',
+      };
+    });
+  });
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('does NOT decrement the bucket when ?force=1 is present', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 2 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // Bypass twenty times even though the bucket holds two.
+    for (let i = 0; i < 20; i++) {
+      const probe = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/recent?force=1',
+      });
+      expect(probe.statusCode).toBe(200);
+      // Bypass header is set; remaining header is NOT (the request
+      // didn't draw down the bucket, so reporting a number would be
+      // misleading).
+      expect(probe.headers['x-ratelimit-operator-bypass']).toBe('force');
+      expect(probe.headers['x-ratelimit-operator-remaining']).toBeUndefined();
+    }
+    // Two genuine UI polling calls should still both succeed (bucket
+    // is untouched by the 20 probes above).
+    expect((await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' })).statusCode).toBe(200);
+    // Third UI call exhausts the bucket and gets 429.
+    const blocked = await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' });
+    expect(blocked.statusCode).toBe(429);
+  });
+
+  it('treats only documented truthy values as a bypass; force=0 still counts', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // force=0 is NOT a bypass; it counts toward the bucket.
+    expect(
+      (await app.inject({ method: 'GET', url: '/api/internal/webhook/recent?force=0' })).statusCode,
+    ).toBe(200);
+    // Bucket of 1 is now empty; next request 429s.
+    const blocked = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?force=0',
+    });
+    expect(blocked.statusCode).toBe(429);
+  });
+
+  it('still exempts /api/reviews and other non-polling routes from the bypass entirely', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/reviews', async () => ({ ok: true }));
+    await app.ready();
+
+    // force=1 is meaningless on a non-polling route (the limiter never
+    // looks at it). The point of this test is just that the route
+    // continues to bypass the operator-poll path classifier entirely;
+    // no bypass header should leak onto unrelated routes.
+    const res = await app.inject({ method: 'GET', url: '/api/reviews?force=1' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-operator-bypass']).toBeUndefined();
+    expect(res.headers['x-ratelimit-operator-limit']).toBeUndefined();
+  });
+});

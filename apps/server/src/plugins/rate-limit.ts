@@ -270,6 +270,48 @@ export function isOperatorPollPath(url: string): boolean {
 export const OPERATOR_POLL_DEFAULT_PER_MINUTE = 3000;
 
 /**
+ * Whether a request asked the operator-poll limiter to bypass the
+ * bucket via `?force=1` (or `?force=true`). Returns true for the
+ * documented truthy values and false for everything else (including
+ * the absence of the query string).
+ *
+ * Use case: a dashboard's in-band health probe pings
+ * /api/internal/webhook/{recent,stats} on a fast timer (every 1-2s)
+ * just to confirm the endpoint is reachable. Without a bypass those
+ * probes eat the operator-poll bucket and cause the genuine UI
+ * polling to 429. `?force=1` is the explicit opt-out: when the
+ * dashboard knows the call is a probe and shouldn't count against
+ * the budget, it sets the flag and the limiter lets it through
+ * without recording the hit.
+ *
+ * Safety: the bypass affects ONLY the operator-poll class. The
+ * default per-token limiter (`registerPerTokenRateLimit`) still
+ * observes the hit, so a wildly misbehaving client that hammers
+ * /api/internal/webhook/stats?force=1 still trips that class at its
+ * configured ceiling. The dashboard's probe is well-behaved -- ~1
+ * req/s -- and lands far below the per-token budget.
+ *
+ * Pure / exported for tests so the truthy-value contract is unit-
+ * testable independently of the route wiring.
+ */
+export function operatorPollForceParam(url: string): boolean {
+  // Cheap query-string scan that avoids URL constructor overhead on
+  // every request. Matches `force=` exactly; the value is one of the
+  // documented truthy strings.
+  const qIdx = url.indexOf('?');
+  if (qIdx < 0) return false;
+  const query = url.slice(qIdx + 1);
+  for (const part of query.split('&')) {
+    const eq = part.indexOf('=');
+    const key = eq < 0 ? part : part.slice(0, eq);
+    if (key !== 'force') continue;
+    const value = eq < 0 ? '' : part.slice(eq + 1).toLowerCase();
+    return value === '1' || value === 'true' || value === 'yes';
+  }
+  return false;
+}
+
+/**
  * Registers the operator-polling rate limit class. Runs BEFORE the
  * default per-token limiter (registered in server.ts) so dashboards
  * land in the dedicated bucket and don't compete with the operator's
@@ -296,6 +338,23 @@ export async function registerOperatorPollRateLimit(
 
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (!isOperatorPollPath(req.url)) return;
+
+    // In-band probe bypass: a dashboard can send `?force=1` on its
+    // own health-check ping so the limiter does NOT count it against
+    // the bucket. This keeps the dashboard's sanity-probe-every-second
+    // from eating the genuine UI polling budget. The bypass is the
+    // operator-poll class ONLY: the default per-token limiter (running
+    // later in the request chain) still sees the hit, so a runaway
+    // client cannot hide behind force=1 forever.
+    if (operatorPollForceParam(req.url)) {
+      reply.header('x-ratelimit-operator-limit', String(perMinute));
+      // No 'remaining' header on a bypass: the request didn't draw
+      // down the bucket, so reporting a number would be misleading. A
+      // dedicated `bypass` header makes the bypass auditable in
+      // server logs / dev tools without parsing the response body.
+      reply.header('x-ratelimit-operator-bypass', 'force');
+      return;
+    }
 
     const tokenName = req.apiAuth?.tokenName;
     const key = tokenName ? `token:${tokenName}` : `ip:${req.ip ?? 'unknown'}`;
@@ -351,4 +410,4 @@ export async function registerOperatorPollRateLimitWithEnv(
 }
 
 // Exported for tests.
-export const _internals = { isExempt, isOperatorPollPath, checkAndRecord, createPerTokenLimiter, WINDOW_MS };
+export const _internals = { isExempt, isOperatorPollPath, operatorPollForceParam, checkAndRecord, createPerTokenLimiter, WINDOW_MS };
