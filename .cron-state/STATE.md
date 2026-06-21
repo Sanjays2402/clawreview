@@ -166,12 +166,37 @@ Gate results: aggregator 178/178 (+6 new), cli 111/111 (+18 new = 9 stats + 8 pr
 - **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API. Drives the Top Contributors PR block AND the Prometheus counter from the server side.
 - **Dashboard widget for `/api/internal/webhook/stats`** — carried from tick 7. Wire it into apps/dashboard so on-calls see the by-event / sparkline / byRepo (tick 8) without curl.
 - **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried from tick 7. Same store, list view rather than aggregate.
-- **`/api/internal/webhook/stats` peak-bucket detection** — emit `peakBucketIndex` and `peakBucketCount` alongside the buckets array so a dashboard can label the sparkline's peak without re-scanning the array in JS.
+- ~~`/api/internal/webhook/stats` peak-bucket detection~~ — DONE tick 9 (48b7e05). `peakBucketIndex` + `peakBucketCount` on `hourly`, tie-break to the newer bucket.
 - **`/api/internal/webhook/stats` Prometheus exposition** — add a small `clawreview_webhook_deliveries_total{event,repo}` counter on the `put()` path so Prometheus can scrape the same shape the dashboard reads.
-- **CLI `clawreview presets resolve <chain>`** — third sub-command on top of show/list. Resolve an ad-hoc extends chain (`presets resolve strict,security-focused`) without writing a file. Pairs with show; useful for sandboxing a candidate config before committing it.
-- **CLI `clawreview stats --top-files <n>` + `--by file`** — extend tick 8's --by to support per-file slicing, with --top-files capping the per-file rendering (today the top 5 is hard-coded).
-- **Aggregator `findingDigest()` helper** — small pure function that returns `{ totalsBySeverity, byCategory, byAgent, byFile, hotspots }` over a Finding[] in one pass. Pulls today's inlined groupCount+sortedEntries from cli/stats.ts up to the package so the worker, CLI, and dashboard share the exact same numbers.
-- **Operator-poll class: `?force=1` bypass for in-band probes** — small QOL knob for the dashboard's own health check so the limiter does NOT 429 the polling endpoint when the dashboard itself is sanity-probing them.
+- ~~CLI `clawreview presets resolve <chain>`~~ — DONE tick 9 (2d1cf1f). Third sub-command on top of show/list. Resolve an ad-hoc extends chain without writing a file.
+- ~~CLI `clawreview stats --top-files <n>` + `--by file`~~ — DONE tick 9 (6a47dcb). Both shipped together with the findingDigest rewire so the CLI and the worker / PR comment agree on counts.
+- ~~Aggregator `findingDigest()` helper~~ — DONE tick 9 (4c80827). Pure single-pass helper that returns totalsBySeverity / byCategory / byAgent / byFile / topFiles / optional hotspots. CLI stats rewired to consume it.
+- ~~Operator-poll class: `?force=1` bypass for in-band probes~~ — DONE tick 9 (5cbcd6d). Truthy-set bypass with bypass header; default per-token limiter still observes the hit so a runaway client cannot hide forever.
+
+### Tick 9 — 2026-06-21 01:11 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Aggregator `findingDigest(findings, opts)` single-pass summary helper (totalsBySeverity, byCategory, byAgent, byFile, topFiles cap, optional hotspots) | 4c80827 | +323/0 | 11 new (digest.test.ts) |
+| 2 | CLI `clawreview stats --by file` + `--top-files <n>` + findingDigest rewire (CLI, worker, PR comment now share one counting helper; JSON shape gains `byFile`) | 6a47dcb | +284/-59 | 7 new (stats.test.ts --by file + --top-files group) |
+| 3 | CLI `clawreview presets resolve <chain>` (yaml/json/text; positional + --chain; per-entry source attribution; unknown-name / cycle / empty-entry guards) | 2d1cf1f | +411/-5 | 12 new (presets.test.ts) |
+| 4 | Server webhook stats `peakBucketIndex` + `peakBucketCount` (tie-break to newer bucket; null when sparkline empty) | 48b7e05 | +164/-1 | 4 new (webhook-replay.test.ts peak bucket group) |
+| 5 | Server operator-poll class `?force=1` bypass for in-band probes (operatorPollForceParam helper + bypass header; per-token limiter still observes the hit) | 5cbcd6d | +173/-1 | 8 new (rate-limit-operator.test.ts: 5 pure + 3 wired) |
+
+Gate results: aggregator 189/189 (+11 new digest), cli 130/130 (+19 new = 7 stats + 12 presets resolve), server 229/229 (+12 new = 4 peak + 8 force-bypass), telemetry 29/29, types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 734 tests verified passing (+22 over tick 8)**. Touched-package typecheck delta: `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (digest.ts clean); `apps/cli` clean across stats.ts, presets.ts, cli.ts, help.ts changes; `apps/server` red only on the pre-existing api-auth.ts / rate-limit.ts (isExempt / hits[0] / oldest baseline) / server.ts / worker.ts (pino) baseline -- zero new errors on webhook-store.ts peak fields, webhook-replay.ts (no changes), or rate-limit.ts operator-bypass additions. Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `5cbcd6d`.
+
+**Tick-9 refill: 5 of 9 backlog items shipped this tick (#4 peak bucket, #6 presets resolve, #7 stats --top-files/--by file, #8 findingDigest helper, #9 force=1 bypass). The three dashboard / blame-fetcher items + the Prometheus exposition item still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 10 below.**
+
+### Backlog seeded for tick 10 (refill — four follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried. Wire it into apps/dashboard so on-calls see the by-event / sparkline / byRepo / peakBucket (tick 9) without curl.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried.
+- **`/api/internal/webhook/stats` Prometheus exposition** — carried. `clawreview_webhook_deliveries_total{event,repo}` counter on the put() path.
+- **Aggregator `findingDigest` worker rewire** — surface the helper inside the worker's PR-comment header pipeline so the comment / CLI / dashboard agree on byte-identical counts. Today the CLI uses it (tick 9), worker still inlines its own loops.
+- **CLI `clawreview presets diff <a> <b>`** — show the field-level delta between two preset chains (`presets diff strict security-focused` -> a YAML-ish diff of populated keys). Pairs with show/list/resolve.
+- **Operator-poll class: `?probe=name` annotation** — extension of tick 9's force=1: log the named probe identifier so an operator can see which dashboard widget is doing the bypass. Pure logging, no behaviour change.
+- **CLI `clawreview stats --top-agents <n>` + `--by agent` cap** — mirror the tick-9 `--top-files` cap for agent / category groupings.
+- **Webhook store `recent({ payloadFields })` projection** — let a dashboard request a slim shape (only deliveryId/event/receivedAt) without the full payload to keep the wire light when polling.
 
 ## TICK LOG
 
