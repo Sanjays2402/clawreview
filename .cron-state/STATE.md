@@ -191,12 +191,37 @@ Gate results: aggregator 189/189 (+11 new digest), cli 130/130 (+19 new = 7 stat
 - **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API.
 - **Dashboard widget for `/api/internal/webhook/stats`** — carried. Wire it into apps/dashboard so on-calls see the by-event / sparkline / byRepo / peakBucket (tick 9) without curl.
 - **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried.
-- **`/api/internal/webhook/stats` Prometheus exposition** — carried. `clawreview_webhook_deliveries_total{event,repo}` counter on the put() path.
+- ~~`/api/internal/webhook/stats` Prometheus exposition~~ — DONE tick 10 (0e265bc). `clawreview_webhook_deliveries_total{event,repo}` counter on the put() path plus sanitizeRepoLabel/observeWebhookDelivery helpers.
 - **Aggregator `findingDigest` worker rewire** — surface the helper inside the worker's PR-comment header pipeline so the comment / CLI / dashboard agree on byte-identical counts. Today the CLI uses it (tick 9), worker still inlines its own loops.
-- **CLI `clawreview presets diff <a> <b>`** — show the field-level delta between two preset chains (`presets diff strict security-focused` -> a YAML-ish diff of populated keys). Pairs with show/list/resolve.
-- **Operator-poll class: `?probe=name` annotation** — extension of tick 9's force=1: log the named probe identifier so an operator can see which dashboard widget is doing the bypass. Pure logging, no behaviour change.
-- **CLI `clawreview stats --top-agents <n>` + `--by agent` cap** — mirror the tick-9 `--top-files` cap for agent / category groupings.
-- **Webhook store `recent({ payloadFields })` projection** — let a dashboard request a slim shape (only deliveryId/event/receivedAt) without the full payload to keep the wire light when polling.
+- ~~CLI `clawreview presets diff <a> <b>`~~ — DONE tick 10 (8d5bfb0). Field-level delta between two ad-hoc preset chains; exit code 3 on non-empty delta for CI gateability.
+- ~~Operator-poll class: `?probe=name` annotation~~ — DONE tick 10 (d317eb2). Pure logging + response header; works alongside force=1 to attribute polling traffic to a named dashboard widget.
+- ~~CLI `clawreview stats --top-agents <n>` + `--by agent` cap~~ — DONE tick 10 (4b3eacb). Mirrors tick-9's --top-files cap; also added --top-categories. Digest now carries topAgents / topCategories slices alongside topFiles.
+- ~~Webhook store `recent({ payloadFields })` projection~~ — DONE tick 10 (d47f67e). Shallow top-level allowlist projection on the store + `?payloadFields=action,number,sender` query parser on the route, so dashboards can render rich rows in one round-trip instead of N follow-up GETs.
+
+### Tick 10 — 2026-06-21 04:42 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Telemetry `clawreview_webhook_deliveries_total{event,repo}` ingress counter + sanitizeRepoLabel / observeWebhookDelivery helpers; receiver put() path wired | 0e265bc | +260/-2 | 11 new (8 telemetry sanitize/observe + 3 server wired ingress) |
+| 2 | Server operator-poll `?probe=name` annotation (operatorPollProbeParam helper + structured req.log + x-ratelimit-operator-probe header; works with/without force=1) | d317eb2 | +271/-1 | 13 new (7 pure + 6 wired) |
+| 3 | Webhook-store `recent({ payloadFields })` shallow projection + route `?payloadFields=action,number,sender` parser; capped at 32 names; explicit empty allowlist as opt-out | d47f67e | +480/-11 | 19 new (15 unit: sanitizeProjection / projectPayload / store integration + 4 wired route) |
+| 4 | CLI `clawreview stats --top-agents <n>` + `--top-categories <n>` mirroring --top-files; digest gains topAgents/topCategories slices (default 10) | 4b3eacb | +372/-61 | 10 new (4 aggregator digest + 6 cli stats covering --by agent/category cap + json shape + default + clamp) |
+| 5 | CLI `clawreview presets diff <a> <b>` (text/yaml/json; exit code 3 on non-empty delta for CI gateability; computePresetDelta helper) | 8d5bfb0 | +559/-5 | 12 new (cli presets.test.ts: no-diff/with-diff/only_in_a/only_in_b/changed/multi-chain/missing/unknown/invalid-format/empty-entry/text/yaml/flag-form) |
+
+Gate results: telemetry 37/37 (+8 new), aggregator 193/193 (+4 new digest), cli 148/148 (+18 new = 6 stats + 12 presets diff), server 263/263 (+34 new = 3 webhook delivery + 13 probe + 4 wired payloadFields + 15 store-projection unit), types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 798 tests verified passing (+64 over tick 9)**. Touched-package typecheck delta: `@clawreview/telemetry` clean (zero new errors on metrics.ts additions); `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (digest.ts changes clean); `apps/cli` clean across stats.ts, presets.ts, cli.ts, help.ts; `apps/server` total typecheck line count IDENTICAL to bdee243 baseline (206 lines) -- verified by checking the pre-batch vs post-batch tsc output; zero new errors on webhooks.ts, webhook-store.ts, webhook-replay.ts, or rate-limit.ts beyond the pre-existing FastifyInstance / pino baseline noise. Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `8d5bfb0`.
+
+**Tick-10 refill: 5 of 9 backlog items shipped this tick (#4 Prometheus exposition, #6 presets diff, #7 ?probe=name, #8 --top-agents/--top-categories, #9 payloadFields projection). The four carried items (worker blame wiring + 2 dashboard widgets + worker findingDigest rewire) still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 11 below.**
+
+### Backlog seeded for tick 11 (refill — four follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried. Wire it into apps/dashboard so on-calls see the by-event / sparkline / byRepo / peakBucket (tick 9) without curl. Now also consumes `clawreview_webhook_deliveries_total` from /metrics for the same numbers Prometheus sees.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination + payloadFields projection** — carried. Same store, list view rather than aggregate; tick 10's payloadFields projection means the widget can render rich rows in one round-trip.
+- **Aggregator `findingDigest` worker rewire** — carried. Surface the helper inside the worker's PR-comment header pipeline so the comment / CLI / dashboard agree on byte-identical counts.
+- **Worker PR-comment header rewire to consume digest.topAgents / .topCategories** — pair the tick-10 digest slices with the comment header so the "By agent" / "By category" lines in the PR comment share the same capped sort order the CLI ships.
+- **Server `?probe=name` Prometheus counter** — fold the tick-10 ?probe annotation into a `clawreview_operator_poll_total{probe,result}` counter so Prometheus can graph dashboard-widget polling volume + 429 rates by probe name without ingesting the structured log.
+- **CLI `clawreview presets diff --only-fields <a,b,c>` filter** — let an operator scope the diff to a specific set of keys (e.g. `--only-fields severity_threshold,min_confidence`) so a wide config rebase produces a focused diff.
+- **Webhook store `recent({ payloadFields })` dotted-path shape** — tick 10 shipped shallow top-level only; a follow-up should add JSON-pointer / dotted-path support (`pull_request.title`) for the dashboard rows that actually want a nested field.
+- **Server `/api/internal/webhook/stats` `?bucketWindow=` end-time override** — today the sparkline is "from now, walking back"; some operators want "walking back from a specific incident time" so a postmortem snapshot is reproducible.
 
 ## TICK LOG
 
