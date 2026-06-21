@@ -64,6 +64,38 @@ export interface WebhookListOptions {
    * cursor, and re-fetches without one.
    */
   after?: string;
+  /**
+   * Optional projection of `payload` fields to keep on each entry. When
+   * unset, `payload` is omitted from the returned entries (existing
+   * default behaviour -- callers that want the full payload should
+   * fetch the entry by id via `get()`). When set to a non-empty array,
+   * each named TOP-LEVEL field is copied from the original payload onto
+   * the returned entry's `payload` shape; missing fields are skipped
+   * silently.
+   *
+   * The shape is intentionally NOT a full JSON-pointer / dotted-path
+   * projection -- it's a shallow top-level allowlist. Reasons:
+   *   1. Bounded cost: the store's `list` walks every entry already,
+   *      and a shallow copy keeps the per-entry work proportional to
+   *      the allowlist size.
+   *   2. Predictable wire shape: dashboards know which top-level keys
+   *      they want (typically `action`, `number`, `sender`, `repository`)
+   *      and can pass them as-is without learning a path DSL.
+   *   3. Safe: a typo in the allowlist drops the field instead of
+   *      pulling a surprise subtree.
+   *
+   * Use case: a dashboard's "recent deliveries" widget wants the
+   * action + sender + PR number for each row, but does NOT want the
+   * full 50KB payload tree per entry. Without projection it polls
+   * 50KB * 50 entries = 2.5MB per page; with `payloadFields:
+   * ['action', 'number', 'sender']` it polls ~5KB per page.
+   *
+   * Validation: caller-supplied values are coerced to strings; empty
+   * names are dropped; the projection key set is deduped so a caller
+   * that accidentally passes `['action', 'action']` does the field
+   * copy once.
+   */
+  payloadFields?: readonly string[];
 }
 
 export interface WebhookStore {
@@ -251,6 +283,72 @@ function computePeakBucket(buckets: number[]): {
   return { peakBucketIndex: peakIdx, peakBucketCount: peakCount };
 }
 
+/**
+ * Sanitise a caller-supplied `payloadFields` allowlist into a stable
+ * Set of top-level keys, or `null` when the caller did NOT request a
+ * projection (existing back-compat behaviour: return the entry
+ * unchanged).
+ *
+ * Contract:
+ *   - `undefined` / non-array input -> `null` (no projection).
+ *   - Array input -> Set of de-duped non-empty trimmed names. Empty
+ *     names ('', '   ') are dropped silently; the rest survive.
+ *   - A caller-supplied empty array (`[]`) returns an empty Set
+ *     (NOT null). The list() loop interprets that as "explicit
+ *     opt-out: ship without payload" -- the caller meant 'I want the
+ *     metadata only', not 'I forgot to pass a projection'.
+ *
+ * Pure / extracted so the contract is unit-testable independently of
+ * the store wiring.
+ */
+export function sanitizeProjection(
+  fields: readonly string[] | undefined,
+): Set<string> | null {
+  if (fields === undefined || fields === null) return null;
+  if (!Array.isArray(fields)) return null;
+  const out = new Set<string>();
+  for (const raw of fields) {
+    // Coerce gracefully: numbers / booleans get stringified, then
+    // trimmed. This keeps a `?payloadFields=action,number` query
+    // parser (which always hands strings) and a programmatic caller
+    // both working without bespoke handling.
+    const name = typeof raw === 'string' ? raw.trim() : String(raw ?? '').trim();
+    if (name.length === 0) continue;
+    out.add(name);
+  }
+  return out;
+}
+
+/**
+ * Copy the requested top-level keys from `payload` onto a fresh object.
+ * Missing keys are skipped silently so a caller can request `['action',
+ * 'sender', 'number']` against a payload that has only some of them
+ * and still get back a usable subset.
+ *
+ * Returns:
+ *   - `undefined` if `payload` is not a plain object (e.g. null, an
+ *     array, or a primitive). The store entry's `payload` field is
+ *     typed as `unknown`, so we can't safely shallow-pick non-objects.
+ *   - A fresh object with only the requested keys otherwise.
+ *
+ * Shallow on purpose -- see WebhookListOptions.payloadFields docs for
+ * the rationale. A caller that needs a deep slice should fetch the
+ * full entry via `get(deliveryId)` and project client-side.
+ */
+export function projectPayload(payload: unknown, fields: Set<string>): unknown {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    return undefined;
+  }
+  const src = payload as Record<string, unknown>;
+  const dst: Record<string, unknown> = {};
+  for (const key of fields) {
+    if (Object.prototype.hasOwnProperty.call(src, key)) {
+      dst[key] = src[key];
+    }
+  }
+  return dst;
+}
+
 export class InMemoryWebhookStore implements WebhookStore {
   private readonly entries = new Map<string, WebhookEntry>();
   constructor(private readonly capacity = MAX_ENTRIES) {}
@@ -279,6 +377,11 @@ export class InMemoryWebhookStore implements WebhookStore {
     const out: WebhookEntry[] = [];
     const all = [...this.entries.values()];
 
+    // Resolve the projection allowlist once so the inner loop just
+    // walks a small (or empty) Set. Empty / non-array opts.payloadFields
+    // means "no payload on the wire" (existing default).
+    const projection = sanitizeProjection(o.payloadFields);
+
     // Resolve the cursor up front. The cursor identifies a starting
     // INDEX in the newest-first walk; we look it up once and use the
     // index in the loop below. An unknown cursor short-circuits to an
@@ -303,7 +406,20 @@ export class InMemoryWebhookStore implements WebhookStore {
         // showing the operator more rather than less in a degraded state.
         if (Number.isFinite(t) && t < o.sinceMs) continue;
       }
-      out.push(e);
+      // Apply projection when set. `payloadFields === undefined` is
+      // the default and returns the entry unchanged (back-compat with
+      // every existing caller). A non-empty allowlist copies just the
+      // requested top-level keys onto a fresh `payload`; an empty
+      // (post-sanitisation) allowlist sets `payload` to undefined so
+      // the caller can ship a slim shape without re-touching it.
+      if (projection === null) {
+        out.push(e);
+      } else if (projection.size === 0) {
+        // Empty (post-sanitisation) allowlist -> no payload on the wire.
+        out.push({ ...e, payload: undefined });
+      } else {
+        out.push({ ...e, payload: projectPayload(e.payload, projection) });
+      }
     }
     return out;
   }

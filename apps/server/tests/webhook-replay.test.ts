@@ -976,4 +976,89 @@ describe('/api/internal/webhook/stats', () => {
       );
     });
   });
+
+  // Tick 10: /api/internal/webhook/recent?payloadFields=action,number,
+  // sender lets a dashboard request a slim entry shape (selected
+  // top-level payload keys) instead of paying for the metadata-only
+  // shape AND a separate get() round-trip. Existing callers that omit
+  // the param see the unchanged metadata-only shape.
+  describe('/api/internal/webhook/recent payloadFields projection', () => {
+    it('omits payload by default (back-compat with tick 5/6 shape)', async () => {
+      _resetWebhookStoreForTests();
+      await deliver(app, 'pf-rec-default', BASE_PR);
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/recent',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.entries.length).toBeGreaterThanOrEqual(1);
+      // No `payload` field on any entry when projection isn't requested.
+      for (const e of body.entries) {
+        expect(e.payload).toBeUndefined();
+      }
+      expect(body.appliedFilters.payloadFields).toBeUndefined();
+    });
+
+    it('returns the named top-level payload keys when ?payloadFields=... is set', async () => {
+      _resetWebhookStoreForTests();
+      await deliver(app, 'pf-rec-action', BASE_PR);
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/recent?payloadFields=action,number,pull_request',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.entries.length).toBeGreaterThanOrEqual(1);
+      const entry = body.entries[0];
+      expect(entry.payload).toBeDefined();
+      // Only the requested keys land on the wire.
+      expect(Object.keys(entry.payload).sort()).toEqual(
+        ['action', 'number', 'pull_request'].sort(),
+      );
+      expect(entry.payload.action).toBe('opened');
+      expect(entry.payload.number).toBe(11);
+      // The unrequested `repository` / `installation` keys are absent.
+      expect(entry.payload.repository).toBeUndefined();
+      expect(entry.payload.installation).toBeUndefined();
+      // appliedFilters echoes the parsed allowlist for client-side
+      // sanity checks.
+      expect(body.appliedFilters.payloadFields).toEqual(['action', 'number', 'pull_request']);
+    });
+
+    it('treats ?payloadFields= (empty value) as an explicit opt-out: payload === null on the wire', async () => {
+      _resetWebhookStoreForTests();
+      await deliver(app, 'pf-rec-empty', BASE_PR);
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/recent?payloadFields=',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.entries.length).toBeGreaterThanOrEqual(1);
+      // Empty allowlist -> the store sets payload to undefined; on the
+      // wire JSON.stringify drops undefined values, so `payload` is
+      // absent from the entry exactly like the default shape.
+      for (const e of body.entries) {
+        expect(e.payload).toBeUndefined();
+      }
+      // The route still echoes the parsed empty allowlist so a
+      // dashboard can tell it ran in opt-out mode rather than default.
+      expect(body.appliedFilters.payloadFields).toEqual([]);
+    });
+
+    it('caps allowlist length at 32 names so a runaway query string is bounded', async () => {
+      _resetWebhookStoreForTests();
+      await deliver(app, 'pf-rec-cap', BASE_PR);
+      // Build a long allowlist: 50 distinct names.
+      const many = Array.from({ length: 50 }, (_, i) => `f${i}`).join(',');
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/internal/webhook/recent?payloadFields=${many}`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.appliedFilters.payloadFields.length).toBe(32);
+    });
+  });
 });

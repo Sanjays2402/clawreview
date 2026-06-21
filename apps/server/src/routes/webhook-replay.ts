@@ -39,6 +39,49 @@ function nextReplaySeq(): number {
   return replaySeq;
 }
 
+/**
+ * Parse the `?payloadFields=` query parameter into an allowlist of
+ * top-level keys for `WebhookStore.list({ payloadFields })`.
+ *
+ * Accepts:
+ *   - Comma-separated string ("action,number,sender") -- the common form
+ *     when a dashboard hand-builds the URL.
+ *   - Repeated query keys (Fastify hands those as `string[]`).
+ *   - undefined / non-string / non-array -> `undefined` (no projection,
+ *     route falls back to the metadata-only shape).
+ *
+ * Empty / pure-whitespace names are dropped. An explicit empty string
+ * (`?payloadFields=`) returns an empty array, which the store treats
+ * as "explicit opt-out: ship without payload" (distinct from
+ * undefined). Capped at 32 names so a runaway query string can't
+ * blow up the per-entry copy cost.
+ */
+function parsePayloadFieldsQuery(raw: unknown): string[] | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  let parts: string[];
+  if (typeof raw === 'string') {
+    // Comma-separated form: a literal empty value -> empty array
+    // (explicit opt-out), not undefined.
+    parts = raw.length === 0 ? [] : raw.split(',');
+  } else if (Array.isArray(raw)) {
+    // Fastify hands repeated query keys as arrays. Flatten + split
+    // each in case the caller mixes the two forms.
+    parts = (raw as unknown[]).flatMap((v) =>
+      typeof v === 'string' ? v.split(',') : [],
+    );
+  } else {
+    return undefined;
+  }
+  const out: string[] = [];
+  for (const p of parts) {
+    const name = p.trim();
+    if (name.length === 0) continue;
+    if (!out.includes(name)) out.push(name);
+    if (out.length >= 32) break;
+  }
+  return out;
+}
+
 export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise<void> {
   app.get(
     '/api/internal/webhook/recent',
@@ -52,6 +95,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         repo?: unknown;
         repoFullName?: unknown;
         after?: unknown;
+        payloadFields?: unknown;
       };
       const limit = Math.max(1, Math.min(200, Number(q.limit) || 50));
       const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
@@ -78,16 +122,41 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
       // page at a time without re-reading deliveries it has already
       // processed. See WebhookListOptions.after for the semantics.
       const after = typeof q.after === 'string' && q.after.length > 0 ? q.after : undefined;
+      // `payloadFields` is a comma-separated allowlist of TOP-LEVEL
+      // keys to keep from each entry's payload (e.g. `action,number,
+      // sender`). When unset, the route returns the existing slim
+      // metadata-only shape (back-compat). When set, the named keys
+      // are surfaced as `payload` on each entry so a dashboard widget
+      // can render `action` / `sender` without paying for the full
+      // 50KB payload tree per row.
+      const payloadFields = parsePayloadFieldsQuery(q.payloadFields);
       const entries = getWebhookStore()
-        .list({ limit, event, sinceMs, repoFullName, after })
-        .map((e) => ({
-          deliveryId: e.deliveryId,
-          event: e.event,
-          action: e.action,
-          receivedAt: e.receivedAt,
-          repoFullName: e.repoFullName,
-          installationId: e.installationId,
-        }));
+        .list({
+          limit,
+          event,
+          sinceMs,
+          repoFullName,
+          after,
+          ...(payloadFields ? { payloadFields } : {}),
+        })
+        .map((e) => {
+          // When the caller asked for a payload projection we surface
+          // the slim `payload` alongside the metadata; otherwise we
+          // keep the existing metadata-only shape exactly as tick 5/6
+          // shipped it.
+          const base = {
+            deliveryId: e.deliveryId,
+            event: e.event,
+            action: e.action,
+            receivedAt: e.receivedAt,
+            repoFullName: e.repoFullName,
+            installationId: e.installationId,
+          };
+          if (payloadFields) {
+            return { ...base, payload: e.payload };
+          }
+          return base;
+        });
       // Return a nextCursor when the page filled completely, so the
       // caller can paginate without inspecting `limit`. A null cursor
       // means "no more pages": either fewer entries than `limit`, or
@@ -100,7 +169,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         requestId: req.id,
         size: getWebhookStore().size(),
         limit,
-        appliedFilters: { event, sinceMs, repoFullName, after },
+        appliedFilters: { event, sinceMs, repoFullName, after, payloadFields },
         nextCursor,
         entries,
       };
