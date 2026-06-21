@@ -6,6 +6,8 @@ import {
   SEVERITY_ORDER,
 } from '@clawreview/types';
 
+import { findingDigest } from './digest.js';
+
 export interface AggregateOptions {
   threshold?: Severity;
   maxPerFile?: number;
@@ -227,4 +229,74 @@ export function aggregate(findings: Finding[], opts: AggregateOptions = {}): Agg
   }
 
   return { findings: truncated, groupedByFile, totals, categoryTotals, agentTotals };
+}
+
+/**
+ * Re-derive `totals`, `categoryTotals`, `agentTotals`, and `groupedByFile`
+ * on an `AggregateResult` whose `findings` array was mutated AFTER
+ * `aggregate()` ran (typically by a post-aggregate suppression /
+ * filter pass on the worker hot path).
+ *
+ * Why this exists: the worker runs `aggregate()` once, then walks the
+ * surviving findings through `applySuppressions` (inline
+ * `clawreview-ignore` markers) and assigns the kept set back to
+ * `aggregated.findings`. Without re-deriving the counts, the rendered
+ * PR comment header would show pre-suppression totals while the body
+ * shows post-suppression findings -- a quiet drift that's hard to
+ * notice until an operator audits a comment by hand.
+ *
+ * The counts are produced by `findingDigest()` so the PR comment,
+ * the dashboard's review-store summary, and `clawreview stats` all
+ * derive from the SAME helper. The previous worker code inlined its
+ * own loop; if a future tick added a new bucket to `findingDigest`
+ * the worker would silently fail to recompute it. Centralising here
+ * makes that class of drift impossible.
+ *
+ * Mutating: writes into `result` in place because the worker passes
+ * an already-built `AggregateResult` it owns. The function returns
+ * the same reference so call sites can chain. Findings array itself
+ * is NEVER mutated.
+ *
+ * `groupedByFile` is rebuilt from the kept findings in their existing
+ * (post-suppression) order so the rendered comment renders files in
+ * the same order it would have without the suppression pass.
+ *
+ * Pure semantics aside from the result mutation: idempotent.
+ */
+export function recomputeAggregateTotals<T extends AggregateResult>(result: T): T {
+  // Reuse the digest helper so the worker, CLI, and dashboard all
+  // ride on the same bucket arithmetic. We don't need the top-N
+  // slices here -- the worker drops them on the floor -- so cap them
+  // high enough that `byCategory` / `byAgent` are the only meaningful
+  // outputs.
+  const digest = findingDigest(result.findings, {
+    topFiles: 1,
+    topAgents: 1,
+    topCategories: 1,
+  });
+  // Severity bucket assignment is exhaustive: `digest.totalsBySeverity`
+  // always carries all five buckets, zero or not, so we can assign
+  // directly instead of zeroing first.
+  for (const k of Object.keys(result.totals) as Array<keyof typeof result.totals>) {
+    result.totals[k] = digest.totalsBySeverity[k];
+  }
+  // Spread into a fresh object so the worker's previously-rendered
+  // shape is replaced rather than appended to. A previously-set key
+  // that no longer has any surviving findings (e.g. `'security': 3`
+  // before suppression, zero after) must NOT linger as `'security': 0`
+  // because the existing `aggregate()` contract treats absent keys as
+  // "no findings in that bucket".
+  result.categoryTotals = { ...digest.byCategory };
+  result.agentTotals = { ...digest.byAgent };
+  // Per-file grouping: walk the (post-suppression) findings in order
+  // so the rendered comment surfaces files in the same insertion
+  // order. `aggregate()` produces this via a Map; we mirror it.
+  const perFile = new Map<string, Finding[]>();
+  for (const f of result.findings) {
+    const list = perFile.get(f.file) ?? [];
+    list.push(f);
+    perFile.set(f.file, list);
+  }
+  result.groupedByFile = [...perFile.entries()].map(([file, list]) => ({ file, findings: list }));
+  return result;
 }

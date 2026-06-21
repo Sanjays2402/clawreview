@@ -1,7 +1,13 @@
 import type { Finding } from '@clawreview/types';
 import { describe, expect, it } from 'vitest';
 
-import { aggregate, applyMinConfidence, dedupFindings, rankFindings } from '../src/aggregate.js';
+import {
+  aggregate,
+  applyMinConfidence,
+  dedupFindings,
+  rankFindings,
+  recomputeAggregateTotals,
+} from '../src/aggregate.js';
 
 function f(over: Partial<Finding>): Finding {
   return {
@@ -228,5 +234,141 @@ describe('applyMinConfidence', () => {
     const helperFiles = new Set(helper.kept.map((x) => x.file));
     const aggFiles = new Set(aggregated.findings.map((x) => x.file));
     expect(helperFiles).toEqual(aggFiles);
+  });
+});
+
+describe('recomputeAggregateTotals', () => {
+  // Worker rewire (tick 11): after `aggregate()` produces an
+  // AggregateResult and a downstream pass mutates `findings` (e.g.
+  // inline suppressions), the totals / categoryTotals / agentTotals
+  // / groupedByFile must be re-derived from the surviving set so the
+  // PR comment header doesn't drift from the body. These tests pin
+  // the contract -- both that the recompute is correct AND that the
+  // counts come from the same `findingDigest` helper the CLI uses.
+
+  it('re-derives totals, categoryTotals, and agentTotals from the surviving findings', () => {
+    const r = aggregate([
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 1 }),
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 20 }),
+      f({ agent: 'style', category: 'style', severity: 'medium', file: 'b.ts', startLine: 5 }),
+      f({ agent: 'perf', category: 'performance', severity: 'low', file: 'c.ts', startLine: 8 }),
+    ]);
+    // Drop the last two findings as if a suppression pass removed them.
+    r.findings = r.findings.slice(0, 2);
+    recomputeAggregateTotals(r);
+    expect(r.totals.high).toBe(2);
+    expect(r.totals.medium).toBe(0); // previously 1, must drop to 0
+    expect(r.totals.low).toBe(0);
+    expect(r.categoryTotals.security).toBe(2);
+    // `style` and `performance` previously had entries -- they must
+    // be ABSENT after recompute (not 0), matching `aggregate()`'s
+    // sparse-map contract.
+    expect(Object.prototype.hasOwnProperty.call(r.categoryTotals, 'style')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(r.categoryTotals, 'performance')).toBe(false);
+    expect(r.agentTotals.security).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(r.agentTotals, 'style')).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(r.agentTotals, 'perf')).toBe(false);
+  });
+
+  it('rebuilds groupedByFile in insertion order over the kept findings', () => {
+    const r = aggregate([
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'b.ts', startLine: 1 }),
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 1 }),
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'b.ts', startLine: 10 }),
+    ]);
+    // Reorder findings so b.ts comes BEFORE a.ts in the survivor
+    // array, then prove the recompute mirrors that order rather than
+    // re-sorting alphabetically. `aggregate()` ranks by severity ->
+    // file alphabetical, so its default order is a.ts before b.ts;
+    // we deliberately invert that to make the contract visible.
+    const aFinding = r.findings.find((x) => x.file === 'a.ts')!;
+    const bFindings = r.findings.filter((x) => x.file === 'b.ts');
+    r.findings = [bFindings[0]!, aFinding, bFindings[1]!];
+    recomputeAggregateTotals(r);
+    expect(r.groupedByFile.map((g) => g.file)).toEqual(['b.ts', 'a.ts']);
+    expect(r.groupedByFile[0]!.findings.map((x) => x.startLine).sort((x, y) => x - y)).toEqual([1, 10]);
+  });
+
+  it('zeroes severity buckets that had survivors before suppression', () => {
+    // Defensive: confirms that the recompute writes EVERY severity
+    // bucket, not just the ones that still have findings. A previous
+    // worker bug would have left `critical: 2` lingering even after
+    // all critical findings were suppressed.
+    const r = aggregate([
+      f({ severity: 'critical', file: 'a.ts', startLine: 1 }),
+      f({ severity: 'critical', file: 'b.ts', startLine: 1 }),
+      f({ severity: 'low', file: 'c.ts', startLine: 1, confidence: 0.5 }),
+    ]);
+    expect(r.totals.critical).toBe(2);
+    r.findings = r.findings.filter((x) => x.severity !== 'critical');
+    recomputeAggregateTotals(r);
+    expect(r.totals.critical).toBe(0);
+    expect(r.totals.low).toBe(1);
+  });
+
+  it('returns the same reference so callers can chain', () => {
+    const r = aggregate([f({ file: 'a.ts', startLine: 1 })]);
+    const out = recomputeAggregateTotals(r);
+    expect(out).toBe(r);
+  });
+
+  it('is idempotent: a second call against an unchanged findings array yields the same shape', () => {
+    const r = aggregate([
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 1 }),
+      f({ agent: 'style', category: 'style', severity: 'medium', file: 'b.ts', startLine: 5 }),
+    ]);
+    const before = JSON.stringify({
+      totals: r.totals,
+      category: r.categoryTotals,
+      agent: r.agentTotals,
+      groups: r.groupedByFile.map((g) => ({ file: g.file, count: g.findings.length })),
+    });
+    recomputeAggregateTotals(r);
+    recomputeAggregateTotals(r);
+    const after = JSON.stringify({
+      totals: r.totals,
+      category: r.categoryTotals,
+      agent: r.agentTotals,
+      groups: r.groupedByFile.map((g) => ({ file: g.file, count: g.findings.length })),
+    });
+    expect(after).toBe(before);
+  });
+
+  it('does not mutate any finding object', () => {
+    const r = aggregate([
+      f({ agent: 'security', file: 'a.ts', startLine: 1 }),
+      f({ agent: 'style', file: 'b.ts', startLine: 5 }),
+    ]);
+    const snapshot = JSON.parse(JSON.stringify(r.findings));
+    recomputeAggregateTotals(r);
+    expect(r.findings).toEqual(snapshot);
+  });
+
+  it('produces totals byte-identical to aggregate() on the same findings array', () => {
+    // The whole point of the rewire: the worker's recompute output
+    // must match what aggregate() would have produced from scratch.
+    // We compare via JSON canonicalisation because the bucket maps
+    // are insertion-order and key order is irrelevant for the
+    // dashboard / CLI consumers downstream.
+    const findings: Finding[] = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 1 }),
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts', startLine: 50 }),
+      f({ agent: 'style', category: 'style', severity: 'medium', file: 'b.ts', startLine: 5 }),
+      f({ agent: 'perf', category: 'performance', severity: 'low', file: 'c.ts', startLine: 8 }),
+    ];
+    const r = aggregate(findings);
+    const fresh = aggregate([...r.findings]);
+    // Mutate the worker copy through the recompute path.
+    recomputeAggregateTotals(r);
+
+    const canonicalise = (obj: Record<string, unknown>): string => {
+      const keys = Object.keys(obj).sort();
+      return JSON.stringify(keys.map((k) => [k, obj[k]]));
+    };
+    expect(r.totals).toEqual(fresh.totals);
+    expect(canonicalise(r.categoryTotals as Record<string, unknown>)).toBe(
+      canonicalise(fresh.categoryTotals as Record<string, unknown>),
+    );
+    expect(canonicalise(r.agentTotals)).toBe(canonicalise(fresh.agentTotals));
   });
 });

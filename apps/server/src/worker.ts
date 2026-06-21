@@ -15,6 +15,7 @@ import {
   buildSuppressionMap,
   calibrateConfidence,
   deriveCheckRun,
+  recomputeAggregateTotals,
   renderPrComment,
   similarityMerge,
 } from '@clawreview/aggregator';
@@ -293,22 +294,14 @@ export async function startWorker(logger: Logger): Promise<void> {
     }
     aggregated.findings = suppression.kept;
     // Recompute totals and per-file groups from the surviving findings so
-    // the rendered comment and the persisted summary agree with the body.
-    for (const k of Object.keys(aggregated.totals) as Array<keyof typeof aggregated.totals>) {
-      aggregated.totals[k] = 0;
-    }
-    aggregated.categoryTotals = {};
-    aggregated.agentTotals = {};
-    const perFile = new Map<string, typeof aggregated.findings>();
-    for (const f of aggregated.findings) {
-      aggregated.totals[f.severity] += 1;
-      aggregated.categoryTotals[f.category] = (aggregated.categoryTotals[f.category] ?? 0) + 1;
-      aggregated.agentTotals[f.agent] = (aggregated.agentTotals[f.agent] ?? 0) + 1;
-      const list = perFile.get(f.file) ?? [];
-      list.push(f);
-      perFile.set(f.file, list);
-    }
-    aggregated.groupedByFile = [...perFile.entries()].map(([file, list]) => ({ file, findings: list }));
+    // the rendered comment, the persisted summary, and `clawreview stats`
+    // all agree on byte-identical counts. `recomputeAggregateTotals`
+    // delegates the bucket arithmetic to `findingDigest()`, the same
+    // helper the CLI's `stats` command consumes -- so the worker can
+    // never drift from the CLI on the same findings array. A new bucket
+    // added to `findingDigest` in a future tick automatically surfaces
+    // here without a manual worker edit.
+    recomputeAggregateTotals(aggregated);
 
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {
       prNumber: data.prNumber,
