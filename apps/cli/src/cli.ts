@@ -6,7 +6,7 @@ import { runDiffStats } from './commands/diff-stats.js';
 import { runExplain } from './commands/explain.js';
 import { runAuthors } from './commands/authors.js';
 import { runLintConfig } from './commands/lint-config.js';
-import { runPresetsList, runPresetsResolve, runPresetsShow } from './commands/presets.js';
+import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from './commands/presets.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -30,9 +30,9 @@ export async function runCli(argv: string[]): Promise<void> {
       return;
     case 'presets':
       // Sub-commands: `presets list` (default), `presets show <name>`,
-      // and `presets resolve <chain>`. All three share the local-presets
-      // resolver and the built-in registry so what each renders is
-      // what loadConfig would actually compose.
+      // `presets resolve <chain>`, and `presets diff <a> <b>`. All four
+      // share the local-presets resolver and the built-in registry so
+      // what each renders is what loadConfig would actually compose.
       {
         const sub = args.positional[0] ?? 'list';
         if (sub === 'list') {
@@ -45,6 +45,10 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         if (sub === 'resolve') {
           await runPresetsResolve(args);
+          return;
+        }
+        if (sub === 'diff') {
+          await runPresetsDiff(args);
           return;
         }
         console.error(`Unknown presets sub-command: ${sub}\n`);

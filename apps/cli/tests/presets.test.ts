@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runPresetsList, runPresetsResolve, runPresetsShow } from '../src/commands/presets.js';
+import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'clawreview-presets-'));
@@ -522,5 +522,234 @@ describe('clawreview presets resolve', () => {
     expect(r.stdout).toMatch(/chain:\s*strict\s+\(built-in\)\s+->\s+local-only\s+\(local\)/);
     expect(r.stdout).toContain('body:');
     expect(r.stdout).toMatch(/severity_threshold:\s+high/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tick 10: `clawreview presets diff <a> <b>` -- field-level delta between
+// two preset chains. The fourth sub-command in the presets family.
+// ---------------------------------------------------------------------------
+
+async function runDiff(
+  dir: string,
+  positional: string[],
+  flags: Record<string, string | boolean> = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  process.exitCode = 0;
+  try {
+    await runPresetsDiff({
+      command: 'presets',
+      positional: ['diff', ...positional],
+      flags: { 'no-color': true, root: dir, ...flags },
+    });
+  } finally {
+    writeStdout.mockRestore();
+    writeStderr.mockRestore();
+  }
+  const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+  process.exitCode = 0;
+  return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+}
+
+describe('clawreview presets diff', () => {
+  it('exits 0 with "no differences" when both chains resolve to the same body', async () => {
+    const dir = await tmpDir();
+    // Mirror the strict preset locally so the two chains resolve to
+    // byte-identical bodies. (We could just compare strict vs strict
+    // but exercising one local + one built-in path is more useful.)
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/clone.yml'),
+      'extends: [strict]\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['strict', 'clone'], { format: 'text' });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('(no differences)');
+  });
+
+  it('exits 3 and reports field-level changes between two built-in presets', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'permissive'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['strict']);
+    expect(parsed.chainB).toEqual(['permissive']);
+    expect(parsed.hasChanges).toBe(true);
+    // severity_threshold is the canonical difference between strict
+    // and permissive in the built-in presets.
+    const changedOrUnique =
+      parsed.changed.severity_threshold !== undefined ||
+      parsed.only_in_a.severity_threshold !== undefined ||
+      parsed.only_in_b.severity_threshold !== undefined;
+    expect(changedOrUnique).toBe(true);
+  });
+
+  it('classifies a key as only_in_a when b drops it', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/has-thresh.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/no-thresh.yml'),
+      'min_confidence: 0.5\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['has-thresh', 'no-thresh'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // a has severity_threshold but b does not.
+    expect(parsed.only_in_a.severity_threshold).toBe('high');
+    // b has min_confidence but a does not.
+    expect(parsed.only_in_b.min_confidence).toBe(0.5);
+    // Neither side has changed keys.
+    expect(parsed.changed).toEqual({});
+  });
+
+  it('classifies a key as changed when both sides set it differently', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.changed.severity_threshold).toEqual({ a: 'high', b: 'low' });
+    expect(parsed.only_in_a).toEqual({});
+    expect(parsed.only_in_b).toEqual({});
+  });
+
+  it('compares ad-hoc multi-preset chains (extends-flattened on each side)', async () => {
+    const dir = await tmpDir();
+    // a: strict + a tweak that adds min_confidence
+    // b: strict alone
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/min-conf.yml'),
+      'min_confidence: 0.8\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['strict,min-conf', 'strict'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['strict', 'min-conf']);
+    expect(parsed.chainB).toEqual(['strict']);
+    // The only delta is the added min_confidence on side a.
+    expect(parsed.only_in_a.min_confidence).toBe(0.8);
+    expect(parsed.changed).toEqual({});
+  });
+
+  it('exits 1 when either chain is missing', async () => {
+    const dir = await tmpDir();
+    const missingB = await runDiff(dir, ['strict']);
+    expect(missingB.exitCode).toBe(1);
+    expect(missingB.stderr).toMatch(/missing <a> or <b> chain/);
+    const missingBoth = await runDiff(dir, []);
+    expect(missingBoth.exitCode).toBe(1);
+  });
+
+  it('exits 2 when a chain name is unknown', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'does-not-exist']);
+    expect(r.exitCode).toBe(2);
+    // The error message attributes the failure to side <b>.
+    expect(r.stderr).toMatch(/<b>/);
+  });
+
+  it('exits 2 when --format is invalid', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'permissive'], { format: 'sarif' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/--format must be text\|yaml\|json/);
+  });
+
+  it('exits 2 when a chain has an empty intermediate entry (stray trailing comma)', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict,', 'permissive']);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/contains an empty entry/);
+  });
+
+  it('text output renders changed / only_in_a / only_in_b blocks', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'comment_style: inline', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], { format: 'text' });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toMatch(/chain a:\s*a/);
+    expect(r.stdout).toMatch(/chain b:\s*b/);
+    expect(r.stdout).toContain('changed');
+    expect(r.stdout).toContain('severity_threshold');
+    expect(r.stdout).toContain('only in a');
+    expect(r.stdout).toContain('min_confidence');
+    expect(r.stdout).toContain('only in b');
+    expect(r.stdout).toContain('comment_style');
+  });
+
+  it('yaml output emits a single document with changed / only_in_a / only_in_b keys', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], { format: 'yaml' });
+    expect(r.exitCode).toBe(3);
+    // Header comments record the chains so a YAML consumer keeps the
+    // provenance even after the JSON envelope is stripped.
+    expect(r.stdout).toContain('# clawreview presets diff');
+    expect(r.stdout).toContain('# a: a');
+    expect(r.stdout).toContain('# b: b');
+    expect(r.stdout).toContain('changed:');
+    expect(r.stdout).toContain('severity_threshold');
+  });
+
+  it('accepts --a / --b flags as well as positional', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, [], { a: 'strict', b: 'permissive', format: 'json' });
+    expect([0, 3]).toContain(r.exitCode);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['strict']);
+    expect(parsed.chainB).toEqual(['permissive']);
   });
 });

@@ -569,3 +569,321 @@ function populatedKeys(preset: ConfigPreset): string[] {
     .filter((k) => (preset as Record<string, unknown>)[k] !== undefined)
     .sort();
 }
+
+/**
+ * `clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json]`
+ *
+ * Field-level delta between two preset chains. Each side is parsed as
+ * a comma-separated chain (same shape as `presets resolve`), resolved
+ * via the same registry + local-presets path `loadConfig` uses, and
+ * then compared key by key.
+ *
+ *   - `presets diff strict permissive`              -> compare two
+ *     single-preset chains
+ *   - `presets diff strict,security-focused web`    -> ad-hoc multi-preset
+ *     chains on either side
+ *
+ * The fourth sub-command in the `presets` family:
+ *
+ *   - `list`    -- what presets exist?
+ *   - `show`    -- what does THIS preset look like?
+ *   - `resolve` -- what does THIS CHAIN of presets look like?
+ *   - `diff`    -- what's the DELTA between two chains?
+ *
+ * Pairs naturally with `resolve`: an operator preparing to migrate
+ * from one base config to another (e.g. switching from `strict` to
+ * `web,security-focused` for a new repo class) can preview every
+ * field that will change in one step.
+ *
+ * Output:
+ *   - `--format text` (default): per-field block: "key: changed",
+ *     "key: only in a", "key: only in b". Color-tagged on a TTY.
+ *   - `--format yaml`: a single YAML document with three keys --
+ *     `changed`, `only_in_a`, `only_in_b` -- each mapping field name
+ *     to the affected value(s). Suitable for copy-pasting into a
+ *     migration ticket.
+ *   - `--format json`: the same shape as yaml, serialised as JSON for
+ *     tooling consumption (e.g. piped through jq).
+ *
+ * Exit codes:
+ *   - 0 when the two chains resolve to identical bodies (no delta).
+ *   - 1 when arguments are missing or invalid.
+ *   - 2 when a chain entry is unknown or introduces a cycle (same
+ *     contract as `presets resolve`).
+ *   - 3 when the chains resolve and produce a non-empty delta. This
+ *     makes the command CI-gateable ("fail if my preset change altered
+ *     anything") without parsing the output.
+ *
+ * The diff is INTENTIONALLY shallow at the top level (matching the
+ * shape of `ConfigPreset` keys). A nested change inside `severity_rules`
+ * surfaces as "severity_rules: changed" rather than a fine-grained
+ * line-level diff -- a YAML/JSON delta of structured config keys is
+ * easier to scan than a per-element rebase. Callers that need the
+ * deeper diff can feed the JSON output through jq or a diff tool.
+ */
+export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
+  // Two positional chains expected: `presets diff <a> <b>`. We also
+  // accept `--a <chain> --b <chain>` so a script that already keys on
+  // flags doesn't have to reorder its argv.
+  const positionalA = args.positional[1];
+  const positionalB = args.positional[2];
+  const flagA = args.flags.a ? String(args.flags.a) : '';
+  const flagB = args.flags.b ? String(args.flags.b) : '';
+  const rawA = positionalA ?? flagA;
+  const rawB = positionalB ?? flagB;
+  if (!rawA || rawA.trim().length === 0 || !rawB || rawB.trim().length === 0) {
+    process.stderr.write(
+      'clawreview presets diff: missing <a> or <b> chain ' +
+        '(usage: `presets diff <a> <b>`)\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const root = String(args.flags.root ?? getCwd());
+  const formatRaw = String(args.flags.format ?? 'text').toLowerCase();
+  if (formatRaw !== 'text' && formatRaw !== 'yaml' && formatRaw !== 'json') {
+    process.stderr.write(
+      `clawreview presets diff: --format must be text|yaml|json (got '${formatRaw}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const format = formatRaw as 'text' | 'yaml' | 'json';
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+
+  // Parse both chains. Reuse the same rejection rule as `presets
+  // resolve` so an empty intermediate entry never silently widens the
+  // chain.
+  const chainA = parseChain(rawA);
+  const chainB = parseChain(rawB);
+  if (chainA === null) {
+    process.stderr.write(
+      `clawreview presets diff: chain <a> contains an empty entry ('${rawA}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (chainB === null) {
+    process.stderr.write(
+      `clawreview presets diff: chain <b> contains an empty entry ('${rawB}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const localPresets = await loadLocalPresets(root);
+
+  // Resolve each chain. Unknown names / cycles surface here.
+  let bodyA: ConfigPreset;
+  let bodyB: ConfigPreset;
+  try {
+    bodyA = resolveExtendsChain(chainA, (n) => {
+      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      return getPreset(n);
+    });
+  } catch (err) {
+    process.stderr.write(
+      `clawreview presets diff: <a> ${(err as Error).message} ` +
+        `(chain: ${chainA.join(' -> ')})\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  try {
+    bodyB = resolveExtendsChain(chainB, (n) => {
+      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      return getPreset(n);
+    });
+  } catch (err) {
+    process.stderr.write(
+      `clawreview presets diff: <b> ${(err as Error).message} ` +
+        `(chain: ${chainB.join(' -> ')})\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const delta = computePresetDelta(bodyA, bodyB);
+
+  if (format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          chainA,
+          chainB,
+          ...delta,
+          hasChanges: hasDelta(delta),
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else if (format === 'yaml') {
+    // Header captures the two chains as comments so a YAML consumer
+    // still has the provenance even if it strips the JSON envelope.
+    const header = [
+      `# clawreview presets diff`,
+      `# a: ${chainA.join(' -> ')}`,
+      `# b: ${chainB.join(' -> ')}`,
+    ].join('\n');
+    const yamlBody = YAML.stringify(
+      {
+        changed: delta.changed,
+        only_in_a: delta.only_in_a,
+        only_in_b: delta.only_in_b,
+      },
+      { lineWidth: 0 },
+    );
+    process.stdout.write(`${header}\n${yamlBody}`);
+  } else {
+    // Text: per-field render. Empty diff -> friendly "no differences"
+    // so the operator doesn't think the command silently no-op'd.
+    process.stdout.write(
+      `${kleur.bold('chain a')}: ${chainA.join(' -> ')}\n` +
+        `${kleur.bold('chain b')}: ${chainB.join(' -> ')}\n\n`,
+    );
+    if (!hasDelta(delta)) {
+      process.stdout.write(kleur.gray('  (no differences)\n'));
+    } else {
+      // changed: show both sides inline-ish; nested values use YAML.
+      const changedKeys = Object.keys(delta.changed).sort();
+      for (const key of changedKeys) {
+        const { a, b } = delta.changed[key]!;
+        process.stdout.write(`  ${kleur.yellow('changed')} ${kleur.bold(key)}:\n`);
+        process.stdout.write(`    a: ${renderInline(a)}\n`);
+        process.stdout.write(`    b: ${renderInline(b)}\n`);
+      }
+      for (const key of Object.keys(delta.only_in_a).sort()) {
+        process.stdout.write(
+          `  ${kleur.cyan('only in a')} ${kleur.bold(key)}: ` +
+            `${renderInline(delta.only_in_a[key])}\n`,
+        );
+      }
+      for (const key of Object.keys(delta.only_in_b).sort()) {
+        process.stdout.write(
+          `  ${kleur.green('only in b')} ${kleur.bold(key)}: ` +
+            `${renderInline(delta.only_in_b[key])}\n`,
+        );
+      }
+    }
+  }
+
+  // Exit code 3 on non-empty delta so CI can gate on "did anything
+  // change?" without parsing the output. Exit 0 when bodies match.
+  process.exitCode = hasDelta(delta) ? 3 : 0;
+}
+
+/**
+ * Parse a comma-separated chain identifier (`"strict,security-focused"`)
+ * into a trimmed string array. Returns `null` when any entry is empty
+ * (a stray comma usually means a forgotten name; we'd rather refuse
+ * than silently widen the chain).
+ *
+ * Pure / extracted so the `resolve` / `diff` commands share one parser.
+ */
+function parseChain(raw: string): string[] | null {
+  const chain = raw.split(',').map((s) => s.trim());
+  if (chain.some((s) => s.length === 0)) return null;
+  return chain;
+}
+
+/**
+ * Per-field delta between two resolved preset bodies.
+ *
+ * Shape (all three maps are sparse: keys appear only when the diff
+ * matches their condition):
+ *   - changed:  key -> { a, b }    where bodyA[key] !== bodyB[key]
+ *                                  (deep-equality compare)
+ *   - only_in_a: key -> bodyA[key] (b doesn't carry this key)
+ *   - only_in_b: key -> bodyB[key] (a doesn't carry this key)
+ *
+ * "Key carries this" is checked via `populatedKeys` (i.e. an undefined
+ * value counts as "absent") so a preset that explicitly sets a key to
+ * undefined is treated identically to one that never set it.
+ *
+ * Equality is deep via JSON canonicalisation. Sufficient for
+ * `ConfigPreset` (no functions / dates / cycles) and avoids pulling
+ * in a deep-equal lib for this one call site.
+ */
+export interface PresetDelta {
+  changed: Record<string, { a: unknown; b: unknown }>;
+  only_in_a: Record<string, unknown>;
+  only_in_b: Record<string, unknown>;
+}
+
+export function computePresetDelta(a: ConfigPreset, b: ConfigPreset): PresetDelta {
+  const keysA = new Set(populatedKeys(a));
+  const keysB = new Set(populatedKeys(b));
+  const out: PresetDelta = { changed: {}, only_in_a: {}, only_in_b: {} };
+  const recA = a as Record<string, unknown>;
+  const recB = b as Record<string, unknown>;
+  // Union walk so we don't miss either side.
+  const allKeys = new Set<string>([...keysA, ...keysB]);
+  for (const key of allKeys) {
+    if (!keysB.has(key)) {
+      out.only_in_a[key] = recA[key];
+      continue;
+    }
+    if (!keysA.has(key)) {
+      out.only_in_b[key] = recB[key];
+      continue;
+    }
+    // Both sides have the key; compare structurally.
+    if (!deepEqual(recA[key], recB[key])) {
+      out.changed[key] = { a: recA[key], b: recB[key] };
+    }
+  }
+  return out;
+}
+
+function hasDelta(d: PresetDelta): boolean {
+  return (
+    Object.keys(d.changed).length > 0 ||
+    Object.keys(d.only_in_a).length > 0 ||
+    Object.keys(d.only_in_b).length > 0
+  );
+}
+
+/**
+ * JSON-canonical deep equality. ConfigPreset bodies are plain JSON-shaped
+ * objects (no functions / dates / cycles), so JSON.stringify with a
+ * key-sort replacer reduces structural equality to a single string
+ * compare. Adequate for the diff command's "did this field change?"
+ * granularity.
+ */
+function deepEqual(x: unknown, y: unknown): boolean {
+  return canonicalJSON(x) === canonicalJSON(y);
+}
+
+function canonicalJSON(v: unknown): string {
+  return JSON.stringify(v, (_key, value: unknown) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const obj = value as Record<string, unknown>;
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(obj).sort()) {
+        sorted[k] = obj[k];
+      }
+      return sorted;
+    }
+    return value;
+  });
+}
+
+/**
+ * Render a primitive or nested value on a single text-block line.
+ * Primitives use their JSON form; objects / arrays use the YAML form
+ * trimmed onto one line for short shapes.
+ */
+function renderInline(v: unknown): string {
+  if (v === undefined) return kleur.gray('<unset>');
+  if (v === null) return 'null';
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+    return String(v);
+  }
+  // YAML.stringify gives the most readable shape for a small object;
+  // we trim trailing whitespace + the trailing newline so the line
+  // stays compact.
+  return YAML.stringify(v, { lineWidth: 0 }).trim().replace(/\n/g, '; ');
+}
