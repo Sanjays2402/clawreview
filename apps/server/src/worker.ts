@@ -9,7 +9,7 @@ import { ProviderRegistry } from '@clawreview/llm';
 import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment, similarityMerge } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics, observeAgentExecutions, observeSimilarityMerges } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeSimilarityMerges } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -209,6 +209,7 @@ export async function startWorker(logger: Logger): Promise<void> {
         { rulesDropped: ruled.dropped.length },
         'severity_rules_dropped',
       );
+      observeFindingsDropped(metrics, 'severity_rule', ruled.dropped.length);
     }
 
     // Confidence calibration: floor low-confidence nits, promote
@@ -259,6 +260,7 @@ export async function startWorker(logger: Logger): Promise<void> {
           { droppedByFloor, minConfidence: cfg.min_confidence },
           'min_confidence floor applied',
         );
+        observeFindingsDropped(metrics, 'min_confidence', droppedByFloor);
       }
     }
 
@@ -272,6 +274,7 @@ export async function startWorker(logger: Logger): Promise<void> {
         { suppressed: suppression.suppressed.length, kept: suppression.kept.length },
         'inline suppression applied',
       );
+      observeFindingsDropped(metrics, 'inline_suppression', suppression.suppressed.length);
     }
     aggregated.findings = suppression.kept;
     // Recompute totals and per-file groups from the surviving findings so

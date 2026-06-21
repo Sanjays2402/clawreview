@@ -62,6 +62,23 @@ export interface MetricsBundle {
    * whitespace or newline noise.
    */
   authorsAttributedTotal: Counter<string>;
+  /**
+   * Findings removed from the post-aggregation output before the PR
+   * comment is rendered, labeled by `reason`:
+   *
+   *   - `severity_rule`     -- a `severity_rules` entry with `drop: true`
+   *                            removed it.
+   *   - `min_confidence`    -- the global `min_confidence` floor (tick 6)
+   *                            dropped it during aggregation.
+   *   - `inline_suppression` -- a `clawreview-ignore` / `-ignore-next-line`
+   *                            marker in the diff hid it.
+   *
+   * The label set is closed today (three reasons) so cardinality stays
+   * fixed regardless of repo or installation count. Operators can graph
+   * `rate(clawreview_findings_dropped_total[5m]) by (reason)` to spot a
+   * misconfigured rule that started dropping everything.
+   */
+  findingsDroppedTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -184,6 +201,13 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const findingsDroppedTotal = new Counter({
+    name: 'clawreview_findings_dropped_total',
+    help: 'Findings dropped after aggregation, labeled by reason (severity_rule | min_confidence | inline_suppression).',
+    labelNames: ['reason'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -239,6 +263,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     agentFindingsTotal,
     similarityMergesTotal,
     authorsAttributedTotal,
+    findingsDroppedTotal,
     queueDepth,
     queueInflight,
   };
@@ -427,4 +452,34 @@ export function observeAuthorAttribution(
     const label = sanitizeAuthorLabel(a.authorName, a.authorEmail);
     metrics.authorsAttributedTotal.inc({ author: label }, total);
   }
+}
+
+/**
+ * Closed set of reasons a finding can be dropped post-aggregation.
+ * Exported so the worker / CLI cannot accidentally introduce a typo
+ * that would silently fork the counter into two label values.
+ */
+export const FINDING_DROP_REASONS = [
+  'severity_rule',
+  'min_confidence',
+  'inline_suppression',
+] as const;
+export type FindingDropReason = (typeof FINDING_DROP_REASONS)[number];
+
+/**
+ * Bump the `clawreview_findings_dropped_total{reason}` counter by `count`
+ * (defaults to 1) for the given reason. Safe with `count <= 0` (no-op)
+ * so callers don't have to guard on the empty case.
+ *
+ * The reason set is closed by the FindingDropReason type so a misnamed
+ * label literally cannot reach Prometheus -- if a new drop source
+ * appears, add it to FINDING_DROP_REASONS first.
+ */
+export function observeFindingsDropped(
+  metrics: MetricsBundle,
+  reason: FindingDropReason,
+  count = 1,
+): void {
+  if (!Number.isFinite(count) || count <= 0) return;
+  metrics.findingsDroppedTotal.inc({ reason }, count);
 }

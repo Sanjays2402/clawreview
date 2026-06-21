@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  FINDING_DROP_REASONS,
   getMetrics,
   observeAgentExecutions,
   observeAuthorAttribution,
+  observeFindingsDropped,
   observeSimilarityMerges,
   resetMetricsForTests,
   sanitizeAuthorLabel,
@@ -210,5 +212,49 @@ describe('observeAuthorAttribution', () => {
     const text = await metrics.registry.metrics();
     expect(text).toContain('# TYPE clawreview_authors_attributed_total counter');
     expect(text).not.toMatch(/clawreview_authors_attributed_total\{[^}]*author=/);
+  });
+});
+
+describe('observeFindingsDropped', () => {
+  it('exposes a fixed list of reasons so labels stay closed', () => {
+    expect(FINDING_DROP_REASONS).toEqual(['severity_rule', 'min_confidence', 'inline_suppression']);
+  });
+
+  it('emits clawreview_findings_dropped_total labeled by reason', async () => {
+    const metrics = getMetrics({ service: 'clawreview-drops-1', defaultMetrics: false });
+    observeFindingsDropped(metrics, 'severity_rule', 3);
+    observeFindingsDropped(metrics, 'min_confidence', 5);
+    observeFindingsDropped(metrics, 'inline_suppression', 1);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_findings_dropped_total counter');
+    expect(text).toMatch(/clawreview_findings_dropped_total\{[^}]*reason="severity_rule"[^}]*\} 3/);
+    expect(text).toMatch(/clawreview_findings_dropped_total\{[^}]*reason="min_confidence"[^}]*\} 5/);
+    expect(text).toMatch(/clawreview_findings_dropped_total\{[^}]*reason="inline_suppression"[^}]*\} 1/);
+  });
+
+  it('defaults count to 1 when omitted', async () => {
+    const metrics = getMetrics({ service: 'clawreview-drops-2', defaultMetrics: false });
+    observeFindingsDropped(metrics, 'severity_rule');
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_findings_dropped_total\{[^}]*reason="severity_rule"[^}]*\} 1/);
+  });
+
+  it('accumulates across multiple calls (counter, not gauge)', async () => {
+    const metrics = getMetrics({ service: 'clawreview-drops-3', defaultMetrics: false });
+    observeFindingsDropped(metrics, 'min_confidence', 4);
+    observeFindingsDropped(metrics, 'min_confidence', 2);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_findings_dropped_total\{[^}]*reason="min_confidence"[^}]*\} 6/);
+  });
+
+  it('is a safe no-op when count is zero, negative, or non-finite', async () => {
+    const metrics = getMetrics({ service: 'clawreview-drops-4', defaultMetrics: false });
+    observeFindingsDropped(metrics, 'severity_rule', 0);
+    observeFindingsDropped(metrics, 'severity_rule', -3);
+    observeFindingsDropped(metrics, 'severity_rule', Number.NaN);
+    observeFindingsDropped(metrics, 'severity_rule', Number.POSITIVE_INFINITY);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_findings_dropped_total counter');
+    expect(text).not.toMatch(/clawreview_findings_dropped_total\{[^}]*reason="severity_rule"/);
   });
 });
