@@ -4,6 +4,7 @@ import { aggregate } from '../src/aggregate.js';
 import { blameKey, type BlameMap } from '../src/authors.js';
 import { deriveCheckRun } from '../src/check.js';
 import { renderPrComment } from '../src/comment.js';
+import { type FindingDigest } from '../src/digest.js';
 
 describe('comment + check', () => {
   it('renders a clean-review comment when there are no findings', () => {
@@ -280,5 +281,141 @@ describe('comment + check', () => {
     });
     expect(md).toMatch(/Top contributors by severity/);
     expect(md).toMatch(/No findings/);
+  });
+});
+
+describe('renderPrComment topAgents / topCategories (tick 11)', () => {
+  // The PR-comment header rewires to consume `findingDigest()`'s
+  // pre-capped slices when the new opts are set. Tests pin both
+  // (a) the existing unbounded path stays untouched when the new
+  //     opts are NOT set (back-compat with snapshot tests / earlier
+  //     callers); and
+  // (b) the new path produces ordering + truncation byte-identical
+  //     to what the CLI's `stats --by agent --top-agents <n>` ships,
+  //     by going through the same digest helper.
+
+  function many(): Array<{ agent: string; category: 'security' | 'style' | 'performance' | 'maintainability' | 'bug'; severity: 'high' | 'medium' | 'low'; file: string; startLine: number }> {
+    return [
+      // 4 security from agent A1
+      { agent: 'a1', category: 'security', severity: 'high', file: 'a.ts', startLine: 1 },
+      { agent: 'a1', category: 'security', severity: 'high', file: 'a.ts', startLine: 11 },
+      { agent: 'a1', category: 'security', severity: 'high', file: 'a.ts', startLine: 21 },
+      { agent: 'a1', category: 'security', severity: 'high', file: 'a.ts', startLine: 31 },
+      // 3 style from A2
+      { agent: 'a2', category: 'style', severity: 'medium', file: 'b.ts', startLine: 1 },
+      { agent: 'a2', category: 'style', severity: 'medium', file: 'b.ts', startLine: 11 },
+      { agent: 'a2', category: 'style', severity: 'medium', file: 'b.ts', startLine: 21 },
+      // 2 perf from A3
+      { agent: 'a3', category: 'performance', severity: 'low', file: 'c.ts', startLine: 1 },
+      { agent: 'a3', category: 'performance', severity: 'low', file: 'c.ts', startLine: 11 },
+      // 1 maintainability from A4
+      { agent: 'a4', category: 'maintainability', severity: 'low', file: 'd.ts', startLine: 1 },
+      // 1 bug from A5
+      { agent: 'a5', category: 'bug', severity: 'low', file: 'e.ts', startLine: 1 },
+    ];
+  }
+
+  function buildResult() {
+    return aggregate(
+      many().map((row, i) => ({
+        ...row,
+        title: `t${i}`,
+        rationale: 'r',
+        confidence: 0.8,
+        tags: [] as string[],
+      })),
+      { maxPerFile: 50, threshold: 'nit' as const },
+    );
+  }
+
+  it('renders the category line via the digest slice and appends (N more) when truncated', () => {
+    const r = buildResult();
+    const md = renderPrComment(r, { prNumber: 1, headSha: 'abc1234', topCategories: 2 });
+    // Top 2 categories by count: security (4), style (3). Lines
+    // appear in render order; the truncation tail is _(N more)_.
+    expect(md).toMatch(/`security` 4/);
+    expect(md).toMatch(/`style` 3/);
+    // 5 categories total -> 3 dropped into the tail annotation.
+    expect(md).toMatch(/_\(3 more\)_/);
+    // The dropped categories must NOT appear in the line.
+    expect(md).not.toMatch(/`maintainability` /);
+    expect(md).not.toMatch(/`reliability` /);
+  });
+
+  it('renders the by-agent line ONLY when topAgents is set (default: no agent line)', () => {
+    const r = buildResult();
+    const without = renderPrComment(r, { prNumber: 1, headSha: 'abc1234' });
+    // No "By agent" header line when topAgents is unset.
+    expect(without).not.toMatch(/By agent:/);
+
+    const withCap = renderPrComment(r, { prNumber: 1, headSha: 'abc1234', topAgents: 3 });
+    expect(withCap).toMatch(/By agent: /);
+    expect(withCap).toMatch(/`a1` 4/);
+    expect(withCap).toMatch(/`a2` 3/);
+    expect(withCap).toMatch(/`a3` 2/);
+    // a4 and a5 collapsed into the tail.
+    expect(withCap).toMatch(/_\(2 more\)_/);
+    expect(withCap).not.toMatch(/`a4` /);
+    expect(withCap).not.toMatch(/`a5` /);
+  });
+
+  it('does not render an (N more) tail when the cap is at or above the bucket count', () => {
+    const r = buildResult();
+    const md = renderPrComment(r, {
+      prNumber: 1,
+      headSha: 'abc1234',
+      topAgents: 10,
+      topCategories: 10,
+    });
+    expect(md).toMatch(/By agent: /);
+    // All five agents render -- no truncation annotation.
+    expect(md).toMatch(/`a1` 4/);
+    expect(md).toMatch(/`a5` 1/);
+    expect(md).not.toMatch(/more\)_/);
+  });
+
+  it('preserves the existing unbounded category line when topCategories is unset (back-compat)', () => {
+    // Defensive: any change to the existing render shape would break
+    // downstream snapshot tests and pre-tick-11 callers. The line
+    // should be sorted by count desc with no _(N more)_ tail.
+    const r = buildResult();
+    const md = renderPrComment(r, { prNumber: 1, headSha: 'abc1234' });
+    expect(md).toMatch(/`security` 4 · `style` 3 · `performance` 2 · `maintainability` 1 · `bug` 1/);
+    expect(md).not.toMatch(/more\)_/);
+    expect(md).not.toMatch(/By agent:/);
+  });
+
+  it('reuses a caller-supplied digest instead of recomputing one', () => {
+    // The worker already builds a digest for the dashboard; the
+    // comment renderer should consume that digest rather than walk
+    // the findings array a second time. We verify by handing a
+    // digest whose slices DO NOT match the result (a pathological
+    // case the helper would never produce, but the cleanest way to
+    // observe "the renderer used my object").
+    const r = buildResult();
+    const fakeDigest = {
+      total: 0,
+      totalsBySeverity: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 },
+      byCategory: { security: 1 } as Partial<Record<'security' | 'style', number>>,
+      byAgent: { 'fake-agent': 42 },
+      byFile: {},
+      topAgents: [{ agent: 'fake-agent', count: 42 }],
+      topCategories: [{ category: 'security' as const, count: 1 }],
+      topFiles: [],
+    };
+    const md = renderPrComment(r, {
+      prNumber: 1,
+      headSha: 'abc1234',
+      topAgents: 1,
+      topCategories: 1,
+      digest: fakeDigest as unknown as FindingDigest,
+    });
+    // Both lines reflect the injected (not recomputed) digest.
+    expect(md).toMatch(/`fake-agent` 42/);
+    expect(md).toMatch(/`security` 1/);
+    // The genuine top entries (a1 / a2 / style) must NOT appear in
+    // the byCategory / byAgent lines.
+    expect(md).not.toMatch(/`a1` 4/);
+    expect(md).not.toMatch(/`a2` /);
   });
 });

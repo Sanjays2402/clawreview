@@ -2,6 +2,7 @@ import type { Finding, Severity } from '@clawreview/types';
 import { SEVERITY_LABELS } from '@clawreview/types';
 
 import type { AggregateResult } from './aggregate.js';
+import { findingDigest, type FindingDigest } from './digest.js';
 import { detectHotspots, renderHotspotLine, type HotspotOptions } from './hotspots.js';
 import {
   attributeFindingsToAuthors,
@@ -84,6 +85,51 @@ export interface CommentOptions {
    * no-op when blame is empty or only the unknown bucket has entries.
    */
   authors?: CommentAuthorsBlock;
+  /**
+   * Cap on the categories surfaced in the header's "By category" line.
+   * When set, the renderer derives the top-N categories via the
+   * `findingDigest()` helper (the same one the CLI's `stats` consumes)
+   * so the PR comment and `clawreview stats --top-categories <n>` agree
+   * on the same ordering and the same caller-visible bound.
+   *
+   * Tail behaviour: when the cap fires, the rendered line ends with
+   * `(N more)` so a reviewer can tell the breakdown was truncated and
+   * by how much.
+   *
+   * Default: unset -> render every category that has at least one
+   * finding (the existing tick-1 behaviour). The cap is opt-in so
+   * existing callers and snapshot tests are unaffected.
+   */
+  topCategories?: number;
+  /**
+   * Optional per-agent breakdown block in the comment header. When set,
+   * the renderer inserts a "By agent" line (capped at `topAgents`)
+   * derived from the same `findingDigest()` helper the CLI uses, so
+   * the comment and `clawreview stats --by agent --top-agents <n>`
+   * surface byte-identical ordering.
+   *
+   * Mirrors the existing category line: `agent` rendered in `code`
+   * format with the count, joined by ` * ` separators. When the cap
+   * fires the line ends with `(N more)`.
+   *
+   * Default: unset -> no by-agent header line (existing behaviour;
+   * the per-agent breakdown still surfaces in the Run summary block
+   * when runSummary.agentExecutions is supplied).
+   */
+  topAgents?: number;
+  /**
+   * Pre-computed digest. When the caller already ran `findingDigest()`
+   * (e.g. the worker reuses the same digest for the dashboard and the
+   * comment), pass it here to skip the redundant walk inside this
+   * renderer. The renderer only consumes `topAgents` / `topCategories`
+   * from this digest -- it does NOT use `topFiles` or `hotspots` (those
+   * still resolve via the `hotspots` opt).
+   *
+   * When unset, the renderer computes a digest internally IFF
+   * `topAgents` or `topCategories` is set. When neither is set, no
+   * digest is built (zero cost on the existing render path).
+   */
+  digest?: FindingDigest;
 }
 
 export function renderPrComment(result: AggregateResult, opts: CommentOptions): string {
@@ -107,17 +153,65 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     .map((s) => `${SEV_EMOJI[s]} ${totals[s]} ${SEVERITY_LABELS[s]}`)
     .join(' · ');
 
-  const categoryEntries = Object.entries(result.categoryTotals)
-    .filter(([, n]) => (n ?? 0) > 0)
-    .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0));
-  const categoryLine =
-    categoryEntries.length > 0
-      ? categoryEntries.map(([cat, n]) => `\`${cat}\` ${n}`).join(' · ')
-      : '';
+  // Resolve a digest IF either of the top-N caps was set. Reuse the
+  // caller-supplied digest when present (worker hot path passes its
+  // own); otherwise build one lazily so the existing cap-unset render
+  // path is zero-cost.
+  let digest: FindingDigest | undefined;
+  const wantsTopCategories = typeof opts.topCategories === 'number' && opts.topCategories > 0;
+  const wantsTopAgents = typeof opts.topAgents === 'number' && opts.topAgents > 0;
+  if (wantsTopCategories || wantsTopAgents) {
+    digest =
+      opts.digest ??
+      findingDigest(result.findings, {
+        topCategories: wantsTopCategories ? opts.topCategories : 1,
+        topAgents: wantsTopAgents ? opts.topAgents : 1,
+        topFiles: 1,
+      });
+  }
+
+  // Category line: if topCategories is set, render the digest's
+  // already-sorted slice and append `(N more)` when truncated.
+  // Otherwise keep the existing unbounded sort-by-count render so
+  // existing callers / snapshots stay identical.
+  let categoryLine = '';
+  if (wantsTopCategories && digest) {
+    const totalCategories = Object.keys(digest.byCategory).length;
+    const shown = digest.topCategories;
+    if (shown.length > 0) {
+      const parts = shown.map((c) => `\`${c.category}\` ${c.count}`);
+      const tail = totalCategories > shown.length ? ` _(${totalCategories - shown.length} more)_` : '';
+      categoryLine = `${parts.join(' · ')}${tail}`;
+    }
+  } else {
+    const categoryEntries = Object.entries(result.categoryTotals)
+      .filter(([, n]) => (n ?? 0) > 0)
+      .sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0));
+    if (categoryEntries.length > 0) {
+      categoryLine = categoryEntries.map(([cat, n]) => `\`${cat}\` ${n}`).join(' · ');
+    }
+  }
+
+  // Agent line: opt-in (default off). Mirror the category line shape
+  // so a dashboard renderer sees consistent markup. When the cap fires
+  // the tail `_(N more)_` annotation mirrors the category convention.
+  let agentLine = '';
+  if (wantsTopAgents && digest) {
+    const totalAgents = Object.keys(digest.byAgent).length;
+    const shownAgents = digest.topAgents;
+    if (shownAgents.length > 0) {
+      const parts = shownAgents.map((a) => `\`${a.agent}\` ${a.count}`);
+      const tail = totalAgents > shownAgents.length ? ` _(${totalAgents - shownAgents.length} more)_` : '';
+      agentLine = `By agent: ${parts.join(' · ')}${tail}`;
+    }
+  }
 
   const body: string[] = ['### ClawReview', '', summary];
   if (categoryLine) {
     body.push('', categoryLine);
+  }
+  if (agentLine) {
+    body.push('', agentLine);
   }
   body.push('');
 

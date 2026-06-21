@@ -307,6 +307,13 @@ export async function startWorker(logger: Logger): Promise<void> {
       prNumber: data.prNumber,
       headSha: data.headSha,
       dashboardUrl: `${env.DASHBOARD_URL}/r/${encodeURIComponent(`${data.owner}/${data.repo}`)}/${data.prNumber}`,
+      // Top-N caps mirror the CLI's `stats` defaults so an operator
+      // running `clawreview stats --by category` against the same
+      // findings array sees byte-identical ordering / truncation.
+      // The renderer derives these via the shared `findingDigest()`
+      // helper -- same numbers the dashboard and CLI use.
+      topCategories: 8,
+      topAgents: 8,
     })}`;
 
     const commentResult = await gh.upsertReviewComment(
