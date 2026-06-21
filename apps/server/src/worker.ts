@@ -313,9 +313,27 @@ export async function startWorker(logger: Logger): Promise<void> {
     // the same ordering / truncation. Computed AFTER suppression so
     // `total` matches the visible findings count -- the digest counts
     // what was POSTED, not what was generated.
+    //
+    // Tick 13: also populate `hotspots` so the persisted digest carries
+    // the same cluster list the PR-comment Hotspots block renders. The
+    // dashboard `/api/reviews/:id` DTO surfaces digest.hotspots verbatim
+    // so the detail page can render the same clusters without re-walking
+    // findings. The CLI `clawreview stats` already knows how to consume
+    // a digest with hotspots populated (no consumer changes needed).
+    //
+    // The comment renderer keeps computing its own hotspots block
+    // (the inline `if (opts.hotspots)` path in renderPrComment) because
+    // the block depends on cfg.hotspots (per-tenant opt-in), not on
+    // whether the worker chose to populate the digest. Populating the
+    // digest always is the right call for the dashboard: a tenant
+    // that *disabled* the PR-comment hotspots block still benefits
+    // from the dashboard surface, and the cost is one extra pass
+    // over `findings` per review (a few microseconds even for the
+    // largest reviews; aggregator/tests/digest.test.ts pins this).
     const reviewDigest = findingDigest(aggregated.findings, {
       topCategories: 8,
       topAgents: 8,
+      hotspots: true,
     });
 
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {

@@ -256,6 +256,109 @@ describe('reviews and stats routes', () => {
       // check is a single `digest !== null` comparison.
       expect(res.json().digest).toBeNull();
     });
+
+    // Tick 13: the worker now passes `hotspots: true` when building the
+    // per-review digest so the persisted shape carries the same cluster
+    // list the PR-comment Hotspots block renders. The dashboard
+    // /api/reviews/:id DTO surfaces digest.hotspots verbatim so the
+    // detail page renders byte-identical clusters without re-walking
+    // findings.
+    it('surfaces digest.hotspots when the worker populated them (tick 13 wiring)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 14, owner: 'o', repo: 'r', prNumber: 14, headSha: 'h14', baseSha: 'b14',
+      });
+      // Mirror the worker's build call: same opts, same digest shape.
+      // Three findings in the same hot file so the clusterer produces
+      // at least one hotspot.
+      const findings = [
+        { agent: 'security', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'src/hot.ts', startLine: 10, confidence: 0.9, tags: [] },
+        { agent: 'security', category: 'security' as const, severity: 'medium' as const, title: 'B', rationale: 'r', file: 'src/hot.ts', startLine: 12, confidence: 0.8, tags: [] },
+        { agent: 'style', category: 'style' as const, severity: 'nit' as const, title: 'C', rationale: 'r', file: 'src/hot.ts', startLine: 14, confidence: 0.5, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      // The worker calls findingDigest with hotspots: true (tick 13).
+      // Mirror it here so the persisted shape matches what the worker
+      // would store in production.
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 14, headSha: 'h14', baseSha: 'b14' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 3,
+          totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        findings,
+        { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // digest is present and carries hotspots (not undefined, not
+      // null -- the worker populated them).
+      expect(body.digest).not.toBeNull();
+      expect(Array.isArray(body.digest.hotspots)).toBe(true);
+      expect(body.digest.hotspots.length).toBeGreaterThanOrEqual(1);
+      // Each hotspot carries the file path so a dashboard renderer can
+      // link to the source.
+      for (const h of body.digest.hotspots) {
+        expect(typeof h.file).toBe('string');
+        expect(h.file.length).toBeGreaterThan(0);
+      }
+      // At least one of the hotspots is anchored on src/hot.ts (the
+      // hot file we built). Loose match so the test doesn't break
+      // when the clusterer is retuned -- the contract is "the dashboard
+      // sees the clusters", not "the clusterer produced exactly these
+      // bounds".
+      const hotFiles = body.digest.hotspots.map((h: { file: string }) => h.file);
+      expect(hotFiles).toContain('src/hot.ts');
+    });
+
+    it('omits digest.hotspots when the worker built the digest without them (back-compat for legacy)', async () => {
+      // Defensive: a future tick may flip back to hotspots-off for
+      // a specific code path (e.g. an emergency disable). The DTO
+      // must still surface the digest cleanly with hotspots simply
+      // absent -- not crash, not synthesise an empty array.
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 15, owner: 'o', repo: 'r', prNumber: 15, headSha: 'h15', baseSha: 'b15',
+      });
+      const findings = [
+        { agent: 'security', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      // Build digest WITHOUT hotspots (the pre-tick-13 worker shape).
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8 });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 15, headSha: 'h15', baseSha: 'b15' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 1,
+          totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        findings,
+        { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.digest).not.toBeNull();
+      // hotspots was never computed -> the field is simply absent
+      // from the serialised digest (the digest helper omits it
+      // entirely so a JSON consumer can distinguish "not computed"
+      // from "computed and empty").
+      expect(body.digest.hotspots).toBeUndefined();
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
