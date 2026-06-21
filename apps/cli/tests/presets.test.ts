@@ -5,6 +5,11 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from '../src/commands/presets.js';
+import {
+  filterPresetDelta,
+  ONLY_FIELDS_EMPTY_ENTRY,
+  parsePresetOnlyFields,
+} from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'clawreview-presets-'));
@@ -751,5 +756,274 @@ describe('clawreview presets diff', () => {
     const parsed = JSON.parse(r.stdout);
     expect(parsed.chainA).toEqual(['strict']);
     expect(parsed.chainB).toEqual(['permissive']);
+  });
+});
+
+describe('clawreview presets diff --only-fields (tick 11)', () => {
+  // The --only-fields filter restricts the diff to a specific
+  // allowlist of top-level keys, so an operator preparing a focused
+  // migration ticket can scope a wide preset rebase to "only the
+  // handful of fields I care about". Tests pin (a) the filter
+  // semantics (keys outside the allowlist drop out of changed /
+  // only_in_a / only_in_b), (b) the exit-code contract (delta hidden
+  // by the filter exits 0 because the operator declared those
+  // changes out of scope), (c) the rendered annotation paths
+  // (text / yaml / json all surface the active filter), and
+  // (d) error handling (empty intermediate entry rejects).
+
+  it('restricts changed / only_in_a / only_in_b to keys in the allowlist (json)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'comment_style: inline', ''].join('\n'),
+      'utf8',
+    );
+    // Without the filter the diff carries severity_threshold (changed),
+    // min_confidence (only_in_a), comment_style (only_in_b).
+    const unfiltered = await runDiff(dir, ['a', 'b'], { format: 'json' });
+    expect(unfiltered.exitCode).toBe(3);
+    const u = JSON.parse(unfiltered.stdout);
+    expect(u.changed.severity_threshold).toBeDefined();
+    expect(u.only_in_a.min_confidence).toBeDefined();
+    expect(u.only_in_b.comment_style).toBeDefined();
+    expect(u.onlyFields).toBeNull();
+
+    // Scope down to severity_threshold; the other two fields drop out.
+    const filtered = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'only-fields': 'severity_threshold',
+    });
+    expect(filtered.exitCode).toBe(3);
+    const f = JSON.parse(filtered.stdout);
+    expect(f.changed.severity_threshold).toBeDefined();
+    expect(f.only_in_a).toEqual({});
+    expect(f.only_in_b).toEqual({});
+    expect(f.hasChanges).toBe(true);
+    expect(f.onlyFields).toEqual(['severity_threshold']);
+  });
+
+  it('exits 0 when the filter excludes every difference (CI gate ignores out-of-scope drift)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'min_confidence: 0.7\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'min_confidence: 0.5\n',
+      'utf8',
+    );
+    // Filter to a key NEITHER preset uses -> the visible delta is
+    // empty -> exit 0 (operator declared those changes out of scope).
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.hasChanges).toBe(false);
+    expect(parsed.changed).toEqual({});
+    expect(parsed.onlyFields).toEqual(['severity_threshold']);
+  });
+
+  it('text renderer annotates the active filter on its own line', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'text',
+      'only-fields': 'severity_threshold,min_confidence',
+    });
+    expect(r.exitCode).toBe(3);
+    // The annotation surfaces ABOVE the diff body so a reviewer can
+    // tell the diff was scoped before reading the rows.
+    expect(r.stdout).toMatch(/only-fields: min_confidence, severity_threshold/);
+    expect(r.stdout).toContain('severity_threshold');
+    expect(r.stdout).toContain('changed');
+  });
+
+  it('text renderer surfaces a distinct "no differences in the filtered fields" hint', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: high\nmin_confidence: 0.5\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'text',
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(0);
+    // Distinct phrasing from the unfiltered "no differences" so an
+    // operator who scoped down doesn't misread the silence.
+    expect(r.stdout).toContain('(no differences in the filtered fields)');
+  });
+
+  it('yaml renderer adds an `# only-fields:` header comment when scoped', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'yaml',
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('# only-fields: severity_threshold');
+    expect(r.stdout).toContain('changed:');
+  });
+
+  it('exits 2 when --only-fields contains an empty intermediate entry', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'permissive'], {
+      'only-fields': 'severity_threshold,,min_confidence',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/--only-fields contains an empty entry/);
+  });
+
+  it('treats an empty / whitespace-only --only-fields value as "no filter"', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'only-fields': '   ',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // Whitespace-only -> null filter -> the diff is rendered in full.
+    expect(parsed.onlyFields).toBeNull();
+    expect(parsed.changed.severity_threshold).toBeDefined();
+  });
+
+  it('de-dupes repeated names in --only-fields (a,a,b -> a,b)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.5', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'only-fields': 'severity_threshold,severity_threshold,min_confidence',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // De-dup: only two distinct names land in the surfaced filter.
+    expect(parsed.onlyFields).toEqual(['min_confidence', 'severity_threshold']);
+  });
+});
+
+describe('filterPresetDelta + parsePresetOnlyFields (pure)', () => {
+  // Pure-helper unit tests so the contract for the filter sits in
+  // exactly one place. The CLI integration above exercises the
+  // surface; these pin the helper shape so a refactor that collapses
+  // the helper back into runPresetsDiff still has to satisfy the
+  // contract.
+
+  it('parsePresetOnlyFields: null on undefined / empty / whitespace', () => {
+    expect(parsePresetOnlyFields(undefined)).toBeNull();
+    expect(parsePresetOnlyFields(null)).toBeNull();
+    expect(parsePresetOnlyFields('')).toBeNull();
+    expect(parsePresetOnlyFields('   ')).toBeNull();
+  });
+
+  it('parsePresetOnlyFields: returns the EMPTY_ENTRY sentinel on a stray comma', () => {
+    expect(parsePresetOnlyFields('a,,b')).toBe(ONLY_FIELDS_EMPTY_ENTRY);
+    expect(parsePresetOnlyFields('a,')).toBe(ONLY_FIELDS_EMPTY_ENTRY);
+    expect(parsePresetOnlyFields(',a')).toBe(ONLY_FIELDS_EMPTY_ENTRY);
+    expect(parsePresetOnlyFields(' , ')).toBe(ONLY_FIELDS_EMPTY_ENTRY);
+  });
+
+  it('parsePresetOnlyFields: trims, de-dups, preserves intent on valid input', () => {
+    const out = parsePresetOnlyFields(' severity_threshold , min_confidence , severity_threshold ');
+    expect(out).toBeInstanceOf(Set);
+    const set = out as Set<string>;
+    expect(set.size).toBe(2);
+    expect(set.has('severity_threshold')).toBe(true);
+    expect(set.has('min_confidence')).toBe(true);
+  });
+
+  it('filterPresetDelta: returns the input unchanged when fields is null', () => {
+    const delta = {
+      changed: { x: { a: 1, b: 2 } },
+      only_in_a: { y: 3 },
+      only_in_b: { z: 4 },
+    };
+    const out = filterPresetDelta(delta, null);
+    expect(out).toBe(delta);
+  });
+
+  it('filterPresetDelta: drops keys NOT in the allowlist from all three buckets', () => {
+    const delta = {
+      changed: { keep: { a: 1, b: 2 }, drop: { a: 3, b: 4 } },
+      only_in_a: { keep: 'x', drop: 'y' },
+      only_in_b: { drop: 'z' },
+    };
+    const out = filterPresetDelta(delta, new Set(['keep']));
+    expect(out.changed).toEqual({ keep: { a: 1, b: 2 } });
+    expect(out.only_in_a).toEqual({ keep: 'x' });
+    expect(out.only_in_b).toEqual({});
+    // Original delta must be unchanged (no mutation).
+    expect(delta.changed).toHaveProperty('drop');
+  });
+
+  it('filterPresetDelta: empty allowlist yields an empty delta in all three buckets', () => {
+    const delta = {
+      changed: { a: { a: 1, b: 2 } },
+      only_in_a: { b: 3 },
+      only_in_b: { c: 4 },
+    };
+    const out = filterPresetDelta(delta, new Set());
+    expect(out.changed).toEqual({});
+    expect(out.only_in_a).toEqual({});
+    expect(out.only_in_b).toEqual({});
   });
 });

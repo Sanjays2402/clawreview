@@ -653,6 +653,27 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
 
+  // Optional --only-fields filter. Restricts the diff to a specific
+  // allowlist of top-level keys so an operator preparing a focused
+  // migration ticket can scope a wide preset rebase to "only this
+  // handful of fields". An empty intermediate entry rejects the chain
+  // (same shape contract as `parseChain` for the diff command itself).
+  const onlyFieldsRaw =
+    typeof args.flags['only-fields'] === 'string'
+      ? (args.flags['only-fields'] as string)
+      : undefined;
+  const onlyFields = parsePresetOnlyFields(onlyFieldsRaw);
+  if (onlyFields === ONLY_FIELDS_EMPTY_ENTRY) {
+    process.stderr.write(
+      `clawreview presets diff: --only-fields contains an empty entry ` +
+        `('${onlyFieldsRaw}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  // `onlyFields` is now either null (no filter) or a Set<string>. Both
+  // shapes pass into filterPresetDelta unchanged.
+
   // Parse both chains. Reuse the same rejection rule as `presets
   // resolve` so an empty intermediate entry never silently widens the
   // chain.
@@ -705,7 +726,7 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  const delta = computePresetDelta(bodyA, bodyB);
+  const delta = filterPresetDelta(computePresetDelta(bodyA, bodyB), onlyFields);
 
   if (format === 'json') {
     process.stdout.write(
@@ -713,6 +734,10 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
         {
           chainA,
           chainB,
+          // Surface the active filter so a downstream tool can verify
+          // the diff was scoped (or not). Sorted for deterministic
+          // JSON output.
+          onlyFields: onlyFields === null ? null : [...onlyFields].sort(),
           ...delta,
           hasChanges: hasDelta(delta),
         },
@@ -723,11 +748,17 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   } else if (format === 'yaml') {
     // Header captures the two chains as comments so a YAML consumer
     // still has the provenance even if it strips the JSON envelope.
-    const header = [
+    // When --only-fields was applied, also annotate it so a reviewer
+    // can tell at a glance that the YAML body is scoped.
+    const headerLines = [
       `# clawreview presets diff`,
       `# a: ${chainA.join(' -> ')}`,
       `# b: ${chainB.join(' -> ')}`,
-    ].join('\n');
+    ];
+    if (onlyFields !== null) {
+      headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
+    }
+    const header = headerLines.join('\n');
     const yamlBody = YAML.stringify(
       {
         changed: delta.changed,
@@ -742,10 +773,23 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     // so the operator doesn't think the command silently no-op'd.
     process.stdout.write(
       `${kleur.bold('chain a')}: ${chainA.join(' -> ')}\n` +
-        `${kleur.bold('chain b')}: ${chainB.join(' -> ')}\n\n`,
+        `${kleur.bold('chain b')}: ${chainB.join(' -> ')}\n`,
     );
+    if (onlyFields !== null) {
+      process.stdout.write(
+        `${kleur.bold('only-fields')}: ${[...onlyFields].sort().join(', ')}\n`,
+      );
+    }
+    process.stdout.write('\n');
     if (!hasDelta(delta)) {
-      process.stdout.write(kleur.gray('  (no differences)\n'));
+      // Distinguish "filter excluded everything" from "no real diff"
+      // so an operator who scoped down to an empty subset doesn't
+      // misread the silence as "the chains agree everywhere".
+      if (onlyFields !== null) {
+        process.stdout.write(kleur.gray('  (no differences in the filtered fields)\n'));
+      } else {
+        process.stdout.write(kleur.gray('  (no differences)\n'));
+      }
     } else {
       // changed: show both sides inline-ish; nested values use YAML.
       const changedKeys = Object.keys(delta.changed).sort();
@@ -772,6 +816,8 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
 
   // Exit code 3 on non-empty delta so CI can gate on "did anything
   // change?" without parsing the output. Exit 0 when bodies match.
+  // The filter is honored: a delta hidden by `--only-fields` exits 0
+  // because the operator declared those changes out of scope.
   process.exitCode = hasDelta(delta) ? 3 : 0;
 }
 
@@ -844,6 +890,76 @@ function hasDelta(d: PresetDelta): boolean {
     Object.keys(d.only_in_a).length > 0 ||
     Object.keys(d.only_in_b).length > 0
   );
+}
+
+/**
+ * Parse a comma-separated `--only-fields` argument into a Set of field
+ * names. Pure / extracted so the contract (trimming, de-dup, empty-name
+ * rejection) is unit-testable independently of the CLI.
+ *
+ *   - `--only-fields` unset / empty / whitespace-only -> `null` (no
+ *     filter; consumers MUST treat this as "render the whole delta").
+ *   - Otherwise -> Set of trimmed names. An empty intermediate entry
+ *     (`--only-fields a,,b`) returns the special sentinel
+ *     `'EMPTY_ENTRY'` so the caller can refuse the chain rather than
+ *     silently widening it. The literal sentinel is intentionally
+ *     unrepresentable in a real preset key so a typo cannot collide.
+ *
+ * The names are NOT validated against the ConfigPreset schema -- the
+ * filter is a pure rename of `key in allowSet` and the diff renderer
+ * surfaces missing keys naturally (an unknown field never appears in
+ * the delta, so the filter just yields an empty result).
+ */
+export const ONLY_FIELDS_EMPTY_ENTRY = Symbol.for('clawreview.preset.diff.only_fields.empty_entry');
+
+export function parsePresetOnlyFields(
+  raw: string | undefined | null,
+): Set<string> | typeof ONLY_FIELDS_EMPTY_ENTRY | null {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim();
+  if (trimmed.length === 0) return null;
+  const parts = trimmed.split(',').map((s) => s.trim());
+  if (parts.some((p) => p.length === 0)) return ONLY_FIELDS_EMPTY_ENTRY;
+  // Dedup while preserving caller order. Order isn't user-visible
+  // (Sets render alphabetically downstream), but tests pin the
+  // de-dup semantics so a `--only-fields a,a,b` works as a single
+  // intent rather than a count.
+  return new Set(parts);
+}
+
+/**
+ * Restrict a `PresetDelta` to keys in `fields`. Drops any entry under
+ * `changed` / `only_in_a` / `only_in_b` whose key is NOT in the
+ * allowlist. Returns a NEW delta object so the caller's input is
+ * never mutated.
+ *
+ * When `fields` is null (no filter set), returns the input unchanged.
+ *
+ * Use case: an operator preparing a wide config rebase wants to focus
+ * the diff to a specific set of fields (`severity_threshold,min_confidence`)
+ * so a long-running migration ticket has a focused changelog. Without
+ * this filter the diff would surface every unrelated field that happens
+ * to have changed across the chain.
+ *
+ * Pure / exported so the filter contract (sparse maps, no-op on empty
+ * filter, preserves shape) is unit-testable independently of the CLI.
+ */
+export function filterPresetDelta(
+  delta: PresetDelta,
+  fields: Set<string> | null,
+): PresetDelta {
+  if (fields === null) return delta;
+  const out: PresetDelta = { changed: {}, only_in_a: {}, only_in_b: {} };
+  for (const k of Object.keys(delta.changed)) {
+    if (fields.has(k)) out.changed[k] = delta.changed[k]!;
+  }
+  for (const k of Object.keys(delta.only_in_a)) {
+    if (fields.has(k)) out.only_in_a[k] = delta.only_in_a[k];
+  }
+  for (const k of Object.keys(delta.only_in_b)) {
+    if (fields.has(k)) out.only_in_b[k] = delta.only_in_b[k];
+  }
+  return out;
 }
 
 /**
