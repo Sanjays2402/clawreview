@@ -1,6 +1,6 @@
 # ClawReview Autoship State
 
-Branch: `feature/autoship` (off `origin/main`)
+**Active branch: `main`** — commit and push DIRECTLY to main every tick. No feature branches.
 Cron identity: `Cake (cron) <51058514+Sanjays2402@users.noreply.github.com>`
 First tick: 2026-06-20
 
