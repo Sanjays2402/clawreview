@@ -5,6 +5,7 @@ import { ProviderRegistry } from '@clawreview/llm';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import {
   aggregate,
+  applyMinConfidence,
   applySeverityRules,
   applySuppressions,
   buildSuppressionMap,
@@ -180,13 +181,15 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   });
 
   if (cfg.min_confidence > 0) {
-    // Count findings the floor dropped (independent of dedup/truncation
-    // counts so the number a user sees here is the one tied to the
-    // knob they tuned).
-    const dropped = sim.findings.filter((f) => f.confidence < cfg.min_confidence).length;
-    if (dropped > 0) {
+    // Reuse the standalone helper for the count so the displayed number
+    // matches what aggregate() actually filtered (and so we don't
+    // duplicate the comparison semantics in two places).
+    const floorCheck = applyMinConfidence(sim.findings, cfg.min_confidence);
+    if (floorCheck.dropped.length > 0) {
       process.stderr.write(
-        kleur.gray(`  dropped ${dropped} finding(s) below min_confidence=${cfg.min_confidence}\n`),
+        kleur.gray(
+          `  dropped ${floorCheck.dropped.length} finding(s) below min_confidence=${floorCheck.threshold}\n`,
+        ),
       );
     }
   }

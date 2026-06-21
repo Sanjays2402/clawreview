@@ -6,7 +6,18 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, calibrateConfidence, deriveCheckRun, renderPrComment, similarityMerge } from '@clawreview/aggregator';
+import {
+  aggregate,
+  applyMinConfidence,
+  applySeverityRules,
+  applySuppressions,
+  buildInlineComments,
+  buildSuppressionMap,
+  calibrateConfidence,
+  deriveCheckRun,
+  renderPrComment,
+  similarityMerge,
+} from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
 import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeSimilarityMerges } from '@clawreview/telemetry';
@@ -254,13 +265,17 @@ export async function startWorker(logger: Logger): Promise<void> {
       minConfidence: cfg.min_confidence,
     });
     if (cfg.min_confidence > 0) {
-      const droppedByFloor = sim.findings.filter((f) => f.confidence < cfg.min_confidence).length;
-      if (droppedByFloor > 0) {
+      // Use the standalone helper so the dropped count comes from the
+      // exact same filter `aggregate()` uses, AND we count drops only
+      // once (no re-walking sim.findings inline). The helper clamps the
+      // threshold; we treat any non-zero result as "floor is active".
+      const floorCheck = applyMinConfidence(sim.findings, cfg.min_confidence);
+      if (floorCheck.dropped.length > 0) {
         log.info(
-          { droppedByFloor, minConfidence: cfg.min_confidence },
+          { droppedByFloor: floorCheck.dropped.length, minConfidence: floorCheck.threshold },
           'min_confidence floor applied',
         );
-        observeFindingsDropped(metrics, 'min_confidence', droppedByFloor);
+        observeFindingsDropped(metrics, 'min_confidence', floorCheck.dropped.length);
       }
     }
 

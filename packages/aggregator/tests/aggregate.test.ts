@@ -1,7 +1,7 @@
 import type { Finding } from '@clawreview/types';
 import { describe, expect, it } from 'vitest';
 
-import { aggregate, dedupFindings, rankFindings } from '../src/aggregate.js';
+import { aggregate, applyMinConfidence, dedupFindings, rankFindings } from '../src/aggregate.js';
 
 function f(over: Partial<Finding>): Finding {
   return {
@@ -148,5 +148,85 @@ describe('aggregate', () => {
       expect(out.findings[0]!.severity).toBe('medium');
       expect(out.findings[0]!.confidence).toBe(0.8);
     });
+  });
+});
+
+describe('applyMinConfidence', () => {
+  it('partitions input into kept and dropped at the inclusive boundary', () => {
+    const findings = [
+      f({ title: 'a', confidence: 0.1 }),
+      f({ title: 'b', confidence: 0.5, startLine: 50 }),
+      f({ title: 'c', confidence: 0.9, startLine: 100 }),
+    ];
+    const r = applyMinConfidence(findings, 0.5);
+    expect(r.kept.map((x) => x.title).sort()).toEqual(['b', 'c']);
+    expect(r.dropped.map((x) => x.title)).toEqual(['a']);
+    expect(r.threshold).toBe(0.5);
+  });
+
+  it('returns the input unchanged when threshold is 0 (no floor)', () => {
+    const findings = [f({ confidence: 0.01 }), f({ confidence: 0.99, startLine: 50 })];
+    const r = applyMinConfidence(findings, 0);
+    expect(r.kept).toHaveLength(2);
+    expect(r.dropped).toHaveLength(0);
+    expect(r.threshold).toBe(0);
+  });
+
+  it('clamps a misconfigured threshold into [0, 1] and surfaces the effective value', () => {
+    const findings = [f({ confidence: 0.5 })];
+    // threshold > 1 clamps to 1; everything strictly below 1 drops.
+    const tooHigh = applyMinConfidence(findings, 2);
+    expect(tooHigh.kept).toHaveLength(0);
+    expect(tooHigh.dropped).toHaveLength(1);
+    expect(tooHigh.threshold).toBe(1);
+    // Negative threshold clamps to 0; nothing drops.
+    const tooLow = applyMinConfidence(findings, -3);
+    expect(tooLow.kept).toHaveLength(1);
+    expect(tooLow.dropped).toHaveLength(0);
+    expect(tooLow.threshold).toBe(0);
+    // NaN clamps to 0; nothing drops. Guards against `Number(undefined)`.
+    const nan = applyMinConfidence(findings, Number.NaN);
+    expect(nan.kept).toHaveLength(1);
+    expect(nan.threshold).toBe(0);
+  });
+
+  it('preserves input order in kept and dropped (no rank/sort side-effects)', () => {
+    const findings = [
+      f({ title: 'z', confidence: 0.9, startLine: 1 }),
+      f({ title: 'a', confidence: 0.1, startLine: 2 }),
+      f({ title: 'm', confidence: 0.6, startLine: 3 }),
+      f({ title: 'b', confidence: 0.1, startLine: 4 }),
+    ];
+    const r = applyMinConfidence(findings, 0.5);
+    expect(r.kept.map((x) => x.title)).toEqual(['z', 'm']);
+    expect(r.dropped.map((x) => x.title)).toEqual(['a', 'b']);
+  });
+
+  it('does not mutate the input array or its findings', () => {
+    const findings = [
+      f({ title: 'keep', confidence: 0.9 }),
+      f({ title: 'drop', confidence: 0.1, startLine: 50 }),
+    ];
+    const snapshot = JSON.parse(JSON.stringify(findings));
+    applyMinConfidence(findings, 0.5);
+    expect(findings).toEqual(snapshot);
+  });
+
+  it('matches the floor behaviour inside aggregate() for the same threshold', () => {
+    // Defensive correlation test: any divergence between
+    // applyMinConfidence and the floor inlined inside aggregate() will
+    // show up here, so the extraction stays honest. Distinct files
+    // sidestep aggregate()'s dedup so we compare ONLY the floor.
+    const findings = [
+      f({ file: 'src/a.ts', confidence: 0.05, startLine: 1, severity: 'critical' }),
+      f({ file: 'src/b.ts', confidence: 0.35, startLine: 1, severity: 'critical' }),
+      f({ file: 'src/c.ts', confidence: 0.55, startLine: 1, severity: 'critical' }),
+      f({ file: 'src/d.ts', confidence: 0.85, startLine: 1, severity: 'critical' }),
+    ];
+    const helper = applyMinConfidence(findings, 0.4);
+    const aggregated = aggregate(findings, { minConfidence: 0.4, maxPerFile: 99 });
+    const helperFiles = new Set(helper.kept.map((x) => x.file));
+    const aggFiles = new Set(aggregated.findings.map((x) => x.file));
+    expect(helperFiles).toEqual(aggFiles);
   });
 });

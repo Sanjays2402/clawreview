@@ -112,6 +112,65 @@ function clampConfidence(n: number | undefined): number {
   return n;
 }
 
+/**
+ * Result of a standalone `applyMinConfidence` pass.
+ *
+ * `kept` is the findings that survived the floor (in input order);
+ * `dropped` is everything that fell below it. Both arrays together
+ * always reconstruct the input — useful for callers that want to count
+ * drops separately (e.g. for telemetry) without re-running the filter.
+ *
+ * `threshold` is the effective floor used (after clamping into [0, 1]).
+ * Callers that want to surface the actual cutoff to the user (logs, PR
+ * comments) should read it from here, not from the raw config knob.
+ */
+export interface ApplyMinConfidenceResult {
+  kept: Finding[];
+  dropped: Finding[];
+  threshold: number;
+}
+
+/**
+ * Drop findings whose `confidence` falls strictly below `threshold`.
+ *
+ * Extracted from `aggregate()` so callers can run JUST the floor (and
+ * count the drops) without re-running dedup, sort, and per-file capping.
+ * Two real callers today:
+ *
+ *   - the worker emits `clawreview_findings_dropped_total{reason="min_confidence"}`
+ *     from the dropped count BEFORE calling `aggregate()`, so the
+ *     counter reflects findings the floor removed rather than findings
+ *     the cap removed.
+ *   - the CLI's stderr summary ("dropped N finding(s) below
+ *     min_confidence=...") wants the same count without rebuilding the
+ *     filter inline.
+ *
+ * Semantics match the inline path in `aggregate()`:
+ *   - `threshold` is clamped into [0, 1] (NaN / negative / >1 are
+ *     normalised), matching the runtime behaviour of `aggregate()`.
+ *   - The comparison is `f.confidence >= threshold` (inclusive at the
+ *     boundary), so `threshold: 0.5` keeps a finding with `confidence: 0.5`.
+ *   - With `threshold: 0` everything passes through (no floor).
+ *
+ * Pure: never mutates the input array or its findings.
+ */
+export function applyMinConfidence(
+  findings: Finding[],
+  threshold: number,
+): ApplyMinConfidenceResult {
+  const t = clampConfidence(threshold);
+  if (t === 0) {
+    return { kept: [...findings], dropped: [], threshold: 0 };
+  }
+  const kept: Finding[] = [];
+  const dropped: Finding[] = [];
+  for (const f of findings) {
+    if (f.confidence >= t) kept.push(f);
+    else dropped.push(f);
+  }
+  return { kept, dropped, threshold: t };
+}
+
 export function rankFindings(findings: Finding[]): Finding[] {
   return [...findings].sort((a, b) => {
     const sev = compareSeverity(a.severity, b.severity);
@@ -126,14 +185,14 @@ export function aggregate(findings: Finding[], opts: AggregateOptions = {}): Agg
   const threshold = opts.threshold ?? 'low';
   const maxPerFile = opts.maxPerFile ?? 8;
   const radius = opts.dedupRadius ?? 2;
-  // Clamp the floor into [0, 1] so a misconfigured `1.5` or `-2`
-  // doesn't either drop everything or surface a confusing negative.
-  const minConfidence = clampConfidence(opts.minConfidence);
+  // Floor low-confidence noise via the extracted helper so the floor
+  // semantics are defined in exactly one place. `applyMinConfidence`
+  // clamps the threshold into [0, 1] internally; we drop the result on
+  // the floor and continue with the kept set.
+  const floored = applyMinConfidence(findings, opts.minConfidence ?? 0);
 
-  const filtered = findings.filter(
-    (f) =>
-      SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold] &&
-      f.confidence >= minConfidence,
+  const filtered = floored.kept.filter(
+    (f) => SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold],
   );
   const deduped = dedupFindings(filtered, radius);
   const ranked = rankFindings(deduped);
