@@ -200,6 +200,8 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         hourBuckets?: unknown;
         hours?: unknown;
         topRepos?: unknown;
+        bucketWindow?: unknown;
+        bucketWindowAt?: unknown;
       };
       const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
       const repoFullName =
@@ -239,6 +241,28 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         topReposRaw === undefined
           ? undefined
           : Math.max(1, Math.min(200, Number(topReposRaw) || 50));
+      // `bucketWindow` (unix ms) / `bucketWindowAt` (ISO-8601) overrides
+      // the "from now, walking back" sparkline anchor with a specific
+      // end-time. Useful for reproducible postmortem snapshots:
+      // `?bucketWindow=1718987400000&granularity=minute&buckets=120`
+      // renders the two hours leading up to that incident even if the
+      // dashboard is opened days later. Both forms accept the same
+      // value range; the ISO form is friendlier from a browser, the
+      // numeric form is friendlier from code.
+      let bucketWindowMs: number | undefined;
+      const bucketWindowRaw = q.bucketWindow;
+      const bucketWindowAtRaw = q.bucketWindowAt;
+      if (typeof bucketWindowRaw === 'string' || typeof bucketWindowRaw === 'number') {
+        const n = Number(bucketWindowRaw);
+        // Reject negative / non-finite values; a stale snapshot at
+        // "epoch-but-mistyped-as-negative" would render an empty
+        // sparkline (no buckets within range of the data) and surprise
+        // the operator. Better to fall back to "now" silently.
+        if (Number.isFinite(n) && n >= 0) bucketWindowMs = n;
+      } else if (typeof bucketWindowAtRaw === 'string' && bucketWindowAtRaw.length > 0) {
+        const n = Date.parse(bucketWindowAtRaw);
+        if (Number.isFinite(n)) bucketWindowMs = n;
+      }
       const stats = getWebhookStore().stats({
         event,
         repoFullName,
@@ -246,6 +270,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         granularity,
         buckets,
         topRepos,
+        ...(bucketWindowMs !== undefined ? { nowMs: bucketWindowMs } : {}),
       });
       return {
         requestId: req.id,
@@ -257,6 +282,10 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
           granularity: granularity ?? 'hour',
           buckets: buckets ?? (granularity === 'minute' ? 60 : granularity === 'day' ? 14 : 24),
           topRepos: topRepos ?? 50,
+          // Echo the override so the operator can verify the snapshot
+          // was anchored to the requested time. `null` when the
+          // sparkline walked back from the live clock (default).
+          bucketWindow: bucketWindowMs ?? null,
         },
         ...stats,
       };

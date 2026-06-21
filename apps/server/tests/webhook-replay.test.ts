@@ -906,6 +906,169 @@ describe('/api/internal/webhook/stats', () => {
     });
   });
 
+  // Tick 12: ?bucketWindow=<unix-ms> / ?bucketWindowAt=<ISO-8601>
+  // overrides the sparkline anchor so a postmortem snapshot is
+  // reproducible. Default behaviour (no param) still walks back from
+  // the live clock.
+  describe('bucketWindow override (postmortem snapshots)', () => {
+    it('anchors the sparkline to ?bucketWindow=<unix-ms> and counts only deliveries inside that window', async () => {
+      _resetWebhookStoreForTests();
+      // Pin "incident time" to a fixed moment. Three deliveries:
+      // one 10min before the anchor, one 90min before, one 4h AFTER
+      // (which should NOT appear in the sparkline because the anchor
+      // walks BACKWARD from `bucketWindow`).
+      const incident = 1_718_987_400_000; // arbitrary fixed ms-since-epoch
+      const t0 = new Date(incident - 10 * 60_000).toISOString();
+      const t1 = new Date(incident - 90 * 60_000).toISOString();
+      const t2After = new Date(incident + 4 * 3_600_000).toISOString();
+      getWebhookStore().put({
+        deliveryId: 'bw-1',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: t0,
+        repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'bw-2',
+        event: 'pull_request',
+        action: 'synchronize',
+        payload: {},
+        receivedAt: t1,
+        repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'bw-3-after',
+        event: 'push',
+        payload: {},
+        receivedAt: t2After,
+        repoFullName: 'team/api',
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/internal/webhook/stats?bucketWindow=${incident}`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // `total` counts every stored entry (not gated by the window) so
+      // a dashboard's banner still shows the absolute store size; the
+      // sparkline is the part that's anchored.
+      expect(body.total).toBe(3);
+      // Sparkline anchor: bw-1 (10min before incident) -> bucket 0,
+      // bw-2 (90min before) -> bucket 1. bw-3-after is 4h AFTER the
+      // anchor and therefore has negative age vs `nowMs=incident`, so
+      // it lands in NO bucket (the store skips age < 0).
+      expect(body.hourly.nowMs).toBe(incident);
+      expect(body.hourly.buckets[0]).toBe(1);
+      expect(body.hourly.buckets[1]).toBe(1);
+      // appliedFilters echoes the override so the operator can confirm
+      // the snapshot was anchored.
+      expect(body.appliedFilters.bucketWindow).toBe(incident);
+    });
+
+    it('also accepts ?bucketWindowAt=<ISO-8601> for browser-friendly anchoring', async () => {
+      _resetWebhookStoreForTests();
+      const incident = 1_718_987_400_000;
+      const incidentIso = new Date(incident).toISOString();
+      getWebhookStore().put({
+        deliveryId: 'bw-iso-1',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date(incident - 5 * 60_000).toISOString(),
+        repoFullName: 'team/api',
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/internal/webhook/stats?bucketWindowAt=${encodeURIComponent(incidentIso)}`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // ISO form must produce the same nowMs anchor as the numeric form.
+      expect(body.hourly.nowMs).toBe(incident);
+      expect(body.appliedFilters.bucketWindow).toBe(incident);
+      // The lone delivery (5 min before incident) lands in bucket 0.
+      expect(body.hourly.buckets[0]).toBe(1);
+    });
+
+    it('echoes appliedFilters.bucketWindow=null when no anchor is supplied (default = live clock)', async () => {
+      _resetWebhookStoreForTests();
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Default path: anchor is `Date.now()`, surfaced as nowMs > 0.
+      expect(typeof body.hourly.nowMs).toBe('number');
+      expect(body.hourly.nowMs).toBeGreaterThan(0);
+      // The override echo distinguishes "anchored at now" (null) from
+      // "anchored at the requested ms" so a dashboard can show a
+      // "Live" vs "Snapshot of <time>" label without re-parsing the
+      // query string.
+      expect(body.appliedFilters.bucketWindow).toBeNull();
+    });
+
+    it('falls back to the live clock when ?bucketWindow= is malformed (NaN / negative)', async () => {
+      _resetWebhookStoreForTests();
+      getWebhookStore().put({
+        deliveryId: 'bw-fallback-1',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date(Date.now() - 60_000).toISOString(),
+        repoFullName: 'team/api',
+      });
+      // NaN value: "not-a-number" coerces to NaN, which fails the
+      // Number.isFinite guard.
+      const nan = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?bucketWindow=not-a-number',
+      });
+      expect(nan.statusCode).toBe(200);
+      // Negative value: rejected by the n >= 0 guard.
+      const neg = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?bucketWindow=-100',
+      });
+      expect(neg.statusCode).toBe(200);
+      // Both fall back to the live clock -> bucketWindow echoed as null.
+      expect(nan.json().appliedFilters.bucketWindow).toBeNull();
+      expect(neg.json().appliedFilters.bucketWindow).toBeNull();
+    });
+
+    it('composes with granularity=minute + buckets so a 2-hour incident window is renderable', async () => {
+      _resetWebhookStoreForTests();
+      // Real postmortem shape: render the 120 minutes leading up to an
+      // incident at minute granularity. Three deliveries: 5min, 65min,
+      // and 200min before the anchor. Only the first two fit the
+      // 120-minute window.
+      const incident = 1_719_000_000_000;
+      const inside1 = new Date(incident - 5 * 60_000).toISOString();
+      const inside2 = new Date(incident - 65 * 60_000).toISOString();
+      const outside = new Date(incident - 200 * 60_000).toISOString();
+      getWebhookStore().put({
+        deliveryId: 'bw-comp-1', event: 'push', payload: {}, receivedAt: inside1, repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'bw-comp-2', event: 'push', payload: {}, receivedAt: inside2, repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'bw-comp-3', event: 'push', payload: {}, receivedAt: outside, repoFullName: 'team/api',
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: `/api/internal/webhook/stats?bucketWindow=${incident}&granularity=minute&buckets=120`,
+      });
+      const body = res.json();
+      expect(body.hourly.bucketSizeMs).toBe(60_000);
+      expect(body.hourly.buckets).toHaveLength(120);
+      // 5min ago -> bucket 5, 65min ago -> bucket 65. The 200-min
+      // delivery falls outside the 120-bucket window and is skipped.
+      expect(body.hourly.buckets[5]).toBe(1);
+      expect(body.hourly.buckets[65]).toBe(1);
+      // Peak ties between the two single-count buckets; tie-break wins
+      // the newer (smaller index) bucket.
+      expect(body.hourly.peakBucketIndex).toBe(5);
+      expect(body.hourly.peakBucketCount).toBe(1);
+    });
+  });
+
   // Tick 10: ingress-side counter wired on the receiver's put() path
   // so Prometheus and the dashboard observe the same numbers. The
   // receiver bumps `clawreview_webhook_deliveries_total{event,repo}`
