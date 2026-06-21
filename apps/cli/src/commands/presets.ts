@@ -144,6 +144,202 @@ interface PresetEntry {
 }
 
 /**
+ * `clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]`
+ *
+ * Take an ad-hoc `extends:` chain (e.g. `strict,security-focused`) and
+ * print the merged body that `extends: [strict, security-focused]`
+ * would produce in `.clawreview.yml`, WITHOUT writing a file. The
+ * third sub-command on top of `list` and `show`:
+ *
+ *   - `list` -- "what presets exist?"
+ *   - `show` -- "what does THIS preset look like?"
+ *   - `resolve` -- "what does THIS CHAIN of presets look like?"
+ *
+ * Pairs naturally with `show`: an operator drafting a new config can
+ * preview the composed body in one step instead of editing a YAML
+ * file just to run `clawreview validate`.
+ *
+ * Chain parsing accepts both `--chain a,b,c` and a positional argument
+ * `clawreview presets resolve a,b,c`, with the positional form taking
+ * precedence so the common case ("just paste it on the command line")
+ * is the shortest. Names are comma-separated; surrounding whitespace
+ * is trimmed; empty entries are rejected up front so a stray trailing
+ * comma doesn't silently widen the chain.
+ *
+ * Resolution uses the same `loadLocalPresets` + built-in registry
+ * combo `show` does, with the same shadowing rules (local wins on
+ * name collision). Unknown names / cycles surface via
+ * `resolveExtendsChain` and exit 2 with the error message.
+ *
+ * Output:
+ *   - `--format yaml` (default): merged body as YAML, suitable for
+ *     pasting into `.clawreview.yml`. Header comments record the
+ *     chain so the source is auditable.
+ *   - `--format json`: { chain, sources, body, fields } for tooling.
+ *   - `--format text`: human-readable, color-tagged. Mirrors `show`.
+ *
+ * Exit codes:
+ *   - 0 on success
+ *   - 1 when the chain is empty (no positional, no --chain)
+ *   - 2 when --format is invalid OR when a name in the chain is
+ *     unknown / introduces a cycle. The error message includes the
+ *     full chain so a stale alias is easy to spot.
+ */
+export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
+  // Chain can come from a positional ("resolve strict,security-focused")
+  // or --chain. Positional wins because it's the shortest form on the
+  // shell command line, but --chain is documented so a script that
+  // already keys on flags doesn't need a special case.
+  const positionalChain = args.positional[1];
+  const flagChain = args.flags.chain ? String(args.flags.chain) : '';
+  const rawChain = positionalChain ?? flagChain;
+  if (!rawChain || rawChain.trim().length === 0) {
+    process.stderr.write(
+      'clawreview presets resolve: missing <chain> (e.g. `presets resolve strict,security-focused`)\n',
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  const root = String(args.flags.root ?? getCwd());
+  const formatRaw = String(args.flags.format ?? 'yaml').toLowerCase();
+  if (formatRaw !== 'yaml' && formatRaw !== 'json' && formatRaw !== 'text') {
+    process.stderr.write(
+      `clawreview presets resolve: --format must be yaml|json|text (got '${formatRaw}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const format = formatRaw as 'yaml' | 'json' | 'text';
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+
+  // Parse the chain. Comma-separated, trimmed. Empty entries are an
+  // error rather than silently widened or dropped: a stray trailing
+  // comma usually means the operator forgot a name, and resolving the
+  // shorter chain anyway would compose the WRONG config silently.
+  const chain = rawChain
+    .split(',')
+    .map((s) => s.trim());
+  if (chain.some((s) => s.length === 0)) {
+    process.stderr.write(
+      `clawreview presets resolve: chain contains an empty entry ('${rawChain}'); ` +
+        `comma-separated names only\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const localPresets = await loadLocalPresets(root);
+  const builtinNames = listPresets();
+
+  // Per-name source so the JSON output can attribute each chain entry
+  // to local / built-in / unknown. resolveExtendsChain itself only
+  // returns the merged body.
+  const sources: Array<{
+    name: string;
+    source: 'local' | 'builtin' | 'unknown';
+    shadowsBuiltin: boolean;
+  }> = chain.map((name) => {
+    const local = Object.prototype.hasOwnProperty.call(localPresets, name);
+    const builtin = builtinNames.includes(name);
+    return {
+      name,
+      source: local ? 'local' : builtin ? 'builtin' : 'unknown',
+      shadowsBuiltin: local && builtin,
+    };
+  });
+
+  let composed: ConfigPreset;
+  try {
+    composed = resolveExtendsChain(chain, (n) => {
+      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      return getPreset(n);
+    });
+  } catch (err) {
+    // Unknown name OR cycle. Surface the chain in the message so the
+    // bad alias is easy to spot when the operator pasted half a dozen
+    // names.
+    process.stderr.write(
+      `clawreview presets resolve: ${(err as Error).message} ` +
+        `(chain: ${chain.join(' -> ')})\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const fields = populatedKeys(composed);
+
+  if (format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          chain,
+          sources,
+          fields,
+          body: composed,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
+
+  if (format === 'yaml') {
+    // YAML is the copy-pasteable shape. Header comments record the
+    // chain so a config-file consumer can see what generated the body.
+    const header = [
+      `# clawreview preset chain: ${chain.join(' -> ')}`,
+      `# sources: ${sources
+        .map((s) => `${s.name}=${s.source}${s.shadowsBuiltin ? '(shadows)' : ''}`)
+        .join(', ')}`,
+    ].join('\n');
+    const body = YAML.stringify(composed, { lineWidth: 0 });
+    process.stdout.write(`${header}\n${body}`);
+    return;
+  }
+
+  // Text: human-readable. Mirrors `presets show` so an operator can
+  // skim the same shape regardless of which sub-command produced it.
+  process.stdout.write(
+    `${kleur.bold('chain')}: ${chain
+      .map((n, i) => {
+        const src = sources[i]!;
+        const tag =
+          src.source === 'local'
+            ? src.shadowsBuiltin
+              ? kleur.yellow('local*')
+              : kleur.cyan('local')
+            : src.source === 'builtin'
+              ? kleur.green('built-in')
+              : kleur.red('unknown');
+        return `${n} (${tag})`;
+      })
+      .join(' -> ')}\n`,
+  );
+  if (fields.length === 0) {
+    process.stdout.write(kleur.gray('  (resolved preset is empty)\n'));
+    return;
+  }
+  process.stdout.write('body:\n');
+  for (const key of fields) {
+    const v = (composed as Record<string, unknown>)[key];
+    if (v === undefined) continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      process.stdout.write(`  ${kleur.bold(key)}: ${String(v)}\n`);
+    } else {
+      const yaml = YAML.stringify(v, { lineWidth: 0 }).trimEnd();
+      const indented = yaml
+        .split('\n')
+        .map((l) => `    ${l}`)
+        .join('\n');
+      process.stdout.write(`  ${kleur.bold(key)}:\n${indented}\n`);
+    }
+  }
+}
+
+/**
  * `clawreview presets show <name> [--root <dir>] [--format text|yaml|json]`
  *
  * Print the fully-resolved (extends-flattened) preset body for a single

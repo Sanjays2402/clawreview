@@ -7,6 +7,7 @@ Usage:
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
+  clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -53,6 +54,8 @@ Examples:
   clawreview presets list --format json | jq '.presets[] | select(.source=="local")'
   clawreview presets show strict
   clawreview presets show web-strict --format yaml >> .clawreview.yml
+  clawreview presets resolve strict,security-focused
+  clawreview presets resolve strict,security-focused --format json | jq '.fields'
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
   clawreview run --format json | clawreview stats --by file --top-files 10

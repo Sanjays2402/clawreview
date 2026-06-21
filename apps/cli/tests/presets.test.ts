@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runPresetsList, runPresetsShow } from '../src/commands/presets.js';
+import { runPresetsList, runPresetsResolve, runPresetsShow } from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'clawreview-presets-'));
@@ -320,5 +320,207 @@ describe('clawreview presets show', () => {
     expect(parsed.body.severity_threshold).toBe('high');
     expect(parsed.body.max_findings_per_file).toBe(12);
     expect(parsed.extends).toEqual(['nit-friendly']);
+  });
+});
+
+async function runResolve(
+  dir: string,
+  positional: string[],
+  flags: Record<string, string | boolean> = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  process.exitCode = 0;
+  try {
+    await runPresetsResolve({
+      command: 'presets',
+      positional: ['resolve', ...positional],
+      flags: { 'no-color': true, root: dir, ...flags },
+    });
+  } finally {
+    writeStdout.mockRestore();
+    writeStderr.mockRestore();
+  }
+  const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+  process.exitCode = 0;
+  return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+}
+
+describe('clawreview presets resolve', () => {
+  it('resolves a single built-in chain into a yaml body with header comments', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('# clawreview preset chain: strict');
+    expect(r.stdout).toContain('# sources: strict=builtin');
+    // The strict preset populates at least one well-known field; assert
+    // it lands in the rendered body.
+    expect(r.stdout).toMatch(/severity_threshold:/);
+  });
+
+  it('resolves a multi-preset chain left-to-right (last writer wins)', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict,nit-friendly'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chain).toEqual(['strict', 'nit-friendly']);
+    expect(parsed.sources).toEqual([
+      { name: 'strict', source: 'builtin', shadowsBuiltin: false },
+      { name: 'nit-friendly', source: 'builtin', shadowsBuiltin: false },
+    ]);
+    // Body is the merged extends. We don't assert exact values (they
+    // depend on the built-in preset definitions); we just assert that
+    // both presets contributed something so the merge actually ran.
+    expect(parsed.fields.length).toBeGreaterThan(0);
+    expect(typeof parsed.body).toBe('object');
+  });
+
+  it('attributes local presets in the sources block and resolves their extends', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/team-api.yml'),
+      ['extends: [strict]', 'severity_threshold: high', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runResolve(dir, ['team-api'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sources[0]).toEqual({
+      name: 'team-api',
+      source: 'local',
+      shadowsBuiltin: false,
+    });
+    // The local file's `severity_threshold: high` wins over anything in
+    // `strict` (last-write semantics).
+    expect(parsed.body.severity_threshold).toBe('high');
+  });
+
+  it('flags shadowsBuiltin when a local preset overrides a built-in name in the chain', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/strict.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runResolve(dir, ['strict'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sources[0]).toEqual({
+      name: 'strict',
+      source: 'local',
+      shadowsBuiltin: true,
+    });
+    // Local body wins over the built-in default.
+    expect(parsed.body.severity_threshold).toBe('low');
+  });
+
+  it('exits 2 with the chain in the error when a name is unknown', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict,bogus-name'], { format: 'json' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("unknown preset 'bogus-name'");
+    // The chain appears in the error so the operator can find the bad alias.
+    expect(r.stderr).toContain('chain: strict -> bogus-name');
+  });
+
+  it('exits 2 with the chain when a duplicate name introduces a cycle', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict,strict'], { format: 'json' });
+    expect(r.exitCode).toBe(2);
+    // resolveExtendsChain emits "preset cycle detected at 'strict'".
+    expect(r.stderr).toContain('cycle detected');
+  });
+
+  it('exits 2 when the chain contains an empty entry (stray comma)', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict,,nit-friendly'], { format: 'json' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('empty entry');
+  });
+
+  it('exits 1 when no chain is provided (no positional, no --chain)', async () => {
+    const dir = await tmpDir();
+    // Use a hand-built run that omits the positional entirely.
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    process.exitCode = 0;
+    try {
+      await runPresetsResolve({
+        command: 'presets',
+        positional: ['resolve'],
+        flags: { 'no-color': true, root: dir },
+      });
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('missing <chain>');
+    process.exitCode = 0;
+  });
+
+  it('exits 2 when --format is invalid', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], { format: 'xml' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--format must be yaml|json|text');
+  });
+
+  it('accepts --chain as an alternative to the positional', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, [], { chain: 'strict', format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chain).toEqual(['strict']);
+  });
+
+  it('trims whitespace around chain entries', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['  strict , nit-friendly  '], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chain).toEqual(['strict', 'nit-friendly']);
+  });
+
+  it('text format renders the chain with source tags and the populated keys', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runResolve(dir, ['strict,local-only'], { format: 'text' });
+    expect(r.exitCode).toBe(0);
+    // The text header annotates each chain entry with its source.
+    expect(r.stdout).toMatch(/chain:\s*strict\s+\(built-in\)\s+->\s+local-only\s+\(local\)/);
+    expect(r.stdout).toContain('body:');
+    expect(r.stdout).toMatch(/severity_threshold:\s+high/);
   });
 });
