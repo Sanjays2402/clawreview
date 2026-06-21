@@ -59,14 +59,44 @@ export const ClawReviewConfigSchema = z.object({
         category: z.string().min(1).optional(),
         /** Optional agent filter. */
         agent: z.string().min(1).optional(),
+        /**
+         * Optional inclusive lower bound on the finding's `confidence`.
+         * Composes with the matchers above so an operator can write
+         * "drop low-confidence style nits": `{ category: 'style',
+         * max_confidence: 0.4, drop: true }`. Range [0, 1].
+         */
+        min_confidence: z.number().min(0).max(1).optional(),
+        /**
+         * Optional inclusive upper bound on the finding's `confidence`.
+         * Same composition as `min_confidence` -- a rule with both set
+         * only matches findings whose confidence falls in the band.
+         */
+        max_confidence: z.number().min(0).max(1).optional(),
         /** Either an absolute severity to set, or a +/- step relative to current. */
         set: SeveritySchema.optional(),
         bump: z.number().int().min(-4).max(4).optional(),
+        /**
+         * Drop the finding entirely instead of rewriting its severity.
+         * Useful for "anything below 0.3 confidence in vendor/** is
+         * noise" rules. The dropped finding is still recorded in the
+         * audit trail (`ApplyRulesResult.dropped`) so dashboards can
+         * show it as a separate bucket from `min_confidence` drops.
+         */
+        drop: z.boolean().optional(),
         /** Human-readable note appended to the finding's tags for audit. */
         reason: z.string().min(1).max(120).optional(),
-      }).refine((r) => r.set !== undefined || r.bump !== undefined, {
-        message: 'severity_rules entry must specify set or bump',
-      }),
+      })
+        .refine(
+          (r) => r.set !== undefined || r.bump !== undefined || r.drop === true,
+          { message: 'severity_rules entry must specify set, bump, or drop' },
+        )
+        .refine(
+          (r) =>
+            r.min_confidence === undefined ||
+            r.max_confidence === undefined ||
+            r.min_confidence <= r.max_confidence,
+          { message: 'severity_rules min_confidence must be <= max_confidence' },
+        ),
     )
     .default([]),
 });

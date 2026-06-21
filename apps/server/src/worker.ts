@@ -201,6 +201,15 @@ export async function startWorker(logger: Logger): Promise<void> {
         'severity_rules_applied',
       );
     }
+    if (ruled.dropped.length > 0) {
+      // Surface the drop count separately so dashboards can show
+      // "rule-dropped" findings as a distinct bucket from the
+      // min_confidence floor and inline suppressions.
+      log.info(
+        { rulesDropped: ruled.dropped.length },
+        'severity_rules_dropped',
+      );
+    }
 
     // Confidence calibration: floor low-confidence nits, promote
     // high-confidence security findings. Runs BEFORE aggregate so the

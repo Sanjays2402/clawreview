@@ -144,6 +144,11 @@ export async function runReview(args: ParsedArgs): Promise<void> {
       kleur.gray(`  applied ${ruled.applied.length} severity rule match(es)\n`),
     );
   }
+  if (ruled.dropped.length > 0) {
+    process.stderr.write(
+      kleur.gray(`  dropped ${ruled.dropped.length} finding(s) via severity_rules drop\n`),
+    );
+  }
 
   // Confidence calibration mirrors the worker's behaviour so local runs
   // produce identical severity calls. Floors low-confidence nits and
