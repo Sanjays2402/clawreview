@@ -191,10 +191,65 @@ export interface WebhookStats {
     buckets: number[];
     /** Right edge of the newest bucket (exclusive), in ms since epoch. */
     nowMs: number;
+    /**
+     * Index in `buckets` of the bucket carrying the highest count, or
+     * `null` when every bucket is empty. Ties resolve to the NEWEST
+     * (smaller index) bucket so a dashboard's "peaked at" label biases
+     * toward the most recent surge -- that's usually the one an
+     * on-call wants to investigate.
+     *
+     * Computed in `stats()` so a dashboard renderer doesn't have to
+     * walk the array client-side just to label the sparkline peak.
+     */
+    peakBucketIndex: number | null;
+    /**
+     * Count in the peak bucket. `0` when `peakBucketIndex` is `null`.
+     * Kept alongside the index so a dashboard tooltip can show
+     * "peaked at <time> with N deliveries" in one render.
+     */
+    peakBucketCount: number;
   };
 }
 
 const MAX_ENTRIES = 200;
+
+/**
+ * Find the index of the highest-count bucket in a sparkline array.
+ *
+ * Returned shape:
+ *   - `peakBucketIndex` is the index of the bucket with the highest
+ *     count, or `null` when every bucket is empty.
+ *   - `peakBucketCount` is the count in that bucket, or `0` when the
+ *     index is `null`.
+ *
+ * Tie-breaking: when two buckets share the maximum count, the SMALLER
+ * index wins. The buckets array is newest-first (index 0 == "now"), so
+ * the smaller index is the more recent bucket -- a dashboard's
+ * "peaked at" label biases toward the most recent surge, which is
+ * usually the one an on-call wants to investigate.
+ *
+ * Extracted from `stats()` so the contract (tie-breaking, empty-input
+ * handling) is unit-testable independently of the store wiring.
+ */
+function computePeakBucket(buckets: number[]): {
+  peakBucketIndex: number | null;
+  peakBucketCount: number;
+} {
+  if (buckets.length === 0) return { peakBucketIndex: null, peakBucketCount: 0 };
+  let peakIdx = -1;
+  let peakCount = 0;
+  for (let i = 0; i < buckets.length; i++) {
+    const v = buckets[i] ?? 0;
+    // Strict `>` so the first (smallest index, newest-bucket) maximum
+    // wins on ties.
+    if (v > peakCount) {
+      peakCount = v;
+      peakIdx = i;
+    }
+  }
+  if (peakIdx === -1) return { peakBucketIndex: null, peakBucketCount: 0 };
+  return { peakBucketIndex: peakIdx, peakBucketCount: peakCount };
+}
 
 export class InMemoryWebhookStore implements WebhookStore {
   private readonly entries = new Map<string, WebhookEntry>();
@@ -329,7 +384,13 @@ export class InMemoryWebhookStore implements WebhookStore {
       byEvent,
       byEventAction,
       byRepo,
-      hourly: { granularity, bucketSizeMs, buckets, nowMs },
+      hourly: {
+        granularity,
+        bucketSizeMs,
+        buckets,
+        nowMs,
+        ...computePeakBucket(buckets),
+      },
     };
   }
 

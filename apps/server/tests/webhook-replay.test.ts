@@ -802,4 +802,106 @@ describe('/api/internal/webhook/stats', () => {
       expect(body.byRepo).toEqual({});
     });
   });
+
+  describe('peak bucket', () => {
+    it('reports peakBucketIndex + peakBucketCount over the sparkline', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      // Three deliveries in bucket 0 (last 10 min), one in bucket 2 (~2.5h ago).
+      // Peak should be index 0 with count 3.
+      for (let i = 0; i < 3; i++) {
+        getWebhookStore().put({
+          deliveryId: `pk-recent-${i}`,
+          event: 'push',
+          payload: {},
+          receivedAt: new Date(now - 5 * 60_000).toISOString(),
+          repoFullName: 'team/api',
+        });
+      }
+      getWebhookStore().put({
+        deliveryId: 'pk-old',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date(now - 2 * 3600_000 - 30 * 60_000).toISOString(),
+        repoFullName: 'team/api',
+      });
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.hourly.peakBucketIndex).toBe(0);
+      expect(body.hourly.peakBucketCount).toBe(3);
+    });
+
+    it('returns peakBucketIndex=null + peakBucketCount=0 when every bucket is empty', async () => {
+      _resetWebhookStoreForTests();
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.total).toBe(0);
+      // No deliveries means no peak.
+      expect(body.hourly.peakBucketIndex).toBeNull();
+      expect(body.hourly.peakBucketCount).toBe(0);
+    });
+
+    it('breaks ties toward the newer (smaller-index) bucket', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      // Put 2 deliveries in bucket 0 AND 2 in bucket 5; tie-break must
+      // pick the newer (smaller index = 0).
+      for (let i = 0; i < 2; i++) {
+        getWebhookStore().put({
+          deliveryId: `tie-new-${i}`,
+          event: 'push',
+          payload: {},
+          receivedAt: new Date(now - 5 * 60_000).toISOString(),
+          repoFullName: 'team/api',
+        });
+      }
+      for (let i = 0; i < 2; i++) {
+        getWebhookStore().put({
+          deliveryId: `tie-old-${i}`,
+          event: 'push',
+          payload: {},
+          receivedAt: new Date(now - 5 * 3600_000 - 30 * 60_000).toISOString(),
+          repoFullName: 'team/api',
+        });
+      }
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      const body = res.json();
+      expect(body.hourly.peakBucketIndex).toBe(0);
+      expect(body.hourly.peakBucketCount).toBe(2);
+    });
+
+    it('peak respects the requested granularity (minute buckets render a tighter peak)', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      // Two recent deliveries (last minute), one 30 minutes ago.
+      // With granularity=minute (60 buckets, 1-min wide), the peak
+      // lands at index 0 with count 2.
+      for (let i = 0; i < 2; i++) {
+        getWebhookStore().put({
+          deliveryId: `gr-now-${i}`,
+          event: 'push',
+          payload: {},
+          receivedAt: new Date(now - 30_000).toISOString(),
+          repoFullName: 'team/api',
+        });
+      }
+      getWebhookStore().put({
+        deliveryId: 'gr-30m',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date(now - 30 * 60_000).toISOString(),
+        repoFullName: 'team/api',
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?granularity=minute',
+      });
+      const body = res.json();
+      expect(body.hourly.granularity).toBe('minute');
+      expect(body.hourly.peakBucketIndex).toBe(0);
+      expect(body.hourly.peakBucketCount).toBe(2);
+    });
+  });
 });
