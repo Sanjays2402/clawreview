@@ -276,5 +276,13 @@ function toReviewDetailDto(r: Awaited<ReturnType<ReturnType<typeof getReviewStor
       error: ex.error,
     })),
     findings: r.findings,
+    // Worker-persisted findingDigest. Surfaced verbatim so the dashboard
+    // detail page can render the same totalsBySeverity / byCategory /
+    // byAgent / topFiles / topAgents / topCategories the PR comment
+    // header showed, without re-walking `findings`. `null` (rather
+    // than omitted) when a legacy review has no persisted digest so a
+    // dashboard's "has counts?" check is just `digest !== null`
+    // instead of `digest !== undefined && digest !== null`.
+    digest: r.digest ?? null,
   };
 }

@@ -1,5 +1,5 @@
 import type { Finding, ReviewSummary, ReviewStatus, Severity } from '@clawreview/types';
-import { fingerprint } from '@clawreview/aggregator';
+import { fingerprint, type FindingDigest } from '@clawreview/aggregator';
 
 export interface ReviewRecord {
   id: string;
@@ -22,6 +22,25 @@ export interface ReviewRecord {
   findings: StoredFinding[];
   commentId?: number;
   checkRunId?: number;
+  /**
+   * Pre-computed `findingDigest()` summary of `findings`, captured by
+   * the worker at the same moment it built the PR-comment body. Three
+   * consumers read this:
+   *
+   *   - The PR-comment renderer ingested it via `renderPrComment({ digest })`.
+   *   - The dashboard `/api/reviews/:id` DTO surfaces it so the detail
+   *     page can render the same totalsBySeverity / byCategory /
+   *     byAgent / topFiles / topAgents / topCategories the comment
+   *     header showed, without re-walking the findings array.
+   *   - A future CLI / dashboard export can compare the persisted
+   *     digest to a fresh recompute and surface drift (e.g. after a
+   *     bulk dismiss) without a second findings walk.
+   *
+   * Optional because legacy completes (failed reviews, reviews from
+   * before tick 12) never had a digest. Consumers that need a digest
+   * but find none should recompute via `findingDigest(record.findings)`.
+   */
+  digest?: FindingDigest;
 }
 
 export interface StoredFinding extends Finding {
@@ -72,7 +91,7 @@ export interface ReviewStore {
     id: string,
     summary: ReviewSummary,
     findings: Finding[],
-    refs?: { commentId?: number; checkRunId?: number },
+    refs?: { commentId?: number; checkRunId?: number; digest?: FindingDigest },
   ): Promise<ReviewRecord>;
   fail(id: string, error: Error): Promise<void>;
   get(id: string): Promise<ReviewRecord | null>;
@@ -180,7 +199,7 @@ export class InMemoryReviewStore implements ReviewStore {
     id: string,
     summary: ReviewSummary,
     findings: Finding[],
-    refs?: { commentId?: number; checkRunId?: number },
+    refs?: { commentId?: number; checkRunId?: number; digest?: FindingDigest },
   ): Promise<ReviewRecord> {
     const rec = this.reviews.get(id);
     if (!rec) throw new Error(`unknown review ${id}`);
@@ -196,6 +215,14 @@ export class InMemoryReviewStore implements ReviewStore {
     }
     rec.commentId = refs?.commentId;
     rec.checkRunId = refs?.checkRunId;
+    // Persist the worker-computed digest verbatim when supplied so the
+    // dashboard reads the SAME numbers the PR comment header rendered.
+    // When absent (legacy callers, failed reviews) the field stays
+    // undefined and consumers that need a digest can recompute from
+    // `findings` on the fly.
+    if (refs?.digest !== undefined) {
+      rec.digest = refs.digest;
+    }
 
     const prKey = `${rec.owner}/${rec.repo}#${rec.prNumber}`;
     const priorDismissed = this.dismissedByPr.get(prKey) ?? new Map<string, string>();

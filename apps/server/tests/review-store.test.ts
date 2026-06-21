@@ -92,6 +92,53 @@ describe('InMemoryReviewStore', () => {
     expect(done.durationMs).toBeGreaterThanOrEqual(0);
   });
 
+  // Tick 12: `complete()` accepts an optional `digest` ref and persists
+  // it verbatim. The worker computes the digest ONCE per review and
+  // hands the same reference to BOTH the PR-comment renderer and the
+  // store so dashboard + comment header read byte-identical numbers.
+  describe('digest persistence (tick 12)', () => {
+    it('stores a caller-supplied digest verbatim on the record', async () => {
+      const r = await store.start({
+        installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+      });
+      const findings = [
+        f({ agent: 'security', category: 'security', severity: 'high', file: 'src/x.ts' }),
+        f({ agent: 'style', category: 'style', severity: 'nit', file: 'src/y.ts' }),
+      ];
+      // Build the digest from the same findings list the worker would
+      // pass to complete(). This mirrors the worker call site.
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8 });
+      const done = await store.complete(r.id, summary({ totalFindings: 2 }), findings, { digest });
+      // Persisted digest is the SAME shape the worker built.
+      expect(done.digest).toBeDefined();
+      expect(done.digest!.total).toBe(2);
+      expect(done.digest!.totalsBySeverity.high).toBe(1);
+      expect(done.digest!.totalsBySeverity.nit).toBe(1);
+      // byCategory / byAgent surface verbatim from the digest.
+      expect(done.digest!.byCategory).toMatchObject({ security: 1, style: 1 });
+      expect(done.digest!.byAgent).toMatchObject({ security: 1, style: 1 });
+      // topFiles list is already sorted (desc count, asc file on ties);
+      // the persisted slice mirrors that.
+      expect(done.digest!.topFiles.map((x) => x.file)).toEqual(['src/x.ts', 'src/y.ts']);
+    });
+
+    it('leaves `digest` undefined when the caller does not supply one (back-compat)', async () => {
+      // Legacy callers (failed reviews, pre-tick-12 reruns) pass refs
+      // without a digest. The record must NOT crash and must NOT
+      // synthesise a digest from `findings` -- consumers that need
+      // one recompute on demand.
+      const r = await store.start({
+        installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+      });
+      const done = await store.complete(r.id, summary({ totalFindings: 1 }), [f()], { commentId: 1 });
+      expect(done.digest).toBeUndefined();
+      // commentId still wired through; presence of the new field
+      // doesn't perturb existing refs.
+      expect(done.commentId).toBe(1);
+    });
+  });
+
   it('dismiss and reopen a finding', async () => {
     const r = await store.start({ installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b' });
     await store.complete(r.id, summary(), [f()]);

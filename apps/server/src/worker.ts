@@ -15,6 +15,7 @@ import {
   buildSuppressionMap,
   calibrateConfidence,
   deriveCheckRun,
+  findingDigest,
   recomputeAggregateTotals,
   renderPrComment,
   similarityMerge,
@@ -303,6 +304,20 @@ export async function startWorker(logger: Logger): Promise<void> {
     // here without a manual worker edit.
     recomputeAggregateTotals(aggregated);
 
+    // Build the digest ONCE per review and hand the same reference to
+    // BOTH the PR-comment renderer AND the review-store persistence so
+    // dashboard + comment header + future drift detection all read
+    // byte-identical numbers. The top-N caps mirror the CLI's `stats`
+    // defaults (and the existing renderer call below) so an operator
+    // running `clawreview stats` against the same findings array sees
+    // the same ordering / truncation. Computed AFTER suppression so
+    // `total` matches the visible findings count -- the digest counts
+    // what was POSTED, not what was generated.
+    const reviewDigest = findingDigest(aggregated.findings, {
+      topCategories: 8,
+      topAgents: 8,
+    });
+
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {
       prNumber: data.prNumber,
       headSha: data.headSha,
@@ -310,10 +325,12 @@ export async function startWorker(logger: Logger): Promise<void> {
       // Top-N caps mirror the CLI's `stats` defaults so an operator
       // running `clawreview stats --by category` against the same
       // findings array sees byte-identical ordering / truncation.
-      // The renderer derives these via the shared `findingDigest()`
-      // helper -- same numbers the dashboard and CLI use.
+      // The renderer consumes the pre-built digest so it never walks
+      // the findings array a second time -- same numbers the
+      // dashboard and CLI use.
       topCategories: 8,
       topAgents: 8,
+      digest: reviewDigest,
     })}`;
 
     const commentResult = await gh.upsertReviewComment(
@@ -375,6 +392,10 @@ export async function startWorker(logger: Logger): Promise<void> {
     const completedRec = await store.complete(data.reviewId, summary, aggregated.findings, {
       commentId: (commentResult as { id?: number } | undefined)?.id,
       checkRunId: (checkRun as { id?: number } | undefined)?.id,
+      // Persist the worker-built digest verbatim so the dashboard
+      // /api/reviews/:id DTO surfaces byte-identical numbers without
+      // re-walking the findings array.
+      digest: reviewDigest,
     });
     getRepoHealth().recordSuccess(data.owner, data.repo);
 

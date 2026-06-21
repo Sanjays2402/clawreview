@@ -179,6 +179,85 @@ describe('reviews and stats routes', () => {
     expect(res.statusCode).toBe(404);
   });
 
+  // Tick 12: /api/reviews/:id surfaces the worker-persisted findingDigest
+  // so the dashboard detail page renders byte-identical totalsBySeverity
+  // / byCategory / byAgent / topFiles / topAgents / topCategories
+  // without re-walking findings.
+  describe('digest in /api/reviews/:id DTO (tick 12)', () => {
+    it('surfaces the persisted digest on the detail DTO', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 12, owner: 'o', repo: 'r', prNumber: 12, headSha: 'h12', baseSha: 'b12',
+      });
+      const findings = [
+        { agent: 'security', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        { agent: 'security', category: 'security' as const, severity: 'medium' as const, title: 'B', rationale: 'r', file: 'a.ts', startLine: 2, confidence: 0.8, tags: [] },
+        { agent: 'style', category: 'style' as const, severity: 'nit' as const, title: 'C', rationale: 'r', file: 'b.ts', startLine: 3, confidence: 0.5, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8 });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 12, headSha: 'h12', baseSha: 'b12' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 3,
+          totalCostUsd: 0,
+        },
+        findings,
+        { digest, commentId: 5 },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Persisted digest mirrors the worker's pre-built shape.
+      expect(body.digest).not.toBeNull();
+      expect(body.digest.total).toBe(3);
+      expect(body.digest.totalsBySeverity).toMatchObject({ high: 1, medium: 1, nit: 1 });
+      expect(body.digest.byAgent).toMatchObject({ security: 2, style: 1 });
+      expect(body.digest.byCategory).toMatchObject({ security: 2, style: 1 });
+      // topFiles is sorted desc by count: a.ts (2) > b.ts (1).
+      expect(body.digest.topFiles).toEqual([
+        { file: 'a.ts', count: 2 },
+        { file: 'b.ts', count: 1 },
+      ]);
+      // topAgents / topCategories surface the worker's caps verbatim.
+      expect(body.digest.topAgents).toEqual([
+        { agent: 'security', count: 2 },
+        { agent: 'style', count: 1 },
+      ]);
+    });
+
+    it('returns digest=null on the detail DTO for a legacy review that never carried one', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 13, owner: 'o', repo: 'r', prNumber: 13, headSha: 'h13', baseSha: 'b13',
+      });
+      // complete() without a digest ref -- exactly the pre-tick-12 shape.
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 13, headSha: 'h13', baseSha: 'b13' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 0,
+          totalCostUsd: 0,
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      // null (not undefined / absent) so a dashboard's "has counts?"
+      // check is a single `digest !== null` comparison.
+      expect(res.json().digest).toBeNull();
+    });
+  });
+
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
     const store = getReviewStore();
     const r = await store.start({ installationId: 3, owner: 'o', repo: 'r', prNumber: 9, headSha: 'h9', baseSha: 'b9' });
