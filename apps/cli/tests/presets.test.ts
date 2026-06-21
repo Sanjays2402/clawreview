@@ -1645,3 +1645,208 @@ describe('clawreview presets diff --output - (tick 13 stdout sentinel)', () => {
     expect(stdoutRun.stdout).toBe(fileBody);
   });
 });
+
+// Tick 13: --base <a> --target <b> is the named-flag form, an
+// alternative to positional + --a/--b. Use case: shell aliases like
+// `alias prdiff='clawreview presets diff --base $BASE --target $TARGET'`
+// where the wrapper doesn't have to special-case positional ordering.
+// Three forms now coexist; positional wins back-compat.
+describe('clawreview presets diff --base / --target (tick 13 named flags)', () => {
+  it('accepts --base + --target as the chain pair (no positional args)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, [], {
+      format: 'json',
+      base: 'a',
+      target: 'b',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['a']);
+    expect(parsed.chainB).toEqual(['b']);
+    expect(parsed.changed.severity_threshold).toBeDefined();
+  });
+
+  it('accepts a comma-separated chain via --base / --target (matches positional / --a/--b semantics)', async () => {
+    // The named-flag form must use the same chain parser so a
+    // multi-name chain (`strict,security-focused`) flattens
+    // identically. Without this the named form would silently
+    // diverge from the positional form on chains.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web-strict.yml'),
+      'extends: [strict]\nseverity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, [], {
+      format: 'json',
+      base: 'strict,security-focused',
+      target: 'web-strict',
+    });
+    expect(r.exitCode === 0 || r.exitCode === 3).toBe(true);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['strict', 'security-focused']);
+    expect(parsed.chainB).toEqual(['web-strict']);
+  });
+
+  it('positional wins when both positional and --base are supplied (back-compat)', async () => {
+    // A regression guard: an existing CI command that pasted both
+    // for safety must keep getting the positional form's behaviour,
+    // not silently switch to the named-flag form.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/posA.yml'),
+      'severity_threshold: critical\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/posB.yml'),
+      'severity_threshold: nit\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/named.yml'),
+      'severity_threshold: medium\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['posA', 'posB'], {
+      format: 'json',
+      base: 'named',
+      target: 'named',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // Positional won; the named flags were ignored.
+    expect(parsed.chainA).toEqual(['posA']);
+    expect(parsed.chainB).toEqual(['posB']);
+  });
+
+  it('short flags --a / --b win over --base / --target when both forms are passed (priority: positional > short > named)', async () => {
+    // The form priority must be deterministic: positional > short > named.
+    // A wrapper that pinned --a/--b and a caller overrode the alias
+    // with --base/--target must still see the wrapper's --a/--b win.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/shortA.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/shortB.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/named.yml'),
+      'severity_threshold: medium\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, [], {
+      format: 'json',
+      a: 'shortA',
+      b: 'shortB',
+      base: 'named',
+      target: 'named',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['shortA']);
+    expect(parsed.chainB).toEqual(['shortB']);
+  });
+
+  it('mixes positional <a> with --target <b> (a common shell-alias shape)', async () => {
+    // A pragmatic use case: the operator types the base preset
+    // positionally and overrides the target via --target. Both
+    // slots resolve independently so this is allowed and natural.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/posA.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/namedB.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['posA'], {
+      format: 'json',
+      target: 'namedB',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['posA']);
+    expect(parsed.chainB).toEqual(['namedB']);
+  });
+
+  it('rejects when --base is supplied but --target is missing (exit 1, named-form usage hint)', async () => {
+    // The error message must surface the named-flag usage so an
+    // operator who tried `--base` but forgot `--target` sees the
+    // right shape, not just the positional form's hint.
+    const dir = await tmpDir();
+    const r = await runDiff(dir, [], {
+      base: 'strict',
+      // target intentionally absent
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toMatch(/missing <a> or <b> chain/);
+    expect(r.stderr).toMatch(/--base <a> --target <b>/);
+  });
+
+  it('rejects when --target is supplied but --base is missing (mirror of base-only)', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, [], {
+      target: 'strict',
+      // base intentionally absent
+    });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toMatch(/missing <a> or <b> chain/);
+  });
+
+  it('composes cleanly with --format json --output - and --only-fields (the alias-friendly shape)', async () => {
+    // End-to-end sanity: the named flags must work in the same
+    // command line as every other tick-12/13 flag. This is the
+    // canonical alias shape an operator would ship in their dotfiles.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.5', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, [], {
+      format: 'json',
+      base: 'a',
+      target: 'b',
+      output: '-',
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['a']);
+    expect(parsed.chainB).toEqual(['b']);
+    expect(parsed.changed.severity_threshold).toBeDefined();
+    expect(parsed.changed.min_confidence).toBeUndefined();
+    expect(parsed.onlyFields).toEqual(['severity_threshold']);
+    expect(r.stderr).toBe('');
+  });
+});

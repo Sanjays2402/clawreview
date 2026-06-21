@@ -622,19 +622,39 @@ function populatedKeys(preset: ConfigPreset): string[] {
  * deeper diff can feed the JSON output through jq or a diff tool.
  */
 export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
-  // Two positional chains expected: `presets diff <a> <b>`. We also
-  // accept `--a <chain> --b <chain>` so a script that already keys on
-  // flags doesn't have to reorder its argv.
+  // Three accepted forms for the two chains:
+  //
+  //   - Positional:       `presets diff <a> <b>`         (the original)
+  //   - Short flags:      `--a <chain> --b <chain>`      (script-friendly)
+  //   - Named flags:      `--base <chain> --target <chain>` (tick 13;
+  //                       pairs cleanly with shell aliases like
+  //                       `alias prdiff='clawreview presets diff
+  //                       --base $BASE --target $TARGET'` so a
+  //                       reusable wrapper doesn't need to special-case
+  //                       positional ordering).
+  //
+  // The forms are checked positional -> short -> named so the original
+  // form keeps winning when the operator passed both (back-compat
+  // pinned by a regression test). Mixing forms across the two slots
+  // (e.g. positional `<a>` + `--target <b>`) is allowed and natural --
+  // a positional first arg with `--target` overriding the second slot
+  // is a common shell-alias shape.
   const positionalA = args.positional[1];
   const positionalB = args.positional[2];
   const flagA = args.flags.a ? String(args.flags.a) : '';
   const flagB = args.flags.b ? String(args.flags.b) : '';
-  const rawA = positionalA ?? flagA;
-  const rawB = positionalB ?? flagB;
+  const flagBase = args.flags.base ? String(args.flags.base) : '';
+  const flagTarget = args.flags.target ? String(args.flags.target) : '';
+  // Pick the first present form per slot. `??` cannot help here
+  // because the missing-flag fallback is `''` (truthy for `??`); we
+  // explicitly check `.length > 0` so `--base` actually wins when
+  // no positional / short flag was supplied.
+  const rawA = positionalA ?? (flagA.length > 0 ? flagA : flagBase);
+  const rawB = positionalB ?? (flagB.length > 0 ? flagB : flagTarget);
   if (!rawA || rawA.trim().length === 0 || !rawB || rawB.trim().length === 0) {
     process.stderr.write(
       'clawreview presets diff: missing <a> or <b> chain ' +
-        '(usage: `presets diff <a> <b>`)\n',
+        '(usage: `presets diff <a> <b>` or `presets diff --base <a> --target <b>`)\n',
     );
     process.exitCode = 1;
     return;
@@ -1109,6 +1129,26 @@ export function filterPresetDeltaExcluding(
 }
 
 /**
+ * Internal sentinel value returned from `resolvePresetDiffOutputPath`
+ * (and accepted by `writePresetDiffOutput`) when the caller passed
+ * `--output -`. Lives as a Symbol so it can never collide with a real
+ * filesystem path (a file literally named `-` is still resolvable by
+ * Node, so a string sentinel would be ambiguous).
+ *
+ * Declared BEFORE `resolvePresetDiffOutputPath` so the resolver can
+ * narrow its return type to `PresetDiffOutputTarget` without a
+ * forward-reference TDZ trap.
+ *
+ * Exported on the same module so a downstream consumer (today only
+ * the `runPresetsDiff` body) can compare against the same instance
+ * the resolver returns, avoiding the magic-string anti-pattern.
+ */
+export const STDOUT_SENTINEL: unique symbol = Symbol.for(
+  'clawreview.preset.diff.output.stdout',
+);
+export type PresetDiffOutputTarget = string | typeof STDOUT_SENTINEL;
+
+/**
  * Resolve a caller-supplied --output path against `--root` (or cwd
  * when --root is absent) when the path is relative. Absolute paths
  * are kept as-is. Pure / exported so the path-resolution contract
@@ -1123,31 +1163,18 @@ export function filterPresetDeltaExcluding(
  * match the project root in a CI checkout.
  *
  * The literal `-` is reserved as the stdout sentinel (tick 13) and
- * is handled BEFORE this resolver runs, so callers should never see
- * the sentinel pass through here -- but we guard defensively so a
- * misuse cannot create a file literally named `-` next to the
- * project root.
+ * is mapped to `STDOUT_SENTINEL` here so a downstream consumer can
+ * compare via Symbol identity (`=== STDOUT_SENTINEL`) without the
+ * ambiguity of a magic string (a file literally named `-` is still
+ * resolvable by Node).
  */
-export function resolvePresetDiffOutputPath(outputPath: string, root: string): string {
+export function resolvePresetDiffOutputPath(
+  outputPath: string,
+  root: string,
+): PresetDiffOutputTarget {
   if (outputPath === '-') return STDOUT_SENTINEL;
   return isAbsolute(outputPath) ? outputPath : resolve(root, outputPath);
 }
-
-/**
- * Internal sentinel value returned from `resolvePresetDiffOutputPath`
- * (and accepted by `writePresetDiffOutput`) when the caller passed
- * `--output -`. Lives as a Symbol so it can never collide with a real
- * filesystem path (a file literally named `-` is still resolvable by
- * Node, so a string sentinel would be ambiguous).
- *
- * Exported on the same module so a downstream consumer (today only
- * the `runPresetsDiff` body) can compare against the same instance
- * the resolver returns, avoiding the magic-string anti-pattern.
- */
-export const STDOUT_SENTINEL: unique symbol = Symbol.for(
-  'clawreview.preset.diff.output.stdout',
-);
-export type PresetDiffOutputTarget = string | typeof STDOUT_SENTINEL;
 
 /**
  * Write the rendered diff body to `outputPath` and surface a single
