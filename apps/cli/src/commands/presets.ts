@@ -769,11 +769,24 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   // --root is absent) so a caller running `--root project/ --output
   // diff.json` ends up with `project/diff.json` instead of a file in
   // the caller's cwd. Absolute paths bypass the resolve entirely.
+  //
+  // The literal `-` is a stdout sentinel (tick 13): a CI pipeline
+  // that wants the file-write contract -- one body, no kleur
+  // headers, no `wrote N bytes` stderr noise -- but doesn't want to
+  // allocate a temp file can pass `--output -` to write the body to
+  // stdout in "pure mode" (no banner, no preamble). The sentinel
+  // composes with json + yaml exactly like a real path; it cannot
+  // be combined with --format text for the same reason a real file
+  // can't (text is the terminal-display form, not an artifact).
   const outputRaw = args.flags.output;
+  const outputIsStdoutSentinel =
+    typeof outputRaw === 'string' && outputRaw === '-';
   const outputPath =
-    typeof outputRaw === 'string' && outputRaw.length > 0
-      ? resolvePresetDiffOutputPath(outputRaw, root)
-      : null;
+    outputIsStdoutSentinel
+      ? STDOUT_SENTINEL
+      : typeof outputRaw === 'string' && outputRaw.length > 0
+        ? resolvePresetDiffOutputPath(outputRaw, root)
+        : null;
   if (outputPath !== null && format === 'text') {
     process.stderr.write(
       `clawreview presets diff: --output requires --format json or --format yaml ` +
@@ -1108,10 +1121,33 @@ export function filterPresetDeltaExcluding(
  * that same project root. Without this resolution, the relative
  * path would resolve against the operator's cwd which may not
  * match the project root in a CI checkout.
+ *
+ * The literal `-` is reserved as the stdout sentinel (tick 13) and
+ * is handled BEFORE this resolver runs, so callers should never see
+ * the sentinel pass through here -- but we guard defensively so a
+ * misuse cannot create a file literally named `-` next to the
+ * project root.
  */
 export function resolvePresetDiffOutputPath(outputPath: string, root: string): string {
+  if (outputPath === '-') return STDOUT_SENTINEL;
   return isAbsolute(outputPath) ? outputPath : resolve(root, outputPath);
 }
+
+/**
+ * Internal sentinel value returned from `resolvePresetDiffOutputPath`
+ * (and accepted by `writePresetDiffOutput`) when the caller passed
+ * `--output -`. Lives as a Symbol so it can never collide with a real
+ * filesystem path (a file literally named `-` is still resolvable by
+ * Node, so a string sentinel would be ambiguous).
+ *
+ * Exported on the same module so a downstream consumer (today only
+ * the `runPresetsDiff` body) can compare against the same instance
+ * the resolver returns, avoiding the magic-string anti-pattern.
+ */
+export const STDOUT_SENTINEL: unique symbol = Symbol.for(
+  'clawreview.preset.diff.output.stdout',
+);
+export type PresetDiffOutputTarget = string | typeof STDOUT_SENTINEL;
 
 /**
  * Write the rendered diff body to `outputPath` and surface a single
@@ -1122,13 +1158,35 @@ export function resolvePresetDiffOutputPath(outputPath: string, root: string): s
  * `--output reports/2026-06-21/diff.json` works without a separate
  * `mkdir -p`.
  *
+ * When the caller passes the `STDOUT_SENTINEL` (from `--output -`)
+ * the body is written straight to stdout in "pure mode": no banner,
+ * no header preamble, no `wrote N bytes` stderr noise. This is the
+ * file-write contract WITHOUT the file allocation -- useful for a
+ * CI pipeline that wants the artifact-shaped body (no kleur color
+ * tags, one trailing newline) but doesn't want to manage a temp
+ * file. The text format is still rejected up-stream so `--output -`
+ * + `--format text` exits 2 the same way `--output diff.txt`
+ * `--format text` does.
+ *
  * Failures (EACCES, ENOSPC, ...) bubble as exit-2 with the underlying
  * error message so a CI gate using `clawreview presets diff
  * --output ...` sees a useful diagnostic. We don't catch and swallow
  * because the operator explicitly asked for an artifact -- silently
  * dropping it would be worse than the loud failure.
  */
-async function writePresetDiffOutput(outputPath: string, body: string): Promise<void> {
+async function writePresetDiffOutput(
+  outputPath: PresetDiffOutputTarget,
+  body: string,
+): Promise<void> {
+  if (outputPath === STDOUT_SENTINEL) {
+    // Pure-mode stdout write: no preamble, no stderr banner. The
+    // body already carries a trailing newline (json: from
+    // JSON.stringify+`\n`, yaml: from YAML.stringify) so we don't
+    // add one. A downstream `jq` / file redirect gets exactly the
+    // bytes a `--output diff.json` would have left on disk.
+    process.stdout.write(body);
+    return;
+  }
   const { mkdir } = await import('node:fs/promises');
   const targetDir = dirname(outputPath);
   // mkdir -p; harmless when the directory already exists.

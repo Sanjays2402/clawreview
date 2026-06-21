@@ -8,7 +8,7 @@ Usage:
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]
-  clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>]
+  clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -62,6 +62,7 @@ Examples:
   clawreview presets diff strict permissive
   clawreview presets diff strict,security-focused web --format json | jq '.changed'
   clawreview presets diff strict permissive --only-fields severity_threshold,min_confidence
+  clawreview presets diff strict permissive --format json --output - | jq '.changed'
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
   clawreview run --format json | clawreview stats --by agent --top-agents 3

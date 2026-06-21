@@ -11,6 +11,7 @@ import {
   ONLY_FIELDS_EMPTY_ENTRY,
   parsePresetOnlyFields,
   resolvePresetDiffOutputPath,
+  STDOUT_SENTINEL,
 } from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
@@ -1432,5 +1433,215 @@ describe('resolvePresetDiffOutputPath (pure)', () => {
     expect(resolvePresetDiffOutputPath('reports/d.json', '/project')).toBe(
       '/project/reports/d.json',
     );
+  });
+
+  // Tick 13: `-` is the stdout sentinel. The resolver returns the
+  // STDOUT_SENTINEL Symbol so a downstream consumer can identify the
+  // pure-mode write target without comparing to a magic string (a
+  // file literally named `-` would otherwise be ambiguous).
+  it('returns STDOUT_SENTINEL for the literal `-` regardless of root', () => {
+    // Sentinel must NOT be re-anchored under root. The whole point of
+    // the sentinel is "skip the filesystem entirely".
+    expect(resolvePresetDiffOutputPath('-', '/project')).toBe(STDOUT_SENTINEL);
+    expect(resolvePresetDiffOutputPath('-', '/')).toBe(STDOUT_SENTINEL);
+    expect(resolvePresetDiffOutputPath('-', '')).toBe(STDOUT_SENTINEL);
+  });
+
+  it('keeps STDOUT_SENTINEL as a Symbol distinct from any string path', () => {
+    // The sentinel is a Symbol so it can never collide with a real
+    // filesystem path. If a future refactor accidentally returned the
+    // string `'-'` instead, this test fires.
+    expect(typeof STDOUT_SENTINEL).toBe('symbol');
+    expect(STDOUT_SENTINEL).not.toBe('-');
+    // Same Symbol.for() key on every resolver call so a strict
+    // equality check works for downstream consumers.
+    expect(resolvePresetDiffOutputPath('-', '/p')).toBe(
+      resolvePresetDiffOutputPath('-', '/other'),
+    );
+  });
+});
+
+// Tick 13: `--output -` writes the JSON / YAML body to stdout in
+// pure mode (no kleur headers, no `wrote N bytes` stderr banner).
+// For a CI pipeline that wants the artifact-shaped body without
+// allocating a temp file. Composes with the existing --output
+// plumbing: same format restrictions, same --only-fields scope.
+describe('clawreview presets diff --output - (tick 13 stdout sentinel)', () => {
+  it('writes the JSON body to stdout in pure mode (no stderr banner)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+    });
+    // Exit code: still 3 because the diff is non-empty; the sentinel
+    // doesn't change the CI gate semantics.
+    expect(r.exitCode).toBe(3);
+    // stdout carries the JSON body; the text-mode `chain a: ...`
+    // header is NOT in the output (pure mode means just the body).
+    // The body is valid JSON that parses cleanly.
+    expect(r.stdout).not.toMatch(/^chain a:/m);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chainA).toEqual(['a']);
+    expect(parsed.chainB).toEqual(['b']);
+    expect(parsed.changed.severity_threshold).toBeDefined();
+    expect(parsed.hasChanges).toBe(true);
+    // The `wrote N bytes to ...` banner that fires for real files
+    // must NOT fire for the sentinel -- the operator piped the
+    // output into something else and doesn't want stderr noise.
+    expect(r.stderr).toBe('');
+  });
+
+  it('writes the YAML body to stdout in pure mode (header comments only, no banner)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'yaml',
+      output: '-',
+    });
+    expect(r.exitCode).toBe(3);
+    // YAML body retains the # header comments (those are part of
+    // the artifact shape, not the kleur preamble) + the changed:
+    // section. Same body the file-write path would have left on disk.
+    expect(r.stdout).toContain('# clawreview presets diff');
+    expect(r.stdout).toContain('# a: a');
+    expect(r.stdout).toContain('# b: b');
+    expect(r.stdout).toContain('changed:');
+    expect(r.stdout).toContain('severity_threshold:');
+    // No stderr banner for the sentinel path.
+    expect(r.stderr).toBe('');
+  });
+
+  it('exits 2 when --output - is combined with --format text (same as a real path)', async () => {
+    // The sentinel must observe the same format restrictions as a
+    // real path -- text isn't artifact-shaped, period.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'text',
+      output: '-',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/--output requires --format json or --format yaml/);
+  });
+
+  it('exits 0 on an empty diff but still writes the empty-delta JSON body', async () => {
+    // Same semantics as the file-write path: a no-change run still
+    // emits the body so a downstream pipeline can pin on it.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.hasChanges).toBe(false);
+    expect(parsed.changed).toEqual({});
+    expect(r.stderr).toBe('');
+  });
+
+  it('honors --only-fields when writing to stdout via the sentinel (scoped artifact, pure mode)', async () => {
+    // Sentinel composes with --only-fields exactly like a real
+    // path. The scope filter applies BEFORE the body is rendered,
+    // so the bytes a pipeline sees are identical to the file-write
+    // path's bytes.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.5', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.changed.severity_threshold).toBeDefined();
+    expect(parsed.changed.min_confidence).toBeUndefined();
+    expect(parsed.onlyFields).toEqual(['severity_threshold']);
+    expect(r.stderr).toBe('');
+  });
+
+  it('produces byte-identical body to a real file (sentinel is just the same write path minus the filesystem)', async () => {
+    // The contract is "same bytes a `--output diff.json` would
+    // have left on disk", so a side-by-side comparison pins it.
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // First: write to a real file via --output <path>
+    const fileTarget = join(dir, 'diff.json');
+    const fileRun = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: fileTarget,
+    });
+    expect(fileRun.exitCode).toBe(3);
+    const { readFile } = await import('node:fs/promises');
+    const fileBody = await readFile(fileTarget, 'utf8');
+    // Second: write to stdout via --output -
+    const stdoutRun = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+    });
+    expect(stdoutRun.exitCode).toBe(3);
+    // The two must be byte-identical -- that's the entire contract.
+    expect(stdoutRun.stdout).toBe(fileBody);
   });
 });
