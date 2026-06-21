@@ -118,12 +118,35 @@ First tick: 2026-06-20
 - ~~Server `/api/internal/webhook/stats`~~ — DONE tick 6 (0531fb7). Counts by event, event/action, and an hourly sparkline.
 
 ### Backlog seeded for tick 7 (refill — five of six tick-6 items shipped, plus follow-ups)
-- **`clawreview lint-config --fix` for trivial typos** — carried over from tick 6 (deferred this tick to keep the batch lean). When a Zod issue maps cleanly to a known fix (e.g. `severity_threshold: warning` -> `medium`), offer a rewritten file. Off by default; require explicit flag.
+- ~~`clawreview lint-config --fix` for trivial typos~~ — DONE tick 7 (a1f48c3). Ships with curated typo rewrites for `severity_threshold`, `comment_style`, `inline_comments.min_severity`; AST-level rewrite preserves comments + key order.
 - **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — pair the tick-6 counter helper with a blame fetcher that uses the GitHub API (since the worker has no local checkout). Drives the Top Contributors PR block AND the Prometheus counter from the server side.
-- **Dashboard widget for `/api/internal/webhook/stats`** — the endpoint shipped this tick. Wire it into apps/dashboard so on-calls see the by-event / hourly sparkline without curl.
+- **Dashboard widget for `/api/internal/webhook/stats`** — the endpoint shipped this tick. Wire it into apps/dashboard so on-calls see the by-event / hourly sparkline without curl. Tick 7's granularity work is now landing here too.
 - **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — same store, list view rather than aggregate. Tick 6 made the cursor first-class; dashboard wiring is still TODO.
-- **`severity_rules` matchers on `min_confidence`** — let an operator say "below 0.5 -> drop; below 0.7 AND category=style -> floor to nit". Composes the new floor with the existing severity-rules engine.
-- **CLI `clawreview presets list`** — print every preset (built-in + local in the cwd), including the resolved transitive chain when extends is present. Discoverability for the new transitive-extends feature.
+- ~~`severity_rules` matchers on `min_confidence`~~ — DONE tick 7 (345f712), shipped as `min_confidence` + `max_confidence` matchers plus a new `drop: true` action so the policy ladder composes cleanly with the global floor.
+- ~~CLI `clawreview presets list`~~ — DONE tick 7 (a10b6cb). Prints built-in + local with declared extends chain; locals shadow built-ins and are annotated.
+
+### Tick 7 — 2026-06-20 19:44 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | `severity_rules` confidence band matchers + `drop: true` action (types + aggregator + worker + CLI wiring) | 345f712 | +258/-28 | 12 new (types +5, aggregator +7) |
+| 2 | `clawreview presets list` CLI (built-in + local with declared extends chain) | a10b6cb | +371/-1 | 6 new (cli/presets.test.ts) |
+| 3 | `clawreview lint-config --fix` (AST-level rewrite of curated scalar typos, preserves comments + key order) | a1f48c3 | +256/-16 | 6 new (cli/lint-config.test.ts) |
+| 4 | Telemetry `clawreview_findings_dropped_total{reason}` (closed reason set) + worker wiring across all three drop sources | 3b80acf | +105/-1 | 5 new (telemetry/metrics.test.ts) |
+| 5 | Webhook stats `granularity` (minute/hour/day) + per-granularity bucket caps + `buckets` query knob | 4112f6c | +175/-27 | 5 new (server/webhook-replay.test.ts) |
+
+Gate results: types 27/27 (+5 new), telemetry 29/29 (+5 new), aggregator 172/172 (+7 new), cli 93/93 (+12 new = 6 presets + 6 lint-config --fix), agents 72/72, server 205/205 (+5 new), diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 656 tests verified passing (+22 over tick 6)**. Touched-package typecheck delta: `@clawreview/types` clean (config.ts refinements add zero errors); `@clawreview/telemetry` clean (metrics.ts additions add zero errors); `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (severity-rules.ts changes are clean); `apps/cli` clean across presets.ts, lint-config.ts, cli.ts, help.ts; `apps/server` red only on the pre-existing api-auth.ts / rate-limit.ts / webhooks.ts / server.ts / worker.ts (pino) baseline -- zero new errors on webhook-store.ts, webhook-replay.ts, or worker.ts beyond it. Push verified: `git ls-remote origin feature/autoship` -> `4112f6c`.
+
+**Tick-7 refill: 3 of 6 backlog items shipped this tick (lint-config --fix, presets list, severity_rules min_confidence/drop). The three dashboard / blame-fetcher items remain open because they need work outside the unit-test-driven cron loop (live GitHub API integration / Next.js page wiring). Refilled with 5 fresh items for tick 8 below.**
+
+### Backlog seeded for tick 8 (refill — three follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API. Drives the Top Contributors PR block AND the Prometheus counter from the server side.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried from tick 7. Wire it into apps/dashboard so on-calls see the by-event / sparkline (now multi-granularity after tick 7) without curl.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried from tick 7. Same store, list view rather than aggregate.
+- **Aggregator `applyMinConfidence(findings, threshold)` extracted helper** — the tick-6 floor logic is inlined inside `aggregate()`; pull it into a standalone helper so the CLI can run it in `clawreview stats` without re-running aggregation, AND so the worker can count drops *before* the `aggregate()` call without re-computing the filter.
+- **`clawreview stats --by category|agent|severity` grouping** — today `clawreview stats` only buckets by severity. Let the operator slice the findings by any of the three primary axes for ad-hoc reporting.
+- **`/api/internal/webhook/recent` + `/stats` rate-limit class** — both endpoints currently land under the default per-token bucket. Add a small dedicated class for "operator dashboard polling" so a chatty dashboard doesn't eat the operator's budget for real work.
+- **CLI `clawreview presets show <name>`** — second sub-command on top of tick 7's `presets list`. Print the fully-resolved (extends-flattened) preset body for a single name, so an operator can preview exactly what a config would inherit before adopting it.
 
 ## TICK LOG
 
