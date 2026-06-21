@@ -4,7 +4,7 @@ import { join } from 'node:path';
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { runPresetsList } from '../src/commands/presets.js';
+import { runPresetsList, runPresetsShow } from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), 'clawreview-presets-'));
@@ -150,5 +150,175 @@ describe('clawreview presets list', () => {
     const names = parsed.presets.map((p: { name: string }) => p.name);
     const sorted = [...names].sort();
     expect(names).toEqual(sorted);
+  });
+});
+
+async function runShow(
+  dir: string,
+  positional: string[],
+  flags: Record<string, string | boolean> = {},
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+    ((chunk: unknown) => {
+      stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+      return true;
+    }) as never,
+  );
+  process.exitCode = 0;
+  try {
+    await runPresetsShow({
+      command: 'presets',
+      positional: ['show', ...positional],
+      flags: { 'no-color': true, root: dir, ...flags },
+    });
+  } finally {
+    writeStdout.mockRestore();
+    writeStderr.mockRestore();
+  }
+  const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+  process.exitCode = 0;
+  return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+}
+
+describe('clawreview presets show', () => {
+  it('prints a built-in preset body as YAML by default with a header comment', async () => {
+    const dir = await tmpDir();
+    const r = await runShow(dir, ['strict']);
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('# clawreview preset: strict');
+    expect(r.stdout).toContain('# source: builtin');
+    // Body should contain at least one populated field from the strict preset.
+    expect(r.stdout).toMatch(/severity_threshold:/);
+  });
+
+  it('prints a local preset with its resolved extends chain in JSON', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web-strict.yml'),
+      ['extends: [strict, security-focused]', 'severity_threshold: high', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runShow(dir, ['web-strict'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.name).toBe('web-strict');
+    expect(parsed.source).toBe('local');
+    expect(parsed.extends).toEqual(['strict', 'security-focused']);
+    expect(parsed.shadowsBuiltin).toBe(false);
+    // The body must be the merged extends chain + the file's own field.
+    // The local file's `severity_threshold: high` should win over any
+    // built-in default in the chain (last-write wins via mergePresets).
+    expect(parsed.body.severity_threshold).toBe('high');
+    expect(parsed.fields).toContain('severity_threshold');
+  });
+
+  it('flags shadowsBuiltin when a local preset overrides a built-in name', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/strict.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runShow(dir, ['strict'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.source).toBe('local');
+    expect(parsed.shadowsBuiltin).toBe(true);
+    // Local body should win over the built-in's default.
+    expect(parsed.body.severity_threshold).toBe('low');
+  });
+
+  it('exits 1 with a helpful list when the preset name is unknown', async () => {
+    const dir = await tmpDir();
+    const r = await runShow(dir, ['bogus'], { format: 'json' });
+    expect(r.exitCode).toBe(1);
+    expect(r.stderr).toContain("unknown preset 'bogus'");
+    // The list of available names should include built-ins.
+    expect(r.stderr).toContain('strict');
+  });
+
+  it('exits 2 when --format is invalid', async () => {
+    const dir = await tmpDir();
+    const r = await runShow(dir, ['strict'], { format: 'xml' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--format must be yaml|json|text');
+  });
+
+  it('exits 2 when <name> is omitted', async () => {
+    const dir = await tmpDir();
+    // Force a positional length of zero by passing only ['show'] sentinel,
+    // which runShow will turn into ['show'] (no further arg).
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    process.exitCode = 0;
+    try {
+      await runPresetsShow({
+        command: 'presets',
+        positional: ['show'],
+        flags: { 'no-color': true, root: dir },
+      });
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('missing <name>');
+  });
+
+  it('renders text format with key: value lines for scalar fields', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/scalar-only.yml'),
+      ['severity_threshold: high', 'max_findings_per_file: 5', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runShow(dir, ['scalar-only'], { format: 'text' });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/scalar-only\s+local/);
+    expect(r.stdout).toMatch(/severity_threshold:\s+high/);
+    expect(r.stdout).toMatch(/max_findings_per_file:\s+5/);
+  });
+
+  it('json output includes fields list and body together for tooling consumption', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/composed.yml'),
+      ['extends: nit-friendly', 'severity_threshold: high', 'max_findings_per_file: 12', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runShow(dir, ['composed'], { format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.fields).toContain('severity_threshold');
+    expect(parsed.fields).toContain('max_findings_per_file');
+    expect(parsed.body.severity_threshold).toBe('high');
+    expect(parsed.body.max_findings_per_file).toBe(12);
+    expect(parsed.extends).toEqual(['nit-friendly']);
   });
 });

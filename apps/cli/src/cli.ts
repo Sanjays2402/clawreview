@@ -6,7 +6,7 @@ import { runDiffStats } from './commands/diff-stats.js';
 import { runExplain } from './commands/explain.js';
 import { runAuthors } from './commands/authors.js';
 import { runLintConfig } from './commands/lint-config.js';
-import { runPresetsList } from './commands/presets.js';
+import { runPresetsList, runPresetsShow } from './commands/presets.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -29,17 +29,24 @@ export async function runCli(argv: string[]): Promise<void> {
       await runLintConfig(args);
       return;
     case 'presets':
-      // Single sub-command for now: `presets list`. Future could add
-      // `presets show <name>` or `presets resolve <name>` -- the
-      // dispatch shape is ready.
-      if ((args.positional[0] ?? 'list') === 'list') {
-        await runPresetsList(args);
+      // Sub-commands: `presets list` (default) and `presets show <name>`.
+      // Both share the local-presets resolver and the built-in registry
+      // so what `show` renders is what `list` previewed.
+      {
+        const sub = args.positional[0] ?? 'list';
+        if (sub === 'list') {
+          await runPresetsList(args);
+          return;
+        }
+        if (sub === 'show') {
+          await runPresetsShow(args);
+          return;
+        }
+        console.error(`Unknown presets sub-command: ${sub}\n`);
+        console.log(renderHelp());
+        process.exitCode = 1;
         return;
       }
-      console.error(`Unknown presets sub-command: ${args.positional[0]}\n`);
-      console.log(renderHelp());
-      process.exitCode = 1;
-      return;
     case 'stats':
       await runStats(args);
       return;

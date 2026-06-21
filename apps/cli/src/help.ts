@@ -6,6 +6,7 @@ Usage:
   clawreview validate [--config <path>]
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
+  clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -49,6 +50,8 @@ Examples:
   clawreview lint-config --fix --format json | jq '.fixed'
   clawreview presets list
   clawreview presets list --format json | jq '.presets[] | select(.source=="local")'
+  clawreview presets show strict
+  clawreview presets show web-strict --format yaml >> .clawreview.yml
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
   clawreview run --format json | clawreview stats --format json --by category | jq '.byCategory'

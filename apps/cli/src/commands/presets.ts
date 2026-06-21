@@ -4,7 +4,13 @@ import { cwd as getCwd } from 'node:process';
 
 import kleur from 'kleur';
 import YAML from 'yaml';
-import { listPresets, getPreset, type ConfigPreset } from '@clawreview/types';
+import {
+  getPreset,
+  listPresets,
+  mergePresets,
+  resolveExtendsChain,
+  type ConfigPreset,
+} from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
 import { loadLocalPresets } from '../config.js';
@@ -135,6 +141,175 @@ interface PresetEntry {
   fields: string[];
   /** Only set on locals: true if a built-in with the same name exists. */
   shadowsBuiltin?: boolean;
+}
+
+/**
+ * `clawreview presets show <name> [--root <dir>] [--format text|yaml|json]`
+ *
+ * Print the fully-resolved (extends-flattened) preset body for a single
+ * name, so an operator can preview exactly what fields a config would
+ * inherit before adopting it. Built on top of the same resolver
+ * `loadConfig` uses, so what `show` prints is what `extends: [name]`
+ * would actually produce in `.clawreview.yml`.
+ *
+ * Discovery:
+ *   - Local presets under `<root>/.clawreview/presets/*.yml` (default
+ *     root: cwd). Local shadows built-in on name collision -- the
+ *     resolution emits a stderr note so the override is auditable.
+ *   - Built-in presets shipped with `@clawreview/types`.
+ *   - For locals, `extends:` is recursively resolved (transitive chains
+ *     are flattened) before printing so the operator sees the final
+ *     composed body, not the literal file body.
+ *
+ * Output:
+ *   - `--format yaml` (default): the merged body as YAML, suitable for
+ *     pasting into `.clawreview.yml`.
+ *   - `--format json`: { name, source, extends, body, fields } for
+ *     tooling consumption.
+ *   - `--format text`: human-readable, key: value, color-tagged. Best
+ *     for skimming in a terminal.
+ *
+ * Exit codes:
+ *   - 0 on success
+ *   - 1 when `<name>` does not exist in either namespace. The error
+ *     message includes the available names so the operator can correct
+ *     a typo without re-running `presets list`.
+ *   - 2 when `--format` is invalid.
+ */
+export async function runPresetsShow(args: ParsedArgs): Promise<void> {
+  const name = args.positional[1];
+  if (!name) {
+    process.stderr.write('clawreview presets show: missing <name> argument\n');
+    process.exitCode = 2;
+    return;
+  }
+  const root = String(args.flags.root ?? getCwd());
+  const formatRaw = String(args.flags.format ?? 'yaml').toLowerCase();
+  if (formatRaw !== 'yaml' && formatRaw !== 'json' && formatRaw !== 'text') {
+    process.stderr.write(
+      `clawreview presets show: --format must be yaml|json|text (got '${formatRaw}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const format = formatRaw as 'yaml' | 'json' | 'text';
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+
+  const localPresets = await loadLocalPresets(root);
+  const localExtendsByName = await loadLocalPresetDeclaredExtends(root);
+  const builtinNames = listPresets();
+
+  // Resolution: local shadows built-in on the same name (matches how
+  // loadConfig resolves them). We still surface BOTH the source and
+  // (when shadowing) a note so the operator can tell which one they're
+  // reading.
+  const localHit = Object.prototype.hasOwnProperty.call(localPresets, name)
+    ? localPresets[name]
+    : undefined;
+  const builtinHit = builtinNames.includes(name) ? getPreset(name) : undefined;
+  const resolved = localHit ?? builtinHit;
+  if (!resolved) {
+    const allNames = Array.from(new Set([...builtinNames, ...Object.keys(localPresets)])).sort();
+    process.stderr.write(
+      `clawreview presets show: unknown preset '${name}'.` +
+        ` Available: ${allNames.length > 0 ? allNames.join(', ') : '(none)'}.\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  const source: 'builtin' | 'local' = localHit ? 'local' : 'builtin';
+  const shadowsBuiltin = source === 'local' && builtinNames.includes(name);
+  const ext = source === 'local' ? (localExtendsByName[name] ?? []) : [];
+
+  // The body is already extends-flattened for locals (loadLocalPresets
+  // does the recursion); for built-ins it has no extends to resolve.
+  // We still re-run resolveExtendsChain on the declared chain so the
+  // JSON / yaml shape can show what the OPERATOR would actually get
+  // if they wrote `extends: <name>` at the top level. That feeds the
+  // same `mergePresets` semantics loadConfig uses, with cycle / unknown
+  // errors surfacing here too.
+  let composed: ConfigPreset;
+  try {
+    const baseFromExtends = resolveExtendsChain(ext, (n) => {
+      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      return getPreset(n);
+    });
+    composed = mergePresets(baseFromExtends, resolved);
+  } catch (err) {
+    // A bad extends chain in a local preset surfaces here rather than
+    // crashing later; mirror lint-config's exit-2 behaviour for parse
+    // / resolution errors.
+    process.stderr.write(`clawreview presets show: ${(err as Error).message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+
+  const fields = populatedKeys(composed);
+
+  if (format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify(
+        { name, source, extends: ext, shadowsBuiltin, fields, body: composed },
+        null,
+        2,
+      )}\n`,
+    );
+    return;
+  }
+
+  if (format === 'yaml') {
+    // YAML output is the most copy-pasteable: a user can drop it into
+    // .clawreview.yml verbatim and get the same configuration. The
+    // leading `# clawreview preset <name>` header keeps the source
+    // attribution alongside the body without breaking the YAML.
+    const header = [
+      `# clawreview preset: ${name}`,
+      `# source: ${source}${shadowsBuiltin ? ' (shadows built-in)' : ''}`,
+      ext.length > 0 ? `# extends: ${ext.join(' -> ')}` : null,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const body = YAML.stringify(composed, { lineWidth: 0 });
+    process.stdout.write(`${header}\n${body}`);
+    return;
+  }
+
+  // Text: human-readable, color-tagged. Mirrors the per-preset block
+  // from `presets list` but renders the resolved body inline.
+  const tag =
+    source === 'local'
+      ? shadowsBuiltin
+        ? kleur.yellow('local (shadows built-in)')
+        : kleur.cyan('local')
+      : kleur.green('built-in');
+  process.stdout.write(`${kleur.bold(name)}  ${tag}\n`);
+  if (ext.length > 0) {
+    process.stdout.write(`  extends: ${ext.join(' -> ')}\n`);
+  }
+  if (fields.length === 0) {
+    process.stdout.write(kleur.gray('  (preset is empty)\n'));
+    return;
+  }
+  process.stdout.write('  body:\n');
+  // Render each top-level field on its own line for fast scanning.
+  // Nested objects/arrays use YAML so the structure stays readable
+  // without a full pretty-printer.
+  for (const key of fields) {
+    const v = (composed as Record<string, unknown>)[key];
+    if (v === undefined) continue;
+    if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      process.stdout.write(`    ${kleur.bold(key)}: ${String(v)}\n`);
+    } else {
+      // Indent multi-line YAML output four spaces so it nests under `body:`.
+      const yaml = YAML.stringify(v, { lineWidth: 0 }).trimEnd();
+      const indented = yaml
+        .split('\n')
+        .map((l) => `      ${l}`)
+        .join('\n');
+      process.stdout.write(`    ${kleur.bold(key)}:\n${indented}\n`);
+    }
+  }
 }
 
 /**
