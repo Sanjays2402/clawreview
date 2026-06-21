@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 
-import { getMetrics, observeOperatorPoll } from '@clawreview/telemetry';
+import { getMetrics, observeOperatorPoll, observeOperatorPollBypass } from '@clawreview/telemetry';
 
 import { env } from '../env.js';
 import {
@@ -432,12 +432,13 @@ export async function registerOperatorPollRateLimit(
       // dedicated `bypass` header makes the bypass auditable in
       // server logs / dev tools without parsing the response body.
       reply.header('x-ratelimit-operator-bypass', 'force');
-      // Prom counter: attribute the bypass to its named probe (or
-      // '(none)') so an operator can graph dashboard health-probe
-      // volume separately from genuine polling. Counted BEFORE
-      // returning so a thrown plugin downstream can never silently
-      // skip the increment.
+      // Two Prom increments, both counted BEFORE returning so a thrown
+      // plugin downstream can never silently skip them:
+      //   1. operatorPollTotal{result="bypass"} -- volume axis.
+      //   2. operatorPollBypassTotal{reason="force"} -- attribution axis.
+      // The two must reconcile per-probe on the total-by-bypass count.
       observeOperatorPoll(metrics, probe, 'bypass');
+      observeOperatorPollBypass(metrics, probe, 'force');
       return;
     }
 

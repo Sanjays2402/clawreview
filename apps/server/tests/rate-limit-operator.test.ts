@@ -625,4 +625,94 @@ describe('operator-poll Prometheus counter (tick 11 wired)', () => {
       /clawreview_operator_poll_total\{[^}]*probe="\(none\)"[^}]*result="ok"[^}]*\} 1/,
     );
   });
+
+  // Tick 12: dedicated bypass attribution counter.
+  // operatorPollTotal{result="bypass"} counts VOLUME; this counter
+  // counts WHY each bypass was authorised so a security audit can
+  // graph drift in the bypass surface separately from volume.
+  it('also bumps clawreview_operator_poll_bypass_total{probe,reason} on a force=1 bypass', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/internal/webhook/stats', async () => ({ ok: true }));
+    await app.ready();
+
+    const r1 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?force=1&probe=stats-sidebar',
+    });
+    const r2 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?force=1&probe=stats-sidebar',
+    });
+    const r3 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?force=1&probe=stats-sidebar',
+    });
+    expect(r1.statusCode).toBe(200);
+    expect(r2.statusCode).toBe(200);
+    expect(r3.statusCode).toBe(200);
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    // Bypass attribution counter fires once per bypass with reason=force.
+    expect(text).toContain('# TYPE clawreview_operator_poll_bypass_total counter');
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="stats-sidebar"[^}]*reason="force"[^}]*\} 3/,
+    );
+    // Reconciles with the volume counter on the bypass result label:
+    // the per-probe total-by-bypass count must match the attribution
+    // total. Three bypasses = 3 on both counters.
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="bypass"[^}]*\} 3/,
+    );
+  });
+
+  it('attributes anonymous bypass (no ?probe=) to the (none) probe label on the bypass counter', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/internal/webhook/stats', async () => ({ ok: true }));
+    await app.ready();
+
+    // Two anonymous bypass calls (no probe set).
+    await app.inject({ method: 'GET', url: '/api/internal/webhook/stats?force=1' });
+    await app.inject({ method: 'GET', url: '/api/internal/webhook/stats?force=true' });
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="\(none\)"[^}]*reason="force"[^}]*\} 2/,
+    );
+  });
+
+  it('does NOT bump the bypass counter on a normal (non-bypass) poll', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 5 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // Two genuine polls (no force=1) -- volume counter bumps, attribution
+    // counter must stay silent so a "bypass drift" Prom query never lies.
+    await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+    await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    // operatorPollTotal sees two oks; bypass attribution stays at zero
+    // (no series emitted at all, since the counter was never incremented).
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="ok"[^}]*\} 2/,
+    );
+    expect(text).not.toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="stats-sidebar"[^}]*\}/,
+    );
+  });
 });

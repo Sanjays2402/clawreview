@@ -2,12 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   FINDING_DROP_REASONS,
+  OPERATOR_POLL_BYPASS_REASONS,
   OPERATOR_POLL_RESULTS,
   getMetrics,
   observeAgentExecutions,
   observeAuthorAttribution,
   observeFindingsDropped,
   observeOperatorPoll,
+  observeOperatorPollBypass,
   observeSimilarityMerges,
   observeWebhookDelivery,
   resetMetricsForTests,
@@ -437,6 +439,85 @@ describe('observeOperatorPoll', () => {
     const text = await m1.registry.metrics();
     expect(text).toMatch(
       /clawreview_operator_poll_total\{[^}]*probe="p1"[^}]*result="ok"[^}]*\} 2/,
+    );
+  });
+});
+
+// Tick 12: clawreview_operator_poll_bypass_total{probe,reason}
+// attribution counter. The volume metric (operatorPollTotal) answers
+// "how many bypasses?"; this one answers "why was each bypass
+// authorised?" so a security audit can graph reason drift separately
+// from raw bypass volume.
+describe('observeOperatorPollBypass', () => {
+  it('records bypass reasons against the probe label', async () => {
+    const metrics = getMetrics({ service: 'clawreview-byp-1', defaultMetrics: false });
+    observeOperatorPollBypass(metrics, 'stats-sidebar', 'force');
+    observeOperatorPollBypass(metrics, 'stats-sidebar', 'force');
+    observeOperatorPollBypass(metrics, 'replay-recent', 'force');
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_operator_poll_bypass_total counter');
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="stats-sidebar"[^}]*reason="force"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="replay-recent"[^}]*reason="force"[^}]*\} 1/,
+    );
+  });
+
+  it('routes null / unset probes under (none) so anonymous bypasses are still surfaced', async () => {
+    const metrics = getMetrics({ service: 'clawreview-byp-2', defaultMetrics: false });
+    observeOperatorPollBypass(metrics, null, 'force');
+    observeOperatorPollBypass(metrics, undefined, 'force');
+    observeOperatorPollBypass(metrics, '', 'force');
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="\(none\)"[^}]*reason="force"[^}]*\} 3/,
+    );
+  });
+
+  it('exposes a closed OPERATOR_POLL_BYPASS_REASONS literal so callers cannot drift on label values', () => {
+    // The bypass-reason set is intentionally tiny today (only
+    // 'force') but the closed type guards against the most likely
+    // future regression: a security-sensitive new bypass path
+    // landing without showing up in the metric. Adding a new
+    // authorised bypass MUST extend this constant and surface in a
+    // PR diff that a security reviewer can spot.
+    expect(OPERATOR_POLL_BYPASS_REASONS).toEqual(['force']);
+  });
+
+  it('reconciles with operatorPollTotal{result="bypass"} on the volume axis', async () => {
+    // The rate-limit hook calls BOTH counters on the same request:
+    // volume metric for "how many" + attribution for "why". The two
+    // must agree per-probe on the total-by-bypass count so an
+    // operator can sanity-check one against the other in Prom.
+    const metrics = getMetrics({ service: 'clawreview-byp-3', defaultMetrics: false });
+    for (let i = 0; i < 4; i++) {
+      observeOperatorPoll(metrics, 'stats-sidebar', 'bypass');
+      observeOperatorPollBypass(metrics, 'stats-sidebar', 'force');
+    }
+    const text = await metrics.registry.metrics();
+    // Both counters land at 4 for the same probe.
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="bypass"[^}]*\} 4/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="stats-sidebar"[^}]*reason="force"[^}]*\} 4/,
+    );
+  });
+
+  it('shares the bundle cache so the rate-limit hook does not double-create the counter', async () => {
+    // Same guard as the volume counter: two getMetrics() calls hand
+    // back the same Counter object. Without this, every request
+    // through the rate-limit hook would create a fresh counter and
+    // lose increments.
+    const m1 = getMetrics({ service: 'clawreview-byp-4', defaultMetrics: false });
+    const m2 = getMetrics({ service: 'clawreview-byp-4', defaultMetrics: false });
+    expect(m1.operatorPollBypassTotal).toBe(m2.operatorPollBypassTotal);
+    observeOperatorPollBypass(m1, 'p1', 'force');
+    observeOperatorPollBypass(m2, 'p1', 'force');
+    const text = await m1.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_bypass_total\{[^}]*probe="p1"[^}]*reason="force"[^}]*\} 2/,
     );
   });
 });

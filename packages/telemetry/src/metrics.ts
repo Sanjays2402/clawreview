@@ -112,6 +112,31 @@ export interface MetricsBundle {
    */
   operatorPollTotal: Counter<string>;
   /**
+   * Operator-poll bypass attribution, labeled by `probe` (the same
+   * sanitised `?probe=name` value as `operatorPollTotal`) and `reason`
+   * (the closed set `OPERATOR_POLL_BYPASS_REASONS`).
+   *
+   * This is the WHY view of `operatorPollTotal{result="bypass"}`:
+   * the volume counter answers "how many bypasses happened?" and
+   * supports a `rate(...) by (probe)` query for noisy widgets; this
+   * counter answers "what authorised each bypass?" so a security
+   * audit can distinguish dashboard health-probe (`reason="force"`,
+   * via `?force=1`) from future authorised paths (internal-network
+   * shortcut, signed hash-tag bypass, etc.) without re-tagging the
+   * volume metric. Operators can graph
+   * `rate(clawreview_operator_poll_bypass_total[1h]) by (reason)` to
+   * spot drift in the bypass surface.
+   *
+   * Cardinality: bounded by `(probe x reason)`. The probe label
+   * inherits the route layer's strict `[a-z0-9._-]` allowlist + 64-
+   * char cap, and `reason` is a closed `OPERATOR_POLL_BYPASS_REASONS`
+   * union so a typo'd reason can never silently fragment the series.
+   *
+   * Bypass also bumps `operatorPollTotal{result="bypass"}` so an
+   * operator can reconcile the two on the volume axis.
+   */
+  operatorPollBypassTotal: Counter<string>;
+  /**
    * Findings removed from the post-aggregation output before the PR
    * comment is rendered, labeled by `reason`:
    *
@@ -266,6 +291,17 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const operatorPollBypassTotal = new Counter({
+    name: 'clawreview_operator_poll_bypass_total',
+    help:
+      'Operator-poll bypass attribution, labeled by probe ' +
+      '(?probe=name annotation; (none) when unset) and reason ' +
+      '(closed set: force). Reconciles against ' +
+      'operator_poll_total{result="bypass"} on the volume axis.',
+    labelNames: ['probe', 'reason'],
+    registers: [registry],
+  });
+
   const findingsDroppedTotal = new Counter({
     name: 'clawreview_findings_dropped_total',
     help: 'Findings dropped after aggregation, labeled by reason (severity_rule | min_confidence | inline_suppression).',
@@ -330,6 +366,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     authorsAttributedTotal,
     webhookDeliveriesTotal,
     operatorPollTotal,
+    operatorPollBypassTotal,
     findingsDroppedTotal,
     queueDepth,
     queueInflight,
@@ -674,4 +711,56 @@ export function observeOperatorPoll(
 ): void {
   const probeLabel = sanitizeOperatorPollProbe(probe);
   metrics.operatorPollTotal.inc({ probe: probeLabel, result });
+}
+
+/**
+ * Closed set of authorised reasons the operator-poll rate-limit class
+ * can record against a `?force=1`-style bypass:
+ *
+ *   - `force` -- the request carried `?force=1` (or `?force=true` /
+ *                `?force=yes`); the dashboard's in-band health probe
+ *                explicitly asked the limiter to skip the bucket.
+ *
+ * Future tickets can extend this list with additional authorised paths
+ * (internal-network shortcut, signed hash-tag bypass, etc.) but a
+ * change to the list is intentionally a code change so a security
+ * review can spot a new bypass surface in a PR diff. Today the only
+ * authorised bypass is the dashboard probe.
+ *
+ * Exported so callers cannot drift via a typo'd literal; a typo'd
+ * reason would silently fragment the counter series across two label
+ * values that both look correct in code review (`force` vs `frce`).
+ */
+export const OPERATOR_POLL_BYPASS_REASONS = ['force'] as const;
+export type OperatorPollBypassReason = (typeof OPERATOR_POLL_BYPASS_REASONS)[number];
+
+/**
+ * Record one operator-poll bypass on the
+ * `clawreview_operator_poll_bypass_total{probe,reason}` counter.
+ *
+ * This is the WHY view of `operatorPollTotal{result="bypass"}`:
+ * the volume counter answers "how many bypasses happened?" and
+ * supports `rate(...) by (probe)` for noisy widgets; this counter
+ * answers "what authorised each bypass?" so a security review can
+ * graph `rate(clawreview_operator_poll_bypass_total[1h]) by (reason)`
+ * to spot drift in the bypass surface.
+ *
+ * The rate-limit hook calls BOTH `observeOperatorPoll(..., 'bypass')`
+ * (volume) AND `observeOperatorPollBypass(..., 'force')` (attribution)
+ * on the same request so an operator can reconcile the two on the
+ * volume axis (the two counters must always agree per-probe on the
+ * total-by-bypass count).
+ *
+ * Cheap to call from a hot Fastify hook: a single counter increment
+ * with two short label values per bypass. Bypasses are RARE compared
+ * to the volume path (dashboards bypass for health probes only) so
+ * this counter sees far less traffic than `operatorPollTotal`.
+ */
+export function observeOperatorPollBypass(
+  metrics: MetricsBundle,
+  probe: string | null | undefined,
+  reason: OperatorPollBypassReason,
+): void {
+  const probeLabel = sanitizeOperatorPollProbe(probe);
+  metrics.operatorPollBypassTotal.inc({ probe: probeLabel, reason });
 }
