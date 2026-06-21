@@ -63,6 +63,29 @@ export interface MetricsBundle {
    */
   authorsAttributedTotal: Counter<string>;
   /**
+   * Inbound webhook deliveries counted at receive time, labeled by
+   * `event` (e.g. `pull_request`, `push`, `installation`) and `repo`
+   * (`owner/name`, lower-cased; `(none)` when the payload carried no
+   * `repository.full_name`). Bumped once per accepted delivery on the
+   * receiver's `put()` path -- pairs with the `/api/internal/webhook/
+   * stats` endpoint's `byEvent` / `byRepo` shape so Prometheus and the
+   * dashboard observe the same numbers from the same source of truth.
+   *
+   * Cardinality: bounded by the (event * repo) cross-product. The
+   * receiver sanitises `repo` to a lower-cased `owner/name` slug capped
+   * at 100 chars, with hostile characters stripped, so a misconfigured
+   * GitHub payload can't blow up the cardinality budget. Operators
+   * with thousands of repos can drop `repo` at scrape time via a
+   * Prometheus relabel rule (see the runbook) without losing the
+   * per-event series.
+   *
+   * Distinct from `webhookEventsTotal{event,action,result}`: this
+   * counter is INGRESS-side (one increment per accepted delivery; no
+   * action / result labels) so Prom can graph raw inbound volume even
+   * when the dispatch path short-circuits before tagging a result.
+   */
+  webhookDeliveriesTotal: Counter<string>;
+  /**
    * Findings removed from the post-aggregation output before the PR
    * comment is rendered, labeled by `reason`:
    *
@@ -201,6 +224,13 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const webhookDeliveriesTotal = new Counter({
+    name: 'clawreview_webhook_deliveries_total',
+    help: 'Inbound GitHub webhook deliveries counted at receive time, labeled by event and sanitized repo full name.',
+    labelNames: ['event', 'repo'],
+    registers: [registry],
+  });
+
   const findingsDroppedTotal = new Counter({
     name: 'clawreview_findings_dropped_total',
     help: 'Findings dropped after aggregation, labeled by reason (severity_rule | min_confidence | inline_suppression).',
@@ -263,6 +293,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     agentFindingsTotal,
     similarityMergesTotal,
     authorsAttributedTotal,
+    webhookDeliveriesTotal,
     findingsDroppedTotal,
     queueDepth,
     queueInflight,
@@ -482,4 +513,59 @@ export function observeFindingsDropped(
 ): void {
   if (!Number.isFinite(count) || count <= 0) return;
   metrics.findingsDroppedTotal.inc({ reason }, count);
+}
+
+/**
+ * Sanitize a GitHub repo full name into a Prometheus-safe label value:
+ *
+ *   - Lower-cased so `Org/Repo` and `org/repo` collapse to one series
+ *     (label values are case-sensitive and Prometheus would otherwise
+ *     double-count the same logical repo).
+ *   - Stripped of control characters, whitespace, and quote characters
+ *     so a malformed payload from a misconfigured installation cannot
+ *     inject label-syntax noise.
+ *   - Capped at 100 chars so a long fork chain (`a/b/c/d/...`) can't
+ *     run the cardinality budget into the ground via the label value
+ *     length.
+ *   - `(none)` for the empty / missing case so the bucket is still
+ *     surfaced explicitly rather than silently dropped at scrape time.
+ *
+ * Exported so callers (the webhook receiver today, anything that wants
+ * to graph by-repo in the future) sanitise once and reuse the same key.
+ */
+export function sanitizeRepoLabel(repoFullName: string | undefined | null): string {
+  if (typeof repoFullName !== 'string') return '(none)';
+  const cleaned = repoFullName
+    .toLowerCase()
+    .replace(/[\u0000-\u001f"'`\s]/g, '')
+    .trim();
+  if (cleaned.length === 0) return '(none)';
+  return cleaned.length > 100 ? cleaned.slice(0, 100) : cleaned;
+}
+
+/**
+ * Record an inbound webhook delivery on the receiver's `put()` path.
+ * Bumps `clawreview_webhook_deliveries_total{event,repo}` once per
+ * accepted delivery so Prometheus and the dashboard's
+ * `/api/internal/webhook/stats` byEvent/byRepo agree on the same
+ * numbers from the same source of truth.
+ *
+ * Signature is intentionally narrow (event + repoFullName) rather than
+ * accepting the full WebhookEntry shape so this helper has zero
+ * dependency on `apps/server` types. Callers that want to wire the
+ * counter from elsewhere (e.g. a future Redis-backed receiver) just
+ * pass the two strings.
+ *
+ * Safe to call with an unset `repoFullName`: the helper sanitises into
+ * `(none)` so the metric series still fires and the bucket is visible
+ * in dashboards (e.g. `installation` events that carry no repo).
+ */
+export function observeWebhookDelivery(
+  metrics: MetricsBundle,
+  event: string,
+  repoFullName: string | undefined | null,
+): void {
+  if (typeof event !== 'string' || event.length === 0) return;
+  const repo = sanitizeRepoLabel(repoFullName);
+  metrics.webhookDeliveriesTotal.inc({ event, repo });
 }

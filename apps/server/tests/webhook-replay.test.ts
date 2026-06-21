@@ -8,6 +8,7 @@ const { buildServer } = await import('../src/server.js');
 const { getWebhookStore, _resetWebhookStoreForTests } = await import(
   '../src/services/webhook-store.js'
 );
+const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
 
 const BASE_PR = {
   action: 'opened',
@@ -902,6 +903,77 @@ describe('/api/internal/webhook/stats', () => {
       expect(body.hourly.granularity).toBe('minute');
       expect(body.hourly.peakBucketIndex).toBe(0);
       expect(body.hourly.peakBucketCount).toBe(2);
+    });
+  });
+
+  // Tick 10: ingress-side counter wired on the receiver's put() path
+  // so Prometheus and the dashboard observe the same numbers. The
+  // receiver bumps `clawreview_webhook_deliveries_total{event,repo}`
+  // once per accepted delivery (after signature verification), with
+  // `repo` sanitised to a lower-cased owner/name slug.
+  describe('clawreview_webhook_deliveries_total{event,repo} ingress counter', () => {
+    it('increments once per accepted delivery with sanitised repo label', async () => {
+      _resetWebhookStoreForTests();
+      // Snapshot the bundle and reset the registry so the assertions
+      // below see only the counts emitted by THIS test.
+      resetMetricsForTests();
+      // Two deliveries with different repo case-shifts collapse to one
+      // series via the sanitiser.
+      await deliver(app, 'tick10-wd-1', {
+        ...BASE_PR,
+        repository: { ...BASE_PR.repository, full_name: 'Sanjay/Demo' },
+      });
+      await deliver(app, 'tick10-wd-2', {
+        ...BASE_PR,
+        repository: { ...BASE_PR.repository, full_name: 'sanjay/demo' },
+      });
+      const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+      expect(text).toContain('# TYPE clawreview_webhook_deliveries_total counter');
+      // Both deliveries land on the same series.
+      expect(text).toMatch(
+        /clawreview_webhook_deliveries_total\{[^}]*event="pull_request"[^}]*repo="sanjay\/demo"[^}]*\} 2/,
+      );
+    });
+
+    it('still increments for events that carry no repository (lands in the "(none)" bucket)', async () => {
+      _resetWebhookStoreForTests();
+      resetMetricsForTests();
+      // `ping` events carry no repository. The dispatch path tags
+      // them with `result=accepted` on the webhookEventsTotal counter,
+      // but the INGRESS counter (which we're testing here) fires
+      // regardless and lands the entry under repo="(none)".
+      const body = JSON.stringify({ zen: 'keep it logically awesome' });
+      const sig = computeSignature(body, 'test-secret');
+      await app.inject({
+        method: 'POST',
+        url: '/webhooks/github',
+        headers: {
+          'x-github-event': 'ping',
+          'x-github-delivery': 'tick10-wd-ping',
+          'x-hub-signature-256': sig,
+          'content-type': 'application/json',
+        },
+        payload: body,
+      });
+      const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+      expect(text).toMatch(
+        /clawreview_webhook_deliveries_total\{[^}]*event="ping"[^}]*repo="\(none\)"[^}]*\} 1/,
+      );
+    });
+
+    it('does NOT count duplicate deliveries (idempotency cache short-circuits before put)', async () => {
+      _resetWebhookStoreForTests();
+      resetMetricsForTests();
+      await deliver(app, 'tick10-wd-dup', BASE_PR);
+      await deliver(app, 'tick10-wd-dup', BASE_PR);
+      await deliver(app, 'tick10-wd-dup', BASE_PR);
+      const text = await getMetrics({ service: 'clawreview-server' }).registry.metrics();
+      // The idempotency cache short-circuits before put() fires, so the
+      // counter only sees the first delivery -- the two duplicates
+      // never reach the put() path.
+      expect(text).toMatch(
+        /clawreview_webhook_deliveries_total\{[^}]*event="pull_request"[^}]*repo="sanjay\/demo"[^}]*\} 1/,
+      );
     });
   });
 });

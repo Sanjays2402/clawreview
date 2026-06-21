@@ -7,8 +7,10 @@ import {
   observeAuthorAttribution,
   observeFindingsDropped,
   observeSimilarityMerges,
+  observeWebhookDelivery,
   resetMetricsForTests,
   sanitizeAuthorLabel,
+  sanitizeRepoLabel,
 } from '../src/metrics.js';
 
 afterEach(() => {
@@ -256,5 +258,91 @@ describe('observeFindingsDropped', () => {
     const text = await metrics.registry.metrics();
     expect(text).toContain('# TYPE clawreview_findings_dropped_total counter');
     expect(text).not.toMatch(/clawreview_findings_dropped_total\{[^}]*reason="severity_rule"/);
+  });
+});
+
+describe('sanitizeRepoLabel', () => {
+  it('lower-cases owner/name so Org/Repo and org/repo collapse', () => {
+    expect(sanitizeRepoLabel('Sanjays2402/ClawReview')).toBe('sanjays2402/clawreview');
+    expect(sanitizeRepoLabel('sanjays2402/clawreview')).toBe('sanjays2402/clawreview');
+  });
+
+  it('returns "(none)" for the empty / missing / non-string cases', () => {
+    expect(sanitizeRepoLabel('')).toBe('(none)');
+    expect(sanitizeRepoLabel(undefined)).toBe('(none)');
+    expect(sanitizeRepoLabel(null)).toBe('(none)');
+    // After whitespace + control stripping, an all-whitespace input
+    // collapses to empty and lands in the (none) bucket too.
+    expect(sanitizeRepoLabel('   ')).toBe('(none)');
+  });
+
+  it('strips control characters, whitespace, and quote / backtick noise', () => {
+    expect(sanitizeRepoLabel('owner /repo')).toBe('owner/repo');
+    expect(sanitizeRepoLabel('owner\trepo\n')).toBe('ownerrepo');
+    expect(sanitizeRepoLabel('o"w\'n`e r/ repo')).toBe('owner/repo');
+    // A null byte mid-string is dropped.
+    expect(sanitizeRepoLabel('owner/re\u0000po')).toBe('owner/repo');
+  });
+
+  it('caps at 100 chars so a runaway label can\'t blow up cardinality', () => {
+    const long = 'a'.repeat(60) + '/' + 'b'.repeat(60);
+    const out = sanitizeRepoLabel(long);
+    expect(out.length).toBe(100);
+    // Prefix of the cleaned input survives intact.
+    expect(out.startsWith('a'.repeat(60) + '/')).toBe(true);
+  });
+});
+
+describe('observeWebhookDelivery', () => {
+  it('emits clawreview_webhook_deliveries_total{event,repo}', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wd-1', defaultMetrics: false });
+    observeWebhookDelivery(metrics, 'pull_request', 'Sanjays2402/clawreview');
+    observeWebhookDelivery(metrics, 'pull_request', 'sanjays2402/clawreview');
+    observeWebhookDelivery(metrics, 'push', 'sanjays2402/clawreview');
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_webhook_deliveries_total counter');
+    // Org/Repo and org/repo collapse to one series via the sanitiser
+    // so the count for pull_request lands at 2 (not 1 + 1 across two
+    // case-shifted series).
+    expect(text).toMatch(
+      /clawreview_webhook_deliveries_total\{[^}]*event="pull_request"[^}]*repo="sanjays2402\/clawreview"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_webhook_deliveries_total\{[^}]*event="push"[^}]*repo="sanjays2402\/clawreview"[^}]*\} 1/,
+    );
+  });
+
+  it('routes deliveries with no repoFullName under the "(none)" bucket', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wd-2', defaultMetrics: false });
+    // Installation-class events frequently carry no repository in the
+    // payload; the bucket must still surface so dashboards can see the
+    // size of the no-repo slice.
+    observeWebhookDelivery(metrics, 'installation', undefined);
+    observeWebhookDelivery(metrics, 'installation', '');
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_deliveries_total\{[^}]*event="installation"[^}]*repo="\(none\)"[^}]*\} 2/,
+    );
+  });
+
+  it('is a safe no-op when event is empty or non-string', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wd-3', defaultMetrics: false });
+    observeWebhookDelivery(metrics, '', 'sanjay/demo');
+    // Bypass the type system to verify the runtime guard.
+    observeWebhookDelivery(metrics, undefined as unknown as string, 'sanjay/demo');
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_webhook_deliveries_total counter');
+    expect(text).not.toMatch(/clawreview_webhook_deliveries_total\{[^}]*repo="sanjay\/demo"/);
+  });
+
+  it('accumulates across many deliveries (counter, not gauge)', async () => {
+    const metrics = getMetrics({ service: 'clawreview-wd-4', defaultMetrics: false });
+    for (let i = 0; i < 7; i++) {
+      observeWebhookDelivery(metrics, 'pull_request', 'sanjay/demo');
+    }
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_webhook_deliveries_total\{[^}]*event="pull_request"[^}]*repo="sanjay\/demo"[^}]*\} 7/,
+    );
   });
 });

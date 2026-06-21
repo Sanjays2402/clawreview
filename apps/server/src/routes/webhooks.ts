@@ -10,7 +10,7 @@ import { getDeliveryCache } from '../services/delivery-cache.js';
 import { getReviewStore } from '../services/review-store.js';
 import { getRepoHealth } from '../services/repo-health.js';
 import { getWebhookStore } from '../services/webhook-store.js';
-import { getMetrics } from '@clawreview/telemetry';
+import { getMetrics, observeWebhookDelivery } from '@clawreview/telemetry';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
 
@@ -92,15 +92,27 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
 
     // Store the raw delivery for operator-driven replay. Capture happens
     // BEFORE handling so we still have the payload if dispatch throws.
+    const repoFullName = extractRepoFullName(req.body);
     getWebhookStore().put({
       deliveryId: delivery,
       event,
       action: extractAction(req.body),
       payload: req.body,
       receivedAt: new Date().toISOString(),
-      repoFullName: extractRepoFullName(req.body),
+      repoFullName,
       installationId: extractInstallationId(req.body),
     });
+    // Bump the ingress-side counter once per accepted delivery so
+    // Prometheus and the dashboard's /api/internal/webhook/stats agree
+    // on the same numbers from the same source of truth. Distinct from
+    // the dispatch-side `webhookEventsTotal{event,action,result}` which
+    // only fires once dispatch tags a result -- this one captures every
+    // delivery that made it past signature verification.
+    observeWebhookDelivery(
+      getMetrics({ service: 'clawreview-server' }),
+      event,
+      repoFullName,
+    );
 
     try {
       const result = await dispatchWebhook(event, delivery, req.body, req.log);
