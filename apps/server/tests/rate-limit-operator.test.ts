@@ -10,6 +10,7 @@ delete process.env.DISABLE_PER_TOKEN_RATE_LIMIT;
 const { _internals, registerOperatorPollRateLimit, OPERATOR_POLL_DEFAULT_PER_MINUTE } =
   await import('../src/plugins/rate-limit.js');
 const Fastify = (await import('fastify')).default;
+const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
 
 /**
  * The operator-poll class is the dedicated rate-limit bucket for
@@ -472,5 +473,156 @@ describe('operator-poll probe annotation (wired into fastify)', () => {
     const res = await app.inject({ method: 'GET', url: '/api/reviews?probe=stats-sidebar' });
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-ratelimit-operator-probe']).toBeUndefined();
+  });
+});
+
+describe('operator-poll Prometheus counter (tick 11 wired)', () => {
+  // Verifies the rate-limit hook bumps
+  // `clawreview_operator_poll_total{probe,result}` once per request,
+  // tagging the outcome (ok / bypass / throttled) and the probe
+  // attribution. Pairs with the unit tests for observeOperatorPoll
+  // in the telemetry package -- those pin the helper contract; these
+  // pin the wiring from the Fastify hook to the registry.
+
+  let app: ReturnType<typeof Fastify>;
+  beforeEach(async () => {
+    resetMetricsForTests();
+    app = Fastify();
+    app.addHook('onRequest', async (req) => {
+      (req as unknown as { apiAuth?: { tokenName: string } }).apiAuth = {
+        tokenName: 'rl-op-prom',
+      };
+    });
+  });
+  afterEach(async () => {
+    await app.close();
+    resetMetricsForTests();
+  });
+
+  it('counts an accepted polling request as result=ok against the probe label', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 10 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+    expect(res.statusCode).toBe(200);
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="ok"[^}]*\} 1/,
+    );
+  });
+
+  it('counts a force=1 bypass as result=bypass without drawing down the bucket', async () => {
+    // A bucket of 1 + two bypass calls would 429 without the bypass;
+    // we verify both calls succeed AND that they land under the
+    // bypass counter (not ok / throttled).
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/internal/webhook/stats', async () => ({ ok: true }));
+    await app.ready();
+
+    const r1 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?force=1&probe=replay-recent',
+    });
+    const r2 = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?force=1&probe=replay-recent',
+    });
+    expect(r1.statusCode).toBe(200);
+    expect(r2.statusCode).toBe(200);
+    expect(r1.headers['x-ratelimit-operator-bypass']).toBe('force');
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="replay-recent"[^}]*result="bypass"[^}]*\} 2/,
+    );
+    // The bypass path must NOT count as ok.
+    expect(text).not.toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="replay-recent"[^}]*result="ok"[^}]*\}/,
+    );
+  });
+
+  it('counts a 429 from an exhausted bucket as result=throttled against the probe', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 1 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // First call goes through (result=ok); second trips the bucket.
+    const ok = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+    const blocked = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(blocked.statusCode).toBe(429);
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="ok"[^}]*\} 1/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="throttled"[^}]*\} 1/,
+    );
+  });
+
+  it('attributes anonymous polling (no ?probe=) to the (none) probe label', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 5 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // Two anonymous polls -- one should still surface the
+    // operator-poll counter with the `(none)` bucket so dashboards
+    // can spot un-attributed polling.
+    await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' });
+    await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' });
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="\(none\)"[^}]*result="ok"[^}]*\} 2/,
+    );
+  });
+
+  it('does not increment the counter on non-operator-poll routes', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 5 });
+    app.get('/api/reviews', async () => ({ ok: true }));
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // Two unrelated /api/reviews calls plus one polling call. Only
+    // the polling call should bump the counter.
+    await app.inject({ method: 'GET', url: '/api/reviews' });
+    await app.inject({ method: 'GET', url: '/api/reviews' });
+    await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' });
+
+    const text = await getMetrics({
+      service: 'clawreview-server',
+      defaultMetrics: false,
+    }).registry.metrics();
+    // Exactly one polling-class increment (the /api/internal/webhook/recent call).
+    const matches = text.match(/clawreview_operator_poll_total\{[^}]*\}/g) ?? [];
+    // One sample line per (probe,result) pair, here just (none)/ok.
+    expect(matches.length).toBe(1);
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="\(none\)"[^}]*result="ok"[^}]*\} 1/,
+    );
   });
 });

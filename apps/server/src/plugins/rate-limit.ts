@@ -1,5 +1,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 
+import { getMetrics, observeOperatorPoll } from '@clawreview/telemetry';
+
 import { env } from '../env.js';
 import {
   createRedisRateLimitBackend,
@@ -414,6 +416,8 @@ export async function registerOperatorPollRateLimit(
       reply.header('x-ratelimit-operator-probe', probe);
     }
 
+    const metrics = getMetrics({ service: 'clawreview-server' });
+
     // In-band probe bypass: a dashboard can send `?force=1` on its
     // own health-check ping so the limiter does NOT count it against
     // the bucket. This keeps the dashboard's sanity-probe-every-second
@@ -428,6 +432,12 @@ export async function registerOperatorPollRateLimit(
       // dedicated `bypass` header makes the bypass auditable in
       // server logs / dev tools without parsing the response body.
       reply.header('x-ratelimit-operator-bypass', 'force');
+      // Prom counter: attribute the bypass to its named probe (or
+      // '(none)') so an operator can graph dashboard health-probe
+      // volume separately from genuine polling. Counted BEFORE
+      // returning so a thrown plugin downstream can never silently
+      // skip the increment.
+      observeOperatorPoll(metrics, probe, 'bypass');
       return;
     }
 
@@ -448,6 +458,9 @@ export async function registerOperatorPollRateLimit(
     if (!result.ok) {
       reply.header('retry-after', String(result.retryAfterSec));
       reply.code(429);
+      // Throttled outcome counted BEFORE reply.send so the metric
+      // fires even if the client disconnects mid-response.
+      observeOperatorPoll(metrics, probe, 'throttled');
       return reply.send({
         error: 'TooManyRequests',
         message:
@@ -459,6 +472,10 @@ export async function registerOperatorPollRateLimit(
         requestId: req.id,
       });
     }
+    // Accepted -- the request consumed one slot from the bucket and
+    // will reach the route handler. One increment per accepted request
+    // so rate() in Prom gives ops/sec for the polling class.
+    observeOperatorPoll(metrics, probe, 'ok');
   });
 
   app.log.info(

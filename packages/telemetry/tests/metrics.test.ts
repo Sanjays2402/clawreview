@@ -2,14 +2,17 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   FINDING_DROP_REASONS,
+  OPERATOR_POLL_RESULTS,
   getMetrics,
   observeAgentExecutions,
   observeAuthorAttribution,
   observeFindingsDropped,
+  observeOperatorPoll,
   observeSimilarityMerges,
   observeWebhookDelivery,
   resetMetricsForTests,
   sanitizeAuthorLabel,
+  sanitizeOperatorPollProbe,
   sanitizeRepoLabel,
 } from '../src/metrics.js';
 
@@ -343,6 +346,97 @@ describe('observeWebhookDelivery', () => {
     const text = await metrics.registry.metrics();
     expect(text).toMatch(
       /clawreview_webhook_deliveries_total\{[^}]*event="pull_request"[^}]*repo="sanjay\/demo"[^}]*\} 7/,
+    );
+  });
+});
+
+describe('sanitizeOperatorPollProbe', () => {
+  it('collapses null / undefined / empty / whitespace to (none) so the bucket is still visible', () => {
+    expect(sanitizeOperatorPollProbe(null)).toBe('(none)');
+    expect(sanitizeOperatorPollProbe(undefined)).toBe('(none)');
+    expect(sanitizeOperatorPollProbe('')).toBe('(none)');
+    expect(sanitizeOperatorPollProbe('   ')).toBe('(none)');
+  });
+
+  it('preserves the route-layer sanitised probe name as-is (no double-trim)', () => {
+    // operatorPollProbeParam already strips disallowed chars and
+    // caps at 64; the metric helper should trust that contract and
+    // not re-sanitise. Passing a value with internal hyphens / dots
+    // must survive untouched.
+    expect(sanitizeOperatorPollProbe('stats-sidebar')).toBe('stats-sidebar');
+    expect(sanitizeOperatorPollProbe('replay.recent')).toBe('replay.recent');
+    expect(sanitizeOperatorPollProbe('top_repos_widget')).toBe('top_repos_widget');
+  });
+
+  it('coerces non-string values to (none) as a belt-and-braces guard', () => {
+    // Defensive: the metric helper is the only write site, so a
+    // misuse where the caller hands a number (e.g. forgot to extract
+    // the string) must not poison the registry with `NaN` / `0` labels.
+    expect(sanitizeOperatorPollProbe(42 as unknown as string)).toBe('(none)');
+    expect(sanitizeOperatorPollProbe({} as unknown as string)).toBe('(none)');
+    expect(sanitizeOperatorPollProbe([] as unknown as string)).toBe('(none)');
+  });
+});
+
+describe('observeOperatorPoll', () => {
+  it('records ok / bypass / throttled outcomes against the probe label', async () => {
+    const metrics = getMetrics({ service: 'clawreview-op-1', defaultMetrics: false });
+    observeOperatorPoll(metrics, 'stats-sidebar', 'ok');
+    observeOperatorPoll(metrics, 'stats-sidebar', 'ok');
+    observeOperatorPoll(metrics, 'stats-sidebar', 'throttled');
+    observeOperatorPoll(metrics, 'replay-recent', 'bypass');
+
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_operator_poll_total counter');
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="ok"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="stats-sidebar"[^}]*result="throttled"[^}]*\} 1/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="replay-recent"[^}]*result="bypass"[^}]*\} 1/,
+    );
+  });
+
+  it('routes null / unset probes under the (none) bucket so anonymous polling is still surfaced', async () => {
+    const metrics = getMetrics({ service: 'clawreview-op-2', defaultMetrics: false });
+    observeOperatorPoll(metrics, null, 'ok');
+    observeOperatorPoll(metrics, undefined, 'ok');
+    observeOperatorPoll(metrics, '', 'throttled');
+
+    const text = await metrics.registry.metrics();
+    // Two `ok` increments under `(none)`.
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="\(none\)"[^}]*result="ok"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="\(none\)"[^}]*result="throttled"[^}]*\} 1/,
+    );
+  });
+
+  it('exposes a closed OPERATOR_POLL_RESULTS literal so callers cannot drift on label values', () => {
+    // Compile-time guard already prevents a stray literal, but
+    // pin the runtime shape too so a future tick can't quietly
+    // re-order or grow the result set without updating tests.
+    expect(OPERATOR_POLL_RESULTS).toEqual(['ok', 'bypass', 'throttled']);
+  });
+
+  it('keeps the same metric bundle on repeated registration (no double-count after rebind)', async () => {
+    // Verify the bundle cache: two getMetrics() calls inside one
+    // process must hand back the same Counter object so independent
+    // call sites can both increment without double-creating the
+    // metric. Without this guard, the Fastify hook's per-request
+    // getMetrics() call would create a fresh counter per request
+    // and lose every increment.
+    const m1 = getMetrics({ service: 'clawreview-op-3', defaultMetrics: false });
+    const m2 = getMetrics({ service: 'clawreview-op-3', defaultMetrics: false });
+    expect(m1.operatorPollTotal).toBe(m2.operatorPollTotal);
+    observeOperatorPoll(m1, 'p1', 'ok');
+    observeOperatorPoll(m2, 'p1', 'ok');
+    const text = await m1.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_operator_poll_total\{[^}]*probe="p1"[^}]*result="ok"[^}]*\} 2/,
     );
   });
 });

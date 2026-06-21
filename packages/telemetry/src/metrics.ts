@@ -86,6 +86,32 @@ export interface MetricsBundle {
    */
   webhookDeliveriesTotal: Counter<string>;
   /**
+   * Operator-poll rate-limit class traffic, labeled by `probe` (the
+   * sanitised `?probe=name` annotation, `(none)` when unset) and
+   * `result` (`ok`, `bypass`, `throttled`).
+   *
+   * Pairs with the tick-10 `?probe=name` operator-poll annotation
+   * and the tick-9 `?force=1` bypass: a dashboard widget tags its
+   * polling traffic with a probe name and the limiter emits one
+   * increment per request. Prom queries like
+   * `rate(clawreview_operator_poll_total{result="throttled"}[5m]) by (probe)`
+   * point straight at the noisiest widget; `rate(...{result="bypass"})`
+   * graphs how many in-band health probes are bypassing the bucket.
+   *
+   * Cardinality: bounded by the number of named dashboard widgets x
+   * three result values. The probe sanitiser caps each label value at
+   * 64 chars with a strict `[a-z0-9._-]` allowlist, so a hostile or
+   * typo'd value lands under `unknown` rather than fragmenting the
+   * series. A request without `?probe=` lands under `(none)` so the
+   * bucket is visible.
+   *
+   * Distinct from the default `http_requests_total{route,status_code}`
+   * series because the operator-poll class wants to slice by probe,
+   * not by route -- a single widget can poll both /recent and /stats
+   * but the operator wants to attribute the load to the WIDGET.
+   */
+  operatorPollTotal: Counter<string>;
+  /**
    * Findings removed from the post-aggregation output before the PR
    * comment is rendered, labeled by `reason`:
    *
@@ -231,6 +257,15 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const operatorPollTotal = new Counter({
+    name: 'clawreview_operator_poll_total',
+    help:
+      'Operator-poll rate-limit class traffic, labeled by probe ' +
+      '(?probe=name annotation; (none) when unset) and result (ok | bypass | throttled).',
+    labelNames: ['probe', 'result'],
+    registers: [registry],
+  });
+
   const findingsDroppedTotal = new Counter({
     name: 'clawreview_findings_dropped_total',
     help: 'Findings dropped after aggregation, labeled by reason (severity_rule | min_confidence | inline_suppression).',
@@ -294,6 +329,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     similarityMergesTotal,
     authorsAttributedTotal,
     webhookDeliveriesTotal,
+    operatorPollTotal,
     findingsDroppedTotal,
     queueDepth,
     queueInflight,
@@ -568,4 +604,74 @@ export function observeWebhookDelivery(
   if (typeof event !== 'string' || event.length === 0) return;
   const repo = sanitizeRepoLabel(repoFullName);
   metrics.webhookDeliveriesTotal.inc({ event, repo });
+}
+
+/**
+ * Closed set of outcomes the operator-poll rate-limit class can record
+ * against a request:
+ *
+ *   - `ok`        -- request landed in the bucket and was accepted.
+ *   - `bypass`    -- `?force=1` bypass; request did not draw down the
+ *                    bucket (still observed by the default per-token
+ *                    limiter further down the chain).
+ *   - `throttled` -- bucket exhausted; the limiter returned 429.
+ *
+ * Exported so callers cannot drift via a typo; a typo'd literal would
+ * silently fork the counter into a new label value and inflate
+ * cardinality.
+ */
+export const OPERATOR_POLL_RESULTS = ['ok', 'bypass', 'throttled'] as const;
+export type OperatorPollResult = (typeof OPERATOR_POLL_RESULTS)[number];
+
+/**
+ * Sanitise a caller-supplied probe name (already extracted from the
+ * `?probe=` query parameter by the route layer) into a Prometheus-safe
+ * label value.
+ *
+ *   - `null` / `undefined` / `''` collapse to `(none)` so the bucket
+ *     is still surfaced explicitly rather than dropped at scrape time.
+ *   - The route layer (operatorPollProbeParam) already applies the
+ *     strict `[a-z0-9._-]` allowlist and the 64-char cap; this helper
+ *     just normalises the absent case so the metric layer stays
+ *     ignorant of the route's parsing quirks.
+ *   - As a defensive belt-and-braces, anything ELSE that isn't a
+ *     string collapses to `(none)` too. The metric helper is the only
+ *     write site, so a single guard here means a misuse (e.g. a number
+ *     accidentally typed as the probe label) can never reach the
+ *     registry.
+ */
+export function sanitizeOperatorPollProbe(probe: string | null | undefined): string {
+  if (typeof probe !== 'string') return '(none)';
+  const trimmed = probe.trim();
+  if (trimmed.length === 0) return '(none)';
+  return trimmed;
+}
+
+/**
+ * Record one operator-poll class request on the
+ * `clawreview_operator_poll_total{probe,result}` counter.
+ *
+ * Safe to call from a hot Fastify hook: a single counter increment
+ * with two short label values per request is negligible vs. the
+ * sliding-window bucket walk the limiter already runs. The route
+ * layer hands us the already-sanitised probe (or null) so we never
+ * re-walk the URL.
+ *
+ * Pairs with:
+ *   - The tick-10 `?probe=name` annotation: probes get attributed
+ *     to their named widget.
+ *   - The tick-9 `?force=1` bypass: bypass requests are counted as
+ *     `result=bypass` so a dashboard can tell genuine throttled
+ *     polling from in-band health probes.
+ *   - The tick-8 operator-poll class: throttled requests are counted
+ *     as `result=throttled` so Prom can graph rate(...{result="throttled"})
+ *     to see when a dashboard widget overran its budget.
+ */
+export function observeOperatorPoll(
+  metrics: MetricsBundle,
+  probe: string | null | undefined,
+  result: OperatorPollResult,
+): void {
+  const probeLabel = sanitizeOperatorPollProbe(probe);
+  metrics.operatorPollTotal.inc({ probe: probeLabel, result });
 }
