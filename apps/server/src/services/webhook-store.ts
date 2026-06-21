@@ -133,6 +133,13 @@ export interface WebhookStatsOptions {
    */
   hourBuckets?: number;
   /**
+   * Maximum number of distinct repos to return in `byRepo` before the
+   * tail is collapsed into an `(other)` bucket. Default 50, hard
+   * ceiling 200 so a misconfigured caller can't ask the store to
+   * render a multi-thousand-key map.
+   */
+  topRepos?: number;
+  /**
    * Override "now" for deterministic tests. Production callers should
    * leave this undefined; tests pin it so the bucket alignment is
    * stable.
@@ -156,6 +163,18 @@ export interface WebhookStats {
    * entry with no `action` lands under `event/(none)`.
    */
   byEventAction: Record<string, number>;
+  /**
+   * Entry count keyed by `repoFullName`. Useful for spotting noisy
+   * repos at a glance (e.g. one PR rebase storm dwarfing the rest of
+   * the org). An entry with no `repoFullName` lands under `(none)` so
+   * the bucket is still surfaced rather than silently dropped.
+   *
+   * Capped at `topRepos` entries (default 50, hard ceiling 200) so a
+   * dashboard polling this endpoint never has to render a multi-thousand
+   * key map. When the cap fires, the bucket `(other)` carries the sum
+   * of the trimmed tail so the total still reconciles with `total`.
+   */
+  byRepo: Record<string, number>;
   /**
    * Sparkline of receivedAt timestamps at the requested granularity.
    * `buckets` is ordered newest-first: index 0 is the bucket ending at
@@ -249,9 +268,14 @@ export class InMemoryWebhookStore implements WebhookStore {
     // an unbounded sparkline.
     const requested = opts.buckets ?? opts.hourBuckets ?? defaultBucketCount;
     const bucketCount = Math.max(1, Math.min(maxBucketCount, requested));
+    // Cap the byRepo top-N so a dashboard polling this endpoint never
+    // has to render thousands of repo buckets. The remainder collapses
+    // into `(other)` further down so the total still reconciles.
+    const topRepos = Math.max(1, Math.min(200, opts.topRepos ?? 50));
     const buckets = new Array<number>(bucketCount).fill(0);
     const byEvent: Record<string, number> = {};
     const byEventAction: Record<string, number> = {};
+    const byRepoRaw: Record<string, number> = {};
     let total = 0;
 
     for (const e of this.entries.values()) {
@@ -264,6 +288,10 @@ export class InMemoryWebhookStore implements WebhookStore {
       byEvent[e.event] = (byEvent[e.event] ?? 0) + 1;
       const actionKey = `${e.event}/${e.action ?? '(none)'}`;
       byEventAction[actionKey] = (byEventAction[actionKey] ?? 0) + 1;
+      // Repo bucket: `(none)` for deliveries we couldn't extract a
+      // repo full name from (e.g. installation / marketplace events).
+      const repoKey = e.repoFullName ?? '(none)';
+      byRepoRaw[repoKey] = (byRepoRaw[repoKey] ?? 0) + 1;
       // Drop into the right bucket (newest-first index). Entries older
       // than the rendered window are still counted toward the grand
       // totals but excluded from the sparkline.
@@ -276,10 +304,31 @@ export class InMemoryWebhookStore implements WebhookStore {
       }
     }
 
+    // Compose the trimmed byRepo map: sort by descending count, keep
+    // the top N, sum the rest into `(other)` so the visible map still
+    // sums to `total` for sanity checks in dashboards.
+    const sortedRepos = Object.entries(byRepoRaw).sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    });
+    const byRepo: Record<string, number> = {};
+    for (let i = 0; i < Math.min(topRepos, sortedRepos.length); i++) {
+      const [k, v] = sortedRepos[i]!;
+      byRepo[k] = v;
+    }
+    if (sortedRepos.length > topRepos) {
+      let other = 0;
+      for (let i = topRepos; i < sortedRepos.length; i++) {
+        other += sortedRepos[i]![1];
+      }
+      if (other > 0) byRepo['(other)'] = other;
+    }
+
     return {
       total,
       byEvent,
       byEventAction,
+      byRepo,
       hourly: { granularity, bucketSizeMs, buckets, nowMs },
     };
   }

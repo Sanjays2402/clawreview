@@ -121,6 +121,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
         buckets?: unknown;
         hourBuckets?: unknown;
         hours?: unknown;
+        topRepos?: unknown;
       };
       const event = typeof q.event === 'string' && q.event.length > 0 ? q.event : undefined;
       const repoFullName =
@@ -152,12 +153,21 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
       const bucketsRaw = q.buckets ?? q.hourBuckets ?? q.hours;
       const buckets =
         bucketsRaw === undefined ? undefined : Math.max(1, Math.min(240, Number(bucketsRaw) || 24));
+      // `topRepos` clamps to the same range the store enforces; the
+      // store re-clamps so a malformed value never escapes the
+      // dashboard-render budget.
+      const topReposRaw = q.topRepos;
+      const topRepos =
+        topReposRaw === undefined
+          ? undefined
+          : Math.max(1, Math.min(200, Number(topReposRaw) || 50));
       const stats = getWebhookStore().stats({
         event,
         repoFullName,
         sinceMs,
         granularity,
         buckets,
+        topRepos,
       });
       return {
         requestId: req.id,
@@ -168,6 +178,7 @@ export async function registerWebhookReplayRoutes(app: FastifyInstance): Promise
           repoFullName,
           granularity: granularity ?? 'hour',
           buckets: buckets ?? (granularity === 'minute' ? 60 : granularity === 'day' ? 14 : 24),
+          topRepos: topRepos ?? 50,
         },
         ...stats,
       };

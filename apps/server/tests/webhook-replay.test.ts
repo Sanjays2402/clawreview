@@ -633,4 +633,173 @@ describe('/api/internal/webhook/stats', () => {
       expect(res.json().appliedFilters.buckets).toBe(7);
     });
   });
+
+  describe('byRepo slice', () => {
+    it('counts entries per repoFullName so dashboards can spot noisy repos', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      const at = (offsetMs: number) => new Date(now - offsetMs).toISOString();
+      // 3 deliveries on team/api, 1 on team/web, 1 with no repo
+      // (installation-style event).
+      getWebhookStore().put({
+        deliveryId: 'r-1',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: at(60_000),
+        repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'r-2',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: at(120_000),
+        repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'r-3',
+        event: 'push',
+        payload: {},
+        receivedAt: at(180_000),
+        repoFullName: 'team/api',
+      });
+      getWebhookStore().put({
+        deliveryId: 'r-4',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: at(240_000),
+        repoFullName: 'team/web',
+      });
+      getWebhookStore().put({
+        deliveryId: 'r-5',
+        event: 'installation',
+        payload: {},
+        receivedAt: at(300_000),
+        // No repoFullName -- installation-level events land under (none).
+      });
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.byRepo['team/api']).toBe(3);
+      expect(body.byRepo['team/web']).toBe(1);
+      expect(body.byRepo['(none)']).toBe(1);
+      // Sum of byRepo must reconcile with the total counted entries.
+      const sum = Object.values(body.byRepo as Record<string, number>).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      expect(sum).toBe(body.total);
+    });
+
+    it('caps byRepo at topRepos and collapses the tail into (other)', async () => {
+      _resetWebhookStoreForTests();
+      // 6 distinct repos; ask for only top 3 so the tail of 3 should
+      // collapse into (other).
+      for (let i = 0; i < 6; i++) {
+        getWebhookStore().put({
+          deliveryId: `cap-${i}`,
+          event: 'push',
+          payload: {},
+          receivedAt: new Date().toISOString(),
+          // Make repo-0 most frequent (3 hits), then repo-1 (2 hits),
+          // then everyone else once so the top-3 ordering is stable.
+          repoFullName: `team/r${i}`,
+        });
+      }
+      // Add extra hits to make the top stable.
+      getWebhookStore().put({
+        deliveryId: 'cap-r0-extra-a',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date().toISOString(),
+        repoFullName: 'team/r0',
+      });
+      getWebhookStore().put({
+        deliveryId: 'cap-r0-extra-b',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date().toISOString(),
+        repoFullName: 'team/r0',
+      });
+      getWebhookStore().put({
+        deliveryId: 'cap-r1-extra',
+        event: 'push',
+        payload: {},
+        receivedAt: new Date().toISOString(),
+        repoFullName: 'team/r1',
+      });
+
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?topRepos=3',
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Top 3 by count: r0 (3), r1 (2), one of r2..r5 (1, picked by
+      // localeCompare tiebreak -> 'team/r2').
+      expect(body.byRepo['team/r0']).toBe(3);
+      expect(body.byRepo['team/r1']).toBe(2);
+      expect(body.byRepo['team/r2']).toBe(1);
+      // The remaining three single-hit repos collapse into (other).
+      expect(body.byRepo['(other)']).toBe(3);
+      // Trimmed map still reconciles with total.
+      const sum = Object.values(body.byRepo as Record<string, number>).reduce(
+        (a, b) => a + b,
+        0,
+      );
+      expect(sum).toBe(body.total);
+      expect(body.appliedFilters.topRepos).toBe(3);
+    });
+
+    it('clamps topRepos into [1, 200] when a malformed value lands on the wire', async () => {
+      _resetWebhookStoreForTests();
+      const tooHigh = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?topRepos=99999',
+      });
+      expect(tooHigh.json().appliedFilters.topRepos).toBe(200);
+      const tooLow = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?topRepos=0',
+      });
+      expect(tooLow.json().appliedFilters.topRepos).toBe(50);
+    });
+
+    it('byRepo honors the repoFullName filter (only the matched repo present)', async () => {
+      _resetWebhookStoreForTests();
+      const now = Date.now();
+      getWebhookStore().put({
+        deliveryId: 'f-1',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: new Date(now - 60_000).toISOString(),
+        repoFullName: 'team/alpha',
+      });
+      getWebhookStore().put({
+        deliveryId: 'f-2',
+        event: 'pull_request',
+        action: 'opened',
+        payload: {},
+        receivedAt: new Date(now - 60_000).toISOString(),
+        repoFullName: 'team/beta',
+      });
+      const res = await app.inject({
+        method: 'GET',
+        url: '/api/internal/webhook/stats?repo=team/alpha',
+      });
+      const body = res.json();
+      expect(body.byRepo).toEqual({ 'team/alpha': 1 });
+      expect(body.total).toBe(1);
+    });
+
+    it('returns an empty byRepo map when the store is empty', async () => {
+      _resetWebhookStoreForTests();
+      const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/stats' });
+      const body = res.json();
+      expect(body.byRepo).toEqual({});
+    });
+  });
 });
