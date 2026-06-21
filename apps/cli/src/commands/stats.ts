@@ -1,11 +1,11 @@
 import { readFile } from 'node:fs/promises';
 
 import kleur from 'kleur';
+import { findingDigest, type FindingDigest } from '@clawreview/aggregator';
 import {
   SEVERITY_LABELS,
   SEVERITY_ORDER,
   type Finding,
-  type FindingCategory,
   type Severity,
 } from '@clawreview/types';
 
@@ -29,14 +29,28 @@ interface StatsReport {
 
 /**
  * Axes the user can pass to `--by`. `severity` mirrors the default
- * grouping in the text report (kept for symmetry); `agent` and
- * `category` are new ad-hoc slices that operators have been asking
- * for so they can answer "which agent produced most of the noise?" or
- * "what category did we land in most this week?" without running the
- * findings through jq.
+ * grouping in the text report (kept for symmetry); `agent` /
+ * `category` / `file` are ad-hoc slices that operators have been
+ * asking for so they can answer "which agent produced most of the
+ * noise?" / "what category did we land in most this week?" /
+ * "which file is the hotspot today?" without running the findings
+ * through jq.
  */
-export type StatsGroupBy = 'severity' | 'agent' | 'category';
-const VALID_GROUPINGS: readonly StatsGroupBy[] = ['severity', 'agent', 'category'] as const;
+export type StatsGroupBy = 'severity' | 'agent' | 'category' | 'file';
+const VALID_GROUPINGS: readonly StatsGroupBy[] = [
+  'severity',
+  'agent',
+  'category',
+  'file',
+] as const;
+
+/**
+ * Default cap on the rendered top-files block in text output.
+ * Matches the historical hard-coded value so existing scripts keep
+ * seeing the same five rows when they omit `--top-files`.
+ */
+const DEFAULT_TOP_FILES = 5;
+const MAX_TOP_FILES = 200;
 
 /**
  * `clawreview stats` reads a previously generated JSON report (the output of
@@ -53,14 +67,23 @@ const VALID_GROUPINGS: readonly StatsGroupBy[] = ['severity', 'agent', 'category
  *   clawreview run --format json | clawreview stats --fail-on critical
  *
  * `--by <axis>` switches the primary grouping in the rendered output
- * from severity (the default) to either `agent` or `category` so an
- * operator can answer "who produced the noise?" without jq. `--by`
- * does NOT affect `--fail-on` -- the gate still keys on severity.
+ * from severity (the default) to `agent`, `category`, or `file` so an
+ * operator can answer "who produced the noise?" / "where is the
+ * noise?" without jq. `--by` does NOT affect `--fail-on` -- the gate
+ * still keys on severity.
+ *
+ * `--top-files <n>` caps the rendered top-files block in text output
+ * AND the `topFiles` array in `--format json`. Clamped into [1, 200]
+ * so a misconfigured caller cannot disable or blow up the render.
+ * When `--by file` is the primary axis, the cap also drives how many
+ * file rows the by-file block prints.
  *
  * `--format json` emits a machine-readable summary instead of the
- * text block (`{ totals, byAgent, byCategory, topFiles, totalCostUsd }`)
- * so dashboards and CI bots can consume the same numbers without
- * scraping the human-formatted output.
+ * text block (`{ totals, byAgent, byCategory, byFile, topFiles,
+ * totalCostUsd }`) so dashboards and CI bots can consume the same
+ * numbers without scraping the human-formatted output. Internally the
+ * counts now come from `findingDigest()` so this CLI, the worker, and
+ * the PR comment header all agree on the same single-pass summary.
  */
 export async function runStats(args: ParsedArgs): Promise<void> {
   const inputPath = args.flags.input ? String(args.flags.input) : '';
@@ -87,6 +110,24 @@ export async function runStats(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  // `--top-files <n>` caps both the text top-files block and the json
+  // topFiles array. Default 5 (historical); clamped into [1, 200] so a
+  // misconfigured caller can't disable or blow it up. A non-numeric
+  // value (e.g. "bogus") falls back to the default; a finite numeric
+  // value (including 0 and negatives) clamps into the allowed range.
+  const topFilesRaw = args.flags['top-files'];
+  let topFiles: number;
+  if (topFilesRaw === undefined) {
+    topFiles = DEFAULT_TOP_FILES;
+  } else {
+    const parsedNum = Number(topFilesRaw);
+    if (!Number.isFinite(parsedNum)) {
+      topFiles = DEFAULT_TOP_FILES;
+    } else {
+      topFiles = Math.max(1, Math.min(MAX_TOP_FILES, Math.floor(parsedNum)));
+    }
+  }
+
   let raw: string;
   if (inputPath) {
     raw = await readFile(inputPath, 'utf8');
@@ -109,22 +150,22 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   }
 
   const findings = parsed.aggregated?.findings ?? [];
-  const totals = computeTotals(findings, parsed.aggregated?.totals);
-  const byAgent = groupCount(findings, (f) => f.agent);
-  const byCategory = groupCount(findings, (f) => f.category);
+  // findingDigest is the canonical single-pass summarizer (lives in
+  // @clawreview/aggregator); the worker and PR comment header use it
+  // too, so this CLI shows exactly the same numbers without inlining
+  // its own loops.
+  const digest = findingDigest(findings, { topFiles });
+  const totals = computeTotals(findings, parsed.aggregated?.totals, digest);
 
   if (format === 'json') {
-    // Top-files block is rendered identically in text and json so a
-    // dashboard can render the same hotspot list the operator sees.
-    const byFile = groupCount(findings, (f) => f.file);
-    const topFiles = sortedEntries(byFile).slice(0, 10).map(([file, count]) => ({ file, count }));
     process.stdout.write(
       `${JSON.stringify(
         {
           totals,
-          byAgent,
-          byCategory,
-          topFiles,
+          byAgent: digest.byAgent,
+          byCategory: digest.byCategory,
+          byFile: digest.byFile,
+          topFiles: digest.topFiles,
           totalCostUsd: parsed.summary?.totalCostUsd,
           groupBy,
         },
@@ -145,19 +186,27 @@ export async function runStats(args: ParsedArgs): Promise<void> {
 
   // Primary block depends on --by. Severity stays first by default
   // because it's the most actionable grouping (it's also what
-  // --fail-on keys on). agent / category swap in their own block when
-  // the user asks for them.
+  // --fail-on keys on). agent / category / file swap in their own
+  // block when the user asks for them.
   if (groupBy === 'severity') {
     renderSeverityBlock(lines, totals, c);
-    renderAgentCategoryBlocks(lines, byAgent, byCategory);
+    renderAgentCategoryBlocks(lines, digest.byAgent, digest.byCategory);
   } else if (groupBy === 'agent') {
-    renderGroupBlock(lines, 'By agent', byAgent);
+    renderGroupBlock(lines, 'By agent', digest.byAgent);
     renderSeverityBlock(lines, totals, c);
-    renderGroupBlock(lines, 'By category', byCategory);
+    renderGroupBlock(lines, 'By category', digest.byCategory);
+  } else if (groupBy === 'category') {
+    renderGroupBlock(lines, 'By category', digest.byCategory);
+    renderSeverityBlock(lines, totals, c);
+    renderGroupBlock(lines, 'By agent', digest.byAgent);
   } else {
-    renderGroupBlock(lines, 'By category', byCategory);
+    // --by file: lead with the per-file block capped at top-files,
+    // then severity, then agent/category as secondaries so the
+    // operator still sees the breakdown without re-running with a
+    // different --by.
+    renderTopFilesAsBlock(lines, digest, topFiles);
     renderSeverityBlock(lines, totals, c);
-    renderGroupBlock(lines, 'By agent', byAgent);
+    renderAgentCategoryBlocks(lines, digest.byAgent, digest.byCategory);
   }
 
   // Per-agent EXECUTION breakdown is distinct from the per-agent
@@ -177,13 +226,14 @@ export async function runStats(args: ParsedArgs): Promise<void> {
     lines.push('');
   }
 
-  // Top files by finding count, so reviewers see hotspots immediately.
-  const byFile = groupCount(findings, (f) => f.file);
-  const topFiles = sortedEntries(byFile).slice(0, 5);
-  if (topFiles.length > 0) {
+  // Top files by finding count. When --by file is already the primary
+  // block we skip the secondary print (the same numbers would be
+  // duplicated immediately below the header) so the text output stays
+  // tight.
+  if (groupBy !== 'file' && digest.topFiles.length > 0) {
     lines.push('Top files:');
-    for (const [file, n] of topFiles) {
-      lines.push(`  ${String(n).padStart(4)}  ${file}`);
+    for (const { file, count } of digest.topFiles) {
+      lines.push(`  ${String(count).padStart(4)}  ${file}`);
     }
     lines.push('');
   }
@@ -196,19 +246,6 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   process.stdout.write(lines.join('\n') + '\n');
 
   applyFailOn(failOn, totals);
-}
-
-/**
- * Group findings by an arbitrary key function and return the counts.
- * Kept generic so adding a new --by axis is one line in the dispatch.
- */
-function groupCount<T extends string>(findings: Finding[], key: (f: Finding) => T): Record<T, number> {
-  const out: Record<string, number> = {};
-  for (const f of findings) {
-    const k = key(f);
-    out[k] = (out[k] ?? 0) + 1;
-  }
-  return out as Record<T, number>;
 }
 
 /** Sort a count map by descending count, then by key for deterministic output. */
@@ -248,10 +285,39 @@ function renderGroupBlock(
   lines.push('');
 }
 
+/**
+ * Render the `--by file` primary block. Reuses the digest's already-
+ * sorted topFiles array (sliced to the requested cap) so this view and
+ * the standalone Top files secondary block stay byte-for-byte
+ * consistent.
+ */
+function renderTopFilesAsBlock(
+  lines: string[],
+  digest: FindingDigest,
+  topFiles: number,
+): void {
+  if (digest.topFiles.length === 0) return;
+  const totalFiles = Object.keys(digest.byFile).length;
+  const shown = digest.topFiles.length;
+  // Header includes "of N" when we trimmed, so the operator notices
+  // that --top-files was effective.
+  const suffix = totalFiles > shown ? ` (top ${shown} of ${totalFiles})` : '';
+  lines.push(`By file${suffix}:`);
+  const widest = Math.max(8, ...digest.topFiles.map(({ file }) => file.length));
+  for (const { file, count } of digest.topFiles) {
+    lines.push(`  ${file.padEnd(widest)} ${String(count).padStart(4)}`);
+  }
+  lines.push('');
+  // Silence linter: parameter retained for symmetry with other render
+  // helpers and so a future refactor can pass the cap through to a
+  // pagination hint without changing call sites.
+  void topFiles;
+}
+
 function renderAgentCategoryBlocks(
   lines: string[],
   byAgent: Record<string, number>,
-  byCategory: Record<FindingCategory, number>,
+  byCategory: Partial<Record<string, number>>,
 ): void {
   // Compact secondary blocks under the severity-default rendering, so a
   // user who does NOT pass --by still gets a quick agent / category
@@ -265,7 +331,7 @@ function renderAgentCategoryBlocks(
     }
     lines.push('');
   }
-  const catEntries = sortedEntries(byCategory);
+  const catEntries = sortedEntries(byCategory as Record<string, number>);
   if (catEntries.length > 0) {
     lines.push('By category:');
     const widest = Math.max(8, ...catEntries.map(([k]) => k.length));
@@ -300,18 +366,27 @@ function applyFailOn(
 
 function computeTotals(
   findings: Finding[],
-  reported?: Partial<Record<Severity, number>>,
+  reported: Partial<Record<Severity, number>> | undefined,
+  digest: FindingDigest,
 ): Record<Severity, number> {
-  const totals: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, nit: 0 };
-  // Prefer reported totals if present and consistent, else recompute.
+  // Prefer reported totals if present and consistent, else use the
+  // digest's totalsBySeverity (which is what every other consumer
+  // sees, so the CLI and dashboard agree byte-for-byte).
   if (reported && Object.keys(reported).length > 0) {
+    const totals: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, nit: 0 };
     for (const sev of Object.keys(totals) as Severity[]) {
       totals[sev] = Number(reported[sev] ?? 0);
     }
     return totals;
   }
-  for (const f of findings) totals[f.severity] += 1;
-  return totals;
+  // Defensive copy so a caller that mutates the returned record (which
+  // applyFailOn doesn't, but a future caller might) cannot reach back
+  // into the digest. `findings` retained so a future caller that wants
+  // to recompute totals from scratch (e.g. when the digest carried a
+  // different threshold than the reported totals) still has the
+  // primary source on hand.
+  void findings;
+  return { ...digest.totalsBySeverity };
 }
 
 function colorFor(c: typeof kleur, sev: Severity) {

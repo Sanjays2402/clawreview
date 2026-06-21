@@ -350,4 +350,152 @@ describe('runStats', () => {
       expect(err()).toContain('--format must be text|json');
     });
   });
+
+  describe('--by file + --top-files', () => {
+    const FILES_REPORT = {
+      aggregated: {
+        findings: [
+          // 3 in a.ts, 2 in b.ts, 1 each in c-f.
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/a.ts', startLine: 10, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/a.ts', startLine: 20, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/a.ts', startLine: 30, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/b.ts', startLine: 10, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/b.ts', startLine: 20, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/c.ts', startLine: 10, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/d.ts', startLine: 10, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/e.ts', startLine: 10, confidence: 0.5, tags: [] },
+          { agent: 'a', category: 'style', severity: 'medium', title: 't', rationale: 'r', file: 'src/f.ts', startLine: 10, confidence: 0.5, tags: [] },
+        ],
+      },
+    };
+
+    it('leads with the By file block when --by file', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'file', 'no-color': true },
+      });
+      const o = out();
+      const idxByFile = o.indexOf('By file');
+      const idxBySeverity = o.indexOf('Findings by severity:');
+      expect(idxByFile).toBeGreaterThan(-1);
+      expect(idxBySeverity).toBeGreaterThan(-1);
+      expect(idxByFile).toBeLessThan(idxBySeverity);
+      // Files sorted by descending count; a.ts (3) then b.ts (2) then the rest.
+      expect(o).toMatch(/src\/a\.ts\s+3/);
+      expect(o).toMatch(/src\/b\.ts\s+2/);
+    });
+
+    it('shows the "top N of M" suffix on the By file header when --top-files trims', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'file', 'top-files': 3, 'no-color': true },
+      });
+      const o = out();
+      // 6 distinct files; --top-files 3 => header should mention "top 3 of 6".
+      expect(o).toMatch(/By file \(top 3 of 6\):/);
+      // Only the first three rows render (a, b, c).
+      expect(o).toContain('src/a.ts');
+      expect(o).toContain('src/b.ts');
+      expect(o).toContain('src/c.ts');
+      expect(o).not.toContain('src/d.ts');
+      expect(o).not.toContain('src/e.ts');
+      expect(o).not.toContain('src/f.ts');
+    });
+
+    it('skips the secondary Top files block when --by file is the primary', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'file', 'no-color': true },
+      });
+      const o = out();
+      // The "Top files:" secondary heading must NOT appear -- the same
+      // numbers already live in the "By file" primary block above.
+      expect(o.includes('Top files:')).toBe(false);
+    });
+
+    it('keeps the secondary Top files block when --by is NOT file', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, 'no-color': true },
+      });
+      const o = out();
+      expect(o).toContain('Top files:');
+    });
+
+    it('--top-files clamps to [1, 200] when given garbage', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+
+      // Zero collapses to 1.
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-files': 0, 'no-color': true },
+      });
+      let parsed = JSON.parse(out());
+      expect(parsed.topFiles).toHaveLength(1);
+
+      stdoutSpy.mockClear();
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-files': 10_000, 'no-color': true },
+      });
+      parsed = JSON.parse(out());
+      // 6 distinct files, hard ceiling 200 => 6.
+      expect(parsed.topFiles).toHaveLength(6);
+
+      stdoutSpy.mockClear();
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-files': 'bogus', 'no-color': true },
+      });
+      parsed = JSON.parse(out());
+      // Bad value falls back to default 5.
+      expect(parsed.topFiles).toHaveLength(5);
+    });
+
+    it('rejects --by file when paired with an unknown axis sentinel', async () => {
+      // Defensive: ensure VALID_GROUPINGS still rejects junk axes.
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'directory', 'no-color': true },
+      });
+      expect(process.exitCode).toBe(2);
+      expect(err()).toContain('--by must be one of severity, agent, category, file');
+    });
+
+    it('--format json exposes byFile alongside the other digest shapes', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILES_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-files': 2, 'no-color': true },
+      });
+      const parsed = JSON.parse(out());
+      expect(parsed.byFile['src/a.ts']).toBe(3);
+      expect(parsed.byFile['src/b.ts']).toBe(2);
+      // topFiles still honors the cap and reports only the top-2.
+      expect(parsed.topFiles).toHaveLength(2);
+      expect(parsed.topFiles[0]).toEqual({ file: 'src/a.ts', count: 3 });
+      expect(parsed.topFiles[1]).toEqual({ file: 'src/b.ts', count: 2 });
+    });
+  });
 });

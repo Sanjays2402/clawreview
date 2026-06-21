@@ -7,7 +7,7 @@ Usage:
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
-  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category] [--format text|json]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
@@ -30,7 +30,8 @@ Flags:
   --root <dir>       lint-config / presets list: root directory to scan (default: cwd).
   --pattern <name>   lint-config: filenames to match (default: .clawreview.yml). Comma-separated
                      for multiple, e.g. --pattern .clawreview.yml,clawreview.config.yml.
-  --by <axis>        stats: primary grouping axis: severity (default), agent, or category.
+  --by <axis>        stats: primary grouping axis: severity (default), agent, category, or file.
+  --top-files <n>    stats: cap on the top-files block / topFiles JSON array (default 5, max 200).
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
@@ -54,6 +55,7 @@ Examples:
   clawreview presets show web-strict --format yaml >> .clawreview.yml
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
+  clawreview run --format json | clawreview stats --by file --top-files 10
   clawreview run --format json | clawreview stats --format json --by category | jq '.byCategory'
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new
