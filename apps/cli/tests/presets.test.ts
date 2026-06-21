@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from '../src/commands/presets.js';
 import {
   filterPresetDelta,
+  filterPresetDeltaExcluding,
   ONLY_FIELDS_EMPTY_ENTRY,
   parsePresetOnlyFields,
 } from '../src/commands/presets.js';
@@ -1022,6 +1023,211 @@ describe('filterPresetDelta + parsePresetOnlyFields (pure)', () => {
       only_in_b: { c: 4 },
     };
     const out = filterPresetDelta(delta, new Set());
+    expect(out.changed).toEqual({});
+    expect(out.only_in_a).toEqual({});
+    expect(out.only_in_b).toEqual({});
+  });
+});
+
+// Tick 12: --exclude-fields is the mirror of --only-fields. Same
+// parser, opposite set semantics (drop keys IN the set). The two are
+// mutually exclusive at the CLI layer (combining them would
+// double-filter and surprise the operator).
+describe('clawreview presets diff --exclude-fields (tick 12)', () => {
+  it('drops keys IN the exclude list from changed / only_in_a / only_in_b (json)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'comment_style: inline', ''].join('\n'),
+      'utf8',
+    );
+    // Without the filter the diff carries severity_threshold (changed),
+    // min_confidence (only_in_a), comment_style (only_in_b).
+    // Exclude severity_threshold; the other two survive.
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'exclude-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // severity_threshold is excluded -> no `changed.severity_threshold`.
+    expect(parsed.changed).toEqual({});
+    // The other two are surfaced normally.
+    expect(parsed.only_in_a.min_confidence).toBeDefined();
+    expect(parsed.only_in_b.comment_style).toBeDefined();
+    expect(parsed.excludeFields).toEqual(['severity_threshold']);
+    // onlyFields stays null (the mutex check would have rejected the
+    // combination, but the JSON surface always carries both keys).
+    expect(parsed.onlyFields).toBeNull();
+  });
+
+  it('exits 0 when --exclude-fields hides every visible difference', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // The only difference is severity_threshold; excluding it leaves
+    // no visible delta. The CI gate must NOT trip (exit 0).
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'exclude-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.hasChanges).toBe(false);
+    expect(parsed.excludeFields).toEqual(['severity_threshold']);
+  });
+
+  it('text renderer annotates the exclude filter + uses the "outside the excluded fields" hint', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'text',
+      'exclude-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/exclude-fields: severity_threshold/);
+    // Distinct phrasing from the unfiltered "no differences" so the
+    // operator can tell drift was actually hidden by the filter.
+    expect(r.stdout).toContain('(no differences outside the excluded fields)');
+  });
+
+  it('yaml renderer adds an `# exclude-fields:` header comment when scoped', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'yaml',
+      'exclude-fields': 'min_confidence',
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('# exclude-fields: min_confidence');
+    // The non-excluded field still surfaces in the body.
+    expect(r.stdout).toContain('severity_threshold');
+  });
+
+  it('exits 2 when --exclude-fields contains an empty intermediate entry', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'permissive'], {
+      'exclude-fields': 'a,,b',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/--exclude-fields contains an empty entry/);
+  });
+
+  it('exits 2 when --only-fields and --exclude-fields are combined (mutex)', async () => {
+    const dir = await tmpDir();
+    const r = await runDiff(dir, ['strict', 'permissive'], {
+      'only-fields': 'severity_threshold',
+      'exclude-fields': 'min_confidence',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/mutually exclusive/);
+  });
+
+  it('de-dupes repeated names in --exclude-fields (a,a,b -> a,b)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.5', ''].join('\n'),
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      'exclude-fields': 'severity_threshold,severity_threshold,min_confidence',
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    // De-dup: only two distinct names land in the surfaced filter.
+    expect(parsed.excludeFields).toEqual(['min_confidence', 'severity_threshold']);
+    expect(parsed.hasChanges).toBe(false);
+  });
+});
+
+describe('filterPresetDeltaExcluding (pure)', () => {
+  it('returns the input unchanged when fields is null', () => {
+    const delta = {
+      changed: { x: { a: 1, b: 2 } },
+      only_in_a: { y: 3 },
+      only_in_b: { z: 4 },
+    };
+    const out = filterPresetDeltaExcluding(delta, null);
+    expect(out).toBe(delta);
+  });
+
+  it('drops keys IN the exclude set from all three buckets', () => {
+    const delta = {
+      changed: { keep: { a: 1, b: 2 }, drop: { a: 3, b: 4 } },
+      only_in_a: { keep: 'x', drop: 'y' },
+      only_in_b: { drop: 'z', keep2: 'w' },
+    };
+    const out = filterPresetDeltaExcluding(delta, new Set(['drop']));
+    expect(out.changed).toEqual({ keep: { a: 1, b: 2 } });
+    expect(out.only_in_a).toEqual({ keep: 'x' });
+    expect(out.only_in_b).toEqual({ keep2: 'w' });
+    // Original delta must be unchanged (no mutation).
+    expect(delta.changed).toHaveProperty('drop');
+  });
+
+  it('empty exclude set is a no-op (everything survives)', () => {
+    const delta = {
+      changed: { a: { a: 1, b: 2 } },
+      only_in_a: { b: 3 },
+      only_in_b: { c: 4 },
+    };
+    const out = filterPresetDeltaExcluding(delta, new Set());
+    // Empty Set means "exclude nothing" -> the input shape survives.
+    expect(out.changed).toEqual(delta.changed);
+    expect(out.only_in_a).toEqual(delta.only_in_a);
+    expect(out.only_in_b).toEqual(delta.only_in_b);
+  });
+
+  it('excluding every key yields an empty delta', () => {
+    const delta = {
+      changed: { a: { a: 1, b: 2 } },
+      only_in_a: { b: 3 },
+      only_in_b: { c: 4 },
+    };
+    const out = filterPresetDeltaExcluding(delta, new Set(['a', 'b', 'c']));
     expect(out.changed).toEqual({});
     expect(out.only_in_a).toEqual({});
     expect(out.only_in_b).toEqual({});

@@ -671,6 +671,38 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     process.exitCode = 2;
     return;
   }
+  // Optional --exclude-fields filter. Mirror of --only-fields: drops
+  // keys from the diff instead of restricting to them. Use case: a
+  // wide preset rebase where the operator wants "everything EXCEPT
+  // these noisy fields" -- usually fields known to drift for unrelated
+  // reasons (e.g. `version`, `last_updated`). Same parser shape so an
+  // empty intermediate entry (`a,,b`) rejects the chain rather than
+  // silently widening it.
+  //
+  // Mutually exclusive with --only-fields: combining the two would
+  // double-filter (only -> exclude) and silently produce a surprising
+  // result; better to refuse loudly and let the operator pick one.
+  const excludeFieldsRaw =
+    typeof args.flags['exclude-fields'] === 'string'
+      ? (args.flags['exclude-fields'] as string)
+      : undefined;
+  const excludeFields = parsePresetOnlyFields(excludeFieldsRaw);
+  if (excludeFields === ONLY_FIELDS_EMPTY_ENTRY) {
+    process.stderr.write(
+      `clawreview presets diff: --exclude-fields contains an empty entry ` +
+        `('${excludeFieldsRaw}')\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (onlyFields !== null && excludeFields !== null) {
+    process.stderr.write(
+      `clawreview presets diff: --only-fields and --exclude-fields are ` +
+        `mutually exclusive; pick one\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
   // `onlyFields` is now either null (no filter) or a Set<string>. Both
   // shapes pass into filterPresetDelta unchanged.
 
@@ -726,7 +758,20 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  const delta = filterPresetDelta(computePresetDelta(bodyA, bodyB), onlyFields);
+  const baseDelta = computePresetDelta(bodyA, bodyB);
+  // Apply at most one of --only-fields / --exclude-fields (the mutex
+  // check earlier already rejected the combo). The two filters share
+  // the same parser; the difference is set membership semantics:
+  //   --only-fields a,b    -> keep ONLY a and b
+  //   --exclude-fields a,b -> keep everything EXCEPT a and b
+  let delta: PresetDelta;
+  if (onlyFields !== null) {
+    delta = filterPresetDelta(baseDelta, onlyFields);
+  } else if (excludeFields !== null) {
+    delta = filterPresetDeltaExcluding(baseDelta, excludeFields);
+  } else {
+    delta = baseDelta;
+  }
 
   if (format === 'json') {
     process.stdout.write(
@@ -736,8 +781,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
           chainB,
           // Surface the active filter so a downstream tool can verify
           // the diff was scoped (or not). Sorted for deterministic
-          // JSON output.
+          // JSON output. Exactly one of `onlyFields` / `excludeFields`
+          // can be non-null (the mutex check earlier guaranteed it);
+          // both being null means the unfiltered delta.
           onlyFields: onlyFields === null ? null : [...onlyFields].sort(),
+          excludeFields: excludeFields === null ? null : [...excludeFields].sort(),
           ...delta,
           hasChanges: hasDelta(delta),
         },
@@ -748,8 +796,8 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   } else if (format === 'yaml') {
     // Header captures the two chains as comments so a YAML consumer
     // still has the provenance even if it strips the JSON envelope.
-    // When --only-fields was applied, also annotate it so a reviewer
-    // can tell at a glance that the YAML body is scoped.
+    // When --only-fields / --exclude-fields was applied, also annotate
+    // it so a reviewer can tell at a glance that the YAML body is scoped.
     const headerLines = [
       `# clawreview presets diff`,
       `# a: ${chainA.join(' -> ')}`,
@@ -757,6 +805,9 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     ];
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
+    }
+    if (excludeFields !== null) {
+      headerLines.push(`# exclude-fields: ${[...excludeFields].sort().join(', ')}`);
     }
     const header = headerLines.join('\n');
     const yamlBody = YAML.stringify(
@@ -780,6 +831,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
         `${kleur.bold('only-fields')}: ${[...onlyFields].sort().join(', ')}\n`,
       );
     }
+    if (excludeFields !== null) {
+      process.stdout.write(
+        `${kleur.bold('exclude-fields')}: ${[...excludeFields].sort().join(', ')}\n`,
+      );
+    }
     process.stdout.write('\n');
     if (!hasDelta(delta)) {
       // Distinguish "filter excluded everything" from "no real diff"
@@ -787,6 +843,8 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       // misread the silence as "the chains agree everywhere".
       if (onlyFields !== null) {
         process.stdout.write(kleur.gray('  (no differences in the filtered fields)\n'));
+      } else if (excludeFields !== null) {
+        process.stdout.write(kleur.gray('  (no differences outside the excluded fields)\n'));
       } else {
         process.stdout.write(kleur.gray('  (no differences)\n'));
       }
@@ -816,8 +874,9 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
 
   // Exit code 3 on non-empty delta so CI can gate on "did anything
   // change?" without parsing the output. Exit 0 when bodies match.
-  // The filter is honored: a delta hidden by `--only-fields` exits 0
-  // because the operator declared those changes out of scope.
+  // The filter is honored: a delta hidden by `--only-fields` /
+  // `--exclude-fields` exits 0 because the operator declared those
+  // changes out of scope.
   process.exitCode = hasDelta(delta) ? 3 : 0;
 }
 
@@ -958,6 +1017,47 @@ export function filterPresetDelta(
   }
   for (const k of Object.keys(delta.only_in_b)) {
     if (fields.has(k)) out.only_in_b[k] = delta.only_in_b[k];
+  }
+  return out;
+}
+
+/**
+ * Drop entries from a `PresetDelta` whose key IS in `fields`. Mirror
+ * of `filterPresetDelta`: same shape, opposite set membership. Returns
+ * a NEW delta object so the caller's input is never mutated.
+ *
+ * When `fields` is null (no filter set), returns the input unchanged.
+ *
+ * Use case: an operator preparing a wide preset rebase wants to drop
+ * a handful of noisy fields known to drift for unrelated reasons
+ * (e.g. `version`, `last_updated`) so the migration ticket's diff
+ * stays focused on the substantive changes.
+ *
+ * Mutually exclusive with `filterPresetDelta` at the CLI layer (the
+ * `runPresetsDiff` mutex check refuses --only-fields + --exclude-fields
+ * together) so the two helpers never compose in practice. Keeping
+ * them as separate pure functions means a future tick can add a
+ * third filter shape (e.g. `--changed-only`) without re-walking the
+ * call site's branch logic.
+ *
+ * Pure / exported so the filter contract (sparse maps, no-op on null
+ * filter, preserves shape, immutable input) is unit-testable
+ * independently of the CLI.
+ */
+export function filterPresetDeltaExcluding(
+  delta: PresetDelta,
+  fields: Set<string> | null,
+): PresetDelta {
+  if (fields === null) return delta;
+  const out: PresetDelta = { changed: {}, only_in_a: {}, only_in_b: {} };
+  for (const k of Object.keys(delta.changed)) {
+    if (!fields.has(k)) out.changed[k] = delta.changed[k]!;
+  }
+  for (const k of Object.keys(delta.only_in_a)) {
+    if (!fields.has(k)) out.only_in_a[k] = delta.only_in_a[k];
+  }
+  for (const k of Object.keys(delta.only_in_b)) {
+    if (!fields.has(k)) out.only_in_b[k] = delta.only_in_b[k];
   }
   return out;
 }
