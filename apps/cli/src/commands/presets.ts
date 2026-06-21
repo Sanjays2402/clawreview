@@ -1,5 +1,5 @@
-import { readFile, readdir } from 'node:fs/promises';
-import { extname, resolve } from 'node:path';
+import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { dirname, extname, isAbsolute, resolve } from 'node:path';
 import { cwd as getCwd } from 'node:process';
 
 import kleur from 'kleur';
@@ -758,6 +758,31 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  // Optional --output: write the JSON / YAML body to a file instead
+  // of stdout. Use case: a migration ticket flow where the diff body
+  // needs to land on disk for a follow-up commit. The text format
+  // doesn't make a useful artifact (it's color-tagged for terminal
+  // skimming, not for diffing), so --output requires --format json
+  // or --format yaml; --format text + --output exits 2 up front.
+  //
+  // Path resolution: relative paths land under --root (or cwd when
+  // --root is absent) so a caller running `--root project/ --output
+  // diff.json` ends up with `project/diff.json` instead of a file in
+  // the caller's cwd. Absolute paths bypass the resolve entirely.
+  const outputRaw = args.flags.output;
+  const outputPath =
+    typeof outputRaw === 'string' && outputRaw.length > 0
+      ? resolvePresetDiffOutputPath(outputRaw, root)
+      : null;
+  if (outputPath !== null && format === 'text') {
+    process.stderr.write(
+      `clawreview presets diff: --output requires --format json or --format yaml ` +
+        `(text output is for terminal display, not artifacts)\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
   const baseDelta = computePresetDelta(bodyA, bodyB);
   // Apply at most one of --only-fields / --exclude-fields (the mutex
   // check earlier already rejected the combo). The two filters share
@@ -774,25 +799,28 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   }
 
   if (format === 'json') {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          chainA,
-          chainB,
-          // Surface the active filter so a downstream tool can verify
-          // the diff was scoped (or not). Sorted for deterministic
-          // JSON output. Exactly one of `onlyFields` / `excludeFields`
-          // can be non-null (the mutex check earlier guaranteed it);
-          // both being null means the unfiltered delta.
-          onlyFields: onlyFields === null ? null : [...onlyFields].sort(),
-          excludeFields: excludeFields === null ? null : [...excludeFields].sort(),
-          ...delta,
-          hasChanges: hasDelta(delta),
-        },
-        null,
-        2,
-      )}\n`,
-    );
+    const jsonBody = `${JSON.stringify(
+      {
+        chainA,
+        chainB,
+        // Surface the active filter so a downstream tool can verify
+        // the diff was scoped (or not). Sorted for deterministic
+        // JSON output. Exactly one of `onlyFields` / `excludeFields`
+        // can be non-null (the mutex check earlier guaranteed it);
+        // both being null means the unfiltered delta.
+        onlyFields: onlyFields === null ? null : [...onlyFields].sort(),
+        excludeFields: excludeFields === null ? null : [...excludeFields].sort(),
+        ...delta,
+        hasChanges: hasDelta(delta),
+      },
+      null,
+      2,
+    )}\n`;
+    if (outputPath !== null) {
+      await writePresetDiffOutput(outputPath, jsonBody);
+    } else {
+      process.stdout.write(jsonBody);
+    }
   } else if (format === 'yaml') {
     // Header captures the two chains as comments so a YAML consumer
     // still has the provenance even if it strips the JSON envelope.
@@ -818,7 +846,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       },
       { lineWidth: 0 },
     );
-    process.stdout.write(`${header}\n${yamlBody}`);
+    const fullBody = `${header}\n${yamlBody}`;
+    if (outputPath !== null) {
+      await writePresetDiffOutput(outputPath, fullBody);
+    } else {
+      process.stdout.write(fullBody);
+    }
   } else {
     // Text: per-field render. Empty diff -> friendly "no differences"
     // so the operator doesn't think the command silently no-op'd.
@@ -1060,6 +1093,50 @@ export function filterPresetDeltaExcluding(
     if (!fields.has(k)) out.only_in_b[k] = delta.only_in_b[k];
   }
   return out;
+}
+
+/**
+ * Resolve a caller-supplied --output path against `--root` (or cwd
+ * when --root is absent) when the path is relative. Absolute paths
+ * are kept as-is. Pure / exported so the path-resolution contract
+ * (relative-to-root vs absolute) is unit-testable independently of
+ * the file write.
+ *
+ * --root context: `runPresetsDiff` resolves local presets under
+ * `<root>/.clawreview/presets/*.yml`, so it's natural for a caller
+ * specifying both flags to expect a relative --output to land near
+ * that same project root. Without this resolution, the relative
+ * path would resolve against the operator's cwd which may not
+ * match the project root in a CI checkout.
+ */
+export function resolvePresetDiffOutputPath(outputPath: string, root: string): string {
+  return isAbsolute(outputPath) ? outputPath : resolve(root, outputPath);
+}
+
+/**
+ * Write the rendered diff body to `outputPath` and surface a single
+ * stderr confirmation so the operator can tell at a glance the file
+ * landed. The path is resolved relative to the caller's cwd (the
+ * runPresetsDiff layer already passed an absolute path when --root
+ * applies); we just create any missing intermediate directories so
+ * `--output reports/2026-06-21/diff.json` works without a separate
+ * `mkdir -p`.
+ *
+ * Failures (EACCES, ENOSPC, ...) bubble as exit-2 with the underlying
+ * error message so a CI gate using `clawreview presets diff
+ * --output ...` sees a useful diagnostic. We don't catch and swallow
+ * because the operator explicitly asked for an artifact -- silently
+ * dropping it would be worse than the loud failure.
+ */
+async function writePresetDiffOutput(outputPath: string, body: string): Promise<void> {
+  const { mkdir } = await import('node:fs/promises');
+  const targetDir = dirname(outputPath);
+  // mkdir -p; harmless when the directory already exists.
+  await mkdir(targetDir, { recursive: true });
+  await writeFile(outputPath, body, 'utf8');
+  process.stderr.write(
+    `clawreview presets diff: wrote ${body.length} bytes to ${outputPath}\n`,
+  );
 }
 
 /**

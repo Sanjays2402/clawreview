@@ -10,6 +10,7 @@ import {
   filterPresetDeltaExcluding,
   ONLY_FIELDS_EMPTY_ENTRY,
   parsePresetOnlyFields,
+  resolvePresetDiffOutputPath,
 } from '../src/commands/presets.js';
 
 async function tmpDir(): Promise<string> {
@@ -1231,5 +1232,205 @@ describe('filterPresetDeltaExcluding (pure)', () => {
     expect(out.changed).toEqual({});
     expect(out.only_in_a).toEqual({});
     expect(out.only_in_b).toEqual({});
+  });
+});
+
+// Tick 12: --output writes the JSON / YAML body to a file instead of
+// stdout. For a migration-ticket flow where the diff body lands on
+// disk for a follow-up commit. Requires JSON or YAML; text exits 2.
+describe('clawreview presets diff --output (tick 12)', () => {
+  // Tiny helper: read the freshly-written file back via the same
+  // node:fs/promises API the CLI uses.
+  async function readWritten(path: string): Promise<string> {
+    const { readFile } = await import('node:fs/promises');
+    return readFile(path, 'utf8');
+  }
+
+  it('writes the JSON body to --output instead of stdout', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const outFile = join(dir, 'diff.json');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: outFile,
+    });
+    // Exit code: still 3 because the diff is non-empty; --output
+    // doesn't change the CI gate semantics.
+    expect(r.exitCode).toBe(3);
+    // stdout must be empty -- the body went to the file.
+    expect(r.stdout).toBe('');
+    // stderr surfaces a confirmation so the operator knows the file
+    // landed (the byte count is a quick sanity check).
+    expect(r.stderr).toMatch(/wrote \d+ bytes to /);
+    expect(r.stderr).toContain(outFile);
+    // The file contains the exact same body the stdout path would
+    // have rendered.
+    const written = await readWritten(outFile);
+    const parsed = JSON.parse(written);
+    expect(parsed.chainA).toEqual(['a']);
+    expect(parsed.chainB).toEqual(['b']);
+    expect(parsed.changed.severity_threshold).toBeDefined();
+    expect(parsed.hasChanges).toBe(true);
+  });
+
+  it('writes the YAML body to --output instead of stdout', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const outFile = join(dir, 'diff.yml');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'yaml',
+      output: outFile,
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toBe('');
+    const written = await readWritten(outFile);
+    // YAML body retains the # header comments + the changed: section
+    // exactly as the stdout path would produce.
+    expect(written).toContain('# clawreview presets diff');
+    expect(written).toContain('# a: a');
+    expect(written).toContain('# b: b');
+    expect(written).toContain('changed:');
+    expect(written).toContain('severity_threshold:');
+  });
+
+  it('creates intermediate directories (mkdir -p semantics)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // Nested directory that doesn't exist yet.
+    const outFile = join(dir, 'reports/2026-06-21/diff.json');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: outFile,
+    });
+    expect(r.exitCode).toBe(3);
+    // The intermediate dirs got created and the file is readable.
+    const written = await readWritten(outFile);
+    expect(JSON.parse(written).chainA).toEqual(['a']);
+  });
+
+  it('exits 0 (no diff) when chains agree but still writes an empty-delta JSON body', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const outFile = join(dir, 'empty-diff.json');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: outFile,
+    });
+    // Empty diff -> exit 0; the file still lands so a CI archive
+    // step picks up a consistent artifact path even on a no-change run.
+    expect(r.exitCode).toBe(0);
+    const written = await readWritten(outFile);
+    const parsed = JSON.parse(written);
+    expect(parsed.hasChanges).toBe(false);
+    expect(parsed.changed).toEqual({});
+  });
+
+  it('exits 2 when --output is combined with --format text (text is not an artifact format)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'text',
+      output: join(dir, 'diff.txt'),
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/--output requires --format json or --format yaml/);
+  });
+
+  it('honors --only-fields when writing to --output (scoped artifact)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      ['severity_threshold: high', 'min_confidence: 0.7', ''].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      ['severity_threshold: low', 'min_confidence: 0.5', ''].join('\n'),
+      'utf8',
+    );
+    const outFile = join(dir, 'scoped.json');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: outFile,
+      'only-fields': 'severity_threshold',
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(await readWritten(outFile));
+    // Scoped: only severity_threshold lands in `changed`.
+    expect(parsed.changed.severity_threshold).toBeDefined();
+    expect(parsed.changed.min_confidence).toBeUndefined();
+    expect(parsed.onlyFields).toEqual(['severity_threshold']);
+  });
+});
+
+describe('resolvePresetDiffOutputPath (pure)', () => {
+  it('returns absolute paths unchanged', () => {
+    // An absolute path is a contract: the operator picked it
+    // deliberately. The helper must not re-anchor it under root.
+    expect(resolvePresetDiffOutputPath('/tmp/diff.json', '/project')).toBe(
+      '/tmp/diff.json',
+    );
+  });
+
+  it('resolves relative paths against root', () => {
+    // Relative path lands under the supplied root so a CI checkout
+    // that pins --root sees a stable file path.
+    expect(resolvePresetDiffOutputPath('diff.json', '/project')).toBe(
+      '/project/diff.json',
+    );
+    expect(resolvePresetDiffOutputPath('reports/d.json', '/project')).toBe(
+      '/project/reports/d.json',
+    );
   });
 });
