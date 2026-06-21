@@ -5,6 +5,7 @@ Usage:
   clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
   clawreview validate [--config <path>]
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json]
+  clawreview presets list [--root <dir>] [--format text|json]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -25,7 +26,7 @@ Flags:
   --fail-on-budget   Exit non-zero (3) when 'clawreview run' estimates the review will
                      exceed the configured monthly budget. Off by default; the estimate
                      is still printed to stderr either way.
-  --root <dir>       lint-config: root directory to scan (default: cwd).
+  --root <dir>       lint-config / presets list: root directory to scan (default: cwd).
   --pattern <name>   lint-config: filenames to match (default: .clawreview.yml). Comma-separated
                      for multiple, e.g. --pattern .clawreview.yml,clawreview.config.yml.
 
@@ -43,6 +44,8 @@ Examples:
   clawreview validate --config examples/strict.clawreview.yml
   clawreview lint-config --root . --pattern .clawreview.yml
   clawreview lint-config --format json | jq '.invalid'
+  clawreview presets list
+  clawreview presets list --format json | jq '.presets[] | select(.source=="local")'
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new
