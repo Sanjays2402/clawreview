@@ -4,7 +4,7 @@ export function renderHelp(): string {
 Usage:
   clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
   clawreview validate [--config <path>]
-  clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json]
+  clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit]
   clawreview baseline save [--input <path>] [--output <path>]
@@ -44,6 +44,8 @@ Examples:
   clawreview validate --config examples/strict.clawreview.yml
   clawreview lint-config --root . --pattern .clawreview.yml
   clawreview lint-config --format json | jq '.invalid'
+  clawreview lint-config --fix
+  clawreview lint-config --fix --format json | jq '.fixed'
   clawreview presets list
   clawreview presets list --format json | jq '.presets[] | select(.source=="local")'
   clawreview run --format json | clawreview stats --fail-on high

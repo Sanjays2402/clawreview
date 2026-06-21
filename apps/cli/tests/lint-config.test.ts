@@ -228,3 +228,101 @@ describe('runLintConfig', () => {
     expect(failing.errors[0]).toMatch(/severity_threshold/);
   });
 });
+
+describe('runLintConfig --fix', () => {
+  it('rewrites a known severity_threshold typo and validates clean', async () => {
+    const dir = await tmpDir();
+    const file = join(dir, '.clawreview.yml');
+    await writeFile(
+      file,
+      ['# Team override', 'severity_threshold: warning', 'agents: [security]', ''].join('\n'),
+      'utf8',
+    );
+    const r = await run(dir, { fix: true, format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.ok).toBe(1);
+    expect(parsed.fixed).toBe(1);
+    expect(parsed.files[0].fixes[0]).toMatch(/severity_threshold.*warning.*medium/);
+
+    // File on disk should now contain the canonical value AND preserve
+    // the surrounding comment + key order.
+    const after = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    expect(after).toMatch(/severity_threshold: medium/);
+    expect(after).toMatch(/# Team override/);
+    expect(after.indexOf('# Team override')).toBeLessThan(after.indexOf('severity_threshold'));
+  });
+
+  it('rewrites a nested inline_comments.min_severity typo', async () => {
+    const dir = await tmpDir();
+    const file = join(dir, '.clawreview.yml');
+    await writeFile(
+      file,
+      [
+        'inline_comments:',
+        '  enabled: true',
+        '  min_severity: error',
+        '  max: 10',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    const r = await run(dir, { fix: true, format: 'json' });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.fixed).toBe(1);
+    const after = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    expect(after).toMatch(/min_severity: critical/);
+  });
+
+  it('does NOT rewrite anything when the value is already canonical', async () => {
+    const dir = await tmpDir();
+    const file = join(dir, '.clawreview.yml');
+    await writeFile(file, 'severity_threshold: medium\n', 'utf8');
+    const before = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    const r = await run(dir, { fix: true, format: 'json' });
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.fixed).toBe(0);
+    const after = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    expect(after).toBe(before);
+  });
+
+  it('leaves a genuinely-unknown value as INVALID even with --fix set', async () => {
+    const dir = await tmpDir();
+    const file = join(dir, '.clawreview.yml');
+    await writeFile(file, 'severity_threshold: gibberish-zzz\n', 'utf8');
+    const r = await run(dir, { fix: true, format: 'json' });
+    expect(r.exitCode).toBe(2);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.fixed).toBe(0);
+    expect(parsed.invalid).toBe(1);
+    expect(parsed.files[0].errors[0]).toMatch(/severity_threshold/);
+  });
+
+  it('reports FIXED in the text output and includes the rewrite description', async () => {
+    const dir = await tmpDir();
+    await writeFile(
+      join(dir, '.clawreview.yml'),
+      'severity_threshold: info\n',
+      'utf8',
+    );
+    const r = await run(dir, { fix: true });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toMatch(/FIXED\s+\.clawreview\.yml/);
+    expect(r.stdout).toMatch(/severity_threshold.*info.*low/);
+    expect(r.stdout).toMatch(/1 fixed/);
+  });
+
+  it('does not rewrite files when --fix is NOT set, even for known typos', async () => {
+    const dir = await tmpDir();
+    const file = join(dir, '.clawreview.yml');
+    await writeFile(file, 'severity_threshold: warning\n', 'utf8');
+    const before = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    const r = await run(dir, { format: 'json' });
+    expect(r.exitCode).toBe(2);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.fixed).toBe(0);
+    const after = await import('node:fs/promises').then((m) => m.readFile(file, 'utf8'));
+    expect(after).toBe(before);
+  });
+});
