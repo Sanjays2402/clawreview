@@ -2,6 +2,7 @@ import type { Finding } from '@clawreview/types';
 import { describe, expect, it } from 'vitest';
 
 import {
+  computeDigestDrift,
   findingDigest,
   severityIterationOrder,
 } from '../src/digest.js';
@@ -225,5 +226,250 @@ describe('findingDigest', () => {
 describe('severityIterationOrder', () => {
   it('returns the canonical critical-first order', () => {
     expect(severityIterationOrder()).toEqual(['critical', 'high', 'medium', 'low', 'nit']);
+  });
+});
+
+// Tick 13: computeDigestDrift compares two findingDigest snapshots
+// and surfaces the per-bucket delta. Use case: tick 12 persists
+// `digest` on ReviewRecord; after a bulk dismiss the persisted shape
+// drifts from the live findings. The dashboard / CLI calls this
+// helper to surface "review header counts are stale" without
+// re-walking findings.
+describe('computeDigestDrift', () => {
+  it('returns hasDrift=false and zero deltas for two byte-identical digests', () => {
+    // The canonical "no drift" case: a freshly-persisted digest
+    // compared with a fresh recompute against the same findings.
+    // Every bucket delta is zero; hasDrift is false.
+    const findings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'style', category: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const persisted = findingDigest(findings, { topAgents: 8, topCategories: 8 });
+    const fresh = findingDigest(findings, { topAgents: 8, topCategories: 8 });
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(false);
+    expect(drift.totalDelta).toBe(0);
+    expect(drift.bySeverityDelta).toEqual({
+      critical: 0, high: 0, medium: 0, low: 0, nit: 0,
+    });
+    expect(drift.byAgentDelta).toEqual({});
+    expect(drift.byCategoryDelta).toEqual({});
+    expect(drift.byFileDelta).toEqual({});
+  });
+
+  it('reports a negative delta when findings are dropped after persist (bulk dismiss)', () => {
+    // Concrete scenario: dashboard persisted 3 findings; operator
+    // bulk-dismissed 1; fresh recompute shows 2. The drift report
+    // surfaces totalDelta=-1 and the dropped finding's per-bucket
+    // attribution.
+    const persistedFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'security', category: 'security', severity: 'medium', file: 'a.ts', startLine: 11 }),
+      f({ agent: 'style', category: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const freshFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'style', category: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const persisted = findingDigest(persistedFindings);
+    const fresh = findingDigest(freshFindings);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.totalDelta).toBe(-1);
+    // The dropped finding was medium severity, security agent + category, on a.ts.
+    expect(drift.bySeverityDelta.medium).toBe(-1);
+    // Other severities are still in the fixed-shape histogram at 0.
+    expect(drift.bySeverityDelta.high).toBe(0);
+    expect(drift.bySeverityDelta.nit).toBe(0);
+    // Sparse maps surface only the changed key.
+    expect(drift.byAgentDelta).toEqual({ security: -1 });
+    expect(drift.byCategoryDelta).toEqual({ security: -1 });
+    expect(drift.byFileDelta).toEqual({ 'a.ts': -1 });
+  });
+
+  it('reports a positive delta when fresh findings appeared after persist (rerun added findings)', () => {
+    // Opposite scenario: a rerun produced 1 extra finding that the
+    // persisted shape never saw. Drift is +1 across the relevant
+    // buckets.
+    const persistedFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+    ];
+    const freshFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'perf', category: 'performance', severity: 'low', file: 'c.ts' }),
+    ];
+    const persisted = findingDigest(persistedFindings);
+    const fresh = findingDigest(freshFindings);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.totalDelta).toBe(1);
+    expect(drift.bySeverityDelta.low).toBe(1);
+    expect(drift.byAgentDelta).toEqual({ perf: 1 });
+    expect(drift.byCategoryDelta).toEqual({ performance: 1 });
+    expect(drift.byFileDelta).toEqual({ 'c.ts': 1 });
+  });
+
+  it('mixes positive and negative deltas when findings shift between buckets (severity recalibration)', () => {
+    // A calibration pass might promote a finding from medium ->
+    // high. The total stays the same, but per-severity buckets
+    // shift: medium goes -1, high goes +1.
+    const persistedFindings = [
+      f({ agent: 'security', category: 'security', severity: 'medium', file: 'a.ts' }),
+    ];
+    const freshFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+    ];
+    const persisted = findingDigest(persistedFindings);
+    const fresh = findingDigest(freshFindings);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.totalDelta).toBe(0);
+    expect(drift.bySeverityDelta.high).toBe(1);
+    expect(drift.bySeverityDelta.medium).toBe(-1);
+    // Agent / category / file all stayed the same so no entries
+    // in those sparse maps.
+    expect(drift.byAgentDelta).toEqual({});
+    expect(drift.byCategoryDelta).toEqual({});
+    expect(drift.byFileDelta).toEqual({});
+  });
+
+  it('omits zero-delta keys from the sparse bucket maps so the rendered drift focuses on changes', () => {
+    // Two findings change: one drops out, one appears. The agents
+    // that stayed unchanged (style on b.ts) must NOT appear in
+    // byAgentDelta -- only `security` (which dropped) and `perf`
+    // (which appeared) show up.
+    const persistedFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'style', category: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const freshFindings = [
+      f({ agent: 'perf', category: 'performance', severity: 'low', file: 'c.ts' }),
+      f({ agent: 'style', category: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const persisted = findingDigest(persistedFindings);
+    const fresh = findingDigest(freshFindings);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.byAgentDelta).toEqual({ security: -1, perf: 1 });
+    // `style` is in BOTH digests with count 1 -> delta 0 -> omitted.
+    expect('style' in drift.byAgentDelta).toBe(false);
+  });
+
+  it('is symmetric: computeDigestDrift(a, b) negates computeDigestDrift(b, a)', () => {
+    // Mathematical contract: swapping the two arguments inverts
+    // every delta but preserves the hasDrift flag.
+    const findings1 = [
+      f({ agent: 'security', severity: 'high', file: 'a.ts' }),
+    ];
+    const findings2 = [
+      f({ agent: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'style', severity: 'nit', file: 'b.ts' }),
+    ];
+    const d1 = findingDigest(findings1);
+    const d2 = findingDigest(findings2);
+    const ab = computeDigestDrift(d1, d2);
+    const ba = computeDigestDrift(d2, d1);
+    expect(ab.totalDelta).toBe(-ba.totalDelta);
+    expect(ab.bySeverityDelta.nit).toBe(-ba.bySeverityDelta.nit);
+    expect(ab.byAgentDelta.style).toBe(-ba.byAgentDelta.style);
+    expect(ab.byFileDelta['b.ts']).toBe(-ba.byFileDelta['b.ts']);
+    // hasDrift is identical in both directions (any-non-zero check).
+    expect(ab.hasDrift).toBe(ba.hasDrift);
+  });
+
+  it('does not consider hotspots when computing drift (clusters re-derive on fresh)', () => {
+    // Two findings on the same file produce a hotspot cluster. The
+    // persisted digest was built WITHOUT hotspots; the fresh one
+    // WITH hotspots. The drift report cares only about bucket
+    // counts (which agree), not derived cluster shapes -- so
+    // hasDrift is false.
+    const findings = [
+      f({ agent: 'security', severity: 'high', file: 'src/hot.ts', startLine: 10 }),
+      f({ agent: 'security', severity: 'medium', file: 'src/hot.ts', startLine: 12 }),
+    ];
+    const persisted = findingDigest(findings, { hotspots: false });
+    const fresh = findingDigest(findings, { hotspots: true });
+    // Sanity: hotspots field genuinely differs between the two.
+    expect(persisted.hotspots).toBeUndefined();
+    expect(fresh.hotspots).toBeDefined();
+    // Drift report ignores the hotspots difference because the
+    // underlying bucket counts agree.
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(false);
+    expect(drift.totalDelta).toBe(0);
+  });
+
+  it('does not mutate either input digest', () => {
+    // Defensive: a drift consumer may persist the digest to a DB
+    // or render it elsewhere. Mutating the input would break the
+    // "snapshot is immutable" contract that tick 12 set up.
+    const findings1 = [
+      f({ agent: 'security', severity: 'high', file: 'a.ts' }),
+    ];
+    const findings2 = [
+      f({ agent: 'security', severity: 'low', file: 'a.ts' }),
+    ];
+    const d1 = findingDigest(findings1);
+    const d2 = findingDigest(findings2);
+    const d1Snapshot = JSON.stringify(d1);
+    const d2Snapshot = JSON.stringify(d2);
+    computeDigestDrift(d1, d2);
+    expect(JSON.stringify(d1)).toBe(d1Snapshot);
+    expect(JSON.stringify(d2)).toBe(d2Snapshot);
+  });
+
+  it('handles an empty persisted digest (fresh review with all-new findings)', () => {
+    // A review that persisted no findings (digest.total = 0) and
+    // later acquired some. Edge case: the persisted byAgent /
+    // byCategory / byFile maps are empty objects but the fresh
+    // side has entries. Drift is positive across every bucket.
+    const persisted = findingDigest([]);
+    const freshFindings = [
+      f({ agent: 'security', category: 'security', severity: 'high', file: 'a.ts' }),
+    ];
+    const fresh = findingDigest(freshFindings);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.totalDelta).toBe(1);
+    expect(drift.bySeverityDelta.high).toBe(1);
+    expect(drift.byAgentDelta).toEqual({ security: 1 });
+    expect(drift.byCategoryDelta).toEqual({ security: 1 });
+    expect(drift.byFileDelta).toEqual({ 'a.ts': 1 });
+  });
+
+  it('handles an empty fresh digest (everything dismissed; totalDelta = -persisted.total)', () => {
+    // Mirror case: the operator bulk-dismissed every finding. The
+    // fresh digest is empty; the persisted side has entries. Drift
+    // is negative across every bucket.
+    const persistedFindings = [
+      f({ agent: 'security', severity: 'high', file: 'a.ts' }),
+      f({ agent: 'security', severity: 'medium', file: 'a.ts', startLine: 11 }),
+    ];
+    const persisted = findingDigest(persistedFindings);
+    const fresh = findingDigest([]);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(true);
+    expect(drift.totalDelta).toBe(-2);
+    expect(drift.bySeverityDelta.high).toBe(-1);
+    expect(drift.bySeverityDelta.medium).toBe(-1);
+    expect(drift.byAgentDelta).toEqual({ security: -2 });
+    expect(drift.byFileDelta).toEqual({ 'a.ts': -2 });
+  });
+
+  it('ignores topAgents / topCategories cap differences (compares underlying buckets, not slices)', () => {
+    // Two digests built from the same findings but with different
+    // top-N caps end up with different topAgents arrays. The drift
+    // report must NOT flag this as drift -- the underlying byAgent
+    // map is identical.
+    const findings = [];
+    for (let i = 0; i < 5; i += 1) {
+      findings.push(f({ agent: `agent-${i}`, file: `f-${i}.ts` }));
+    }
+    const persisted = findingDigest(findings, { topAgents: 2 });
+    const fresh = findingDigest(findings, { topAgents: 5 });
+    // Sanity: the slices DO differ.
+    expect(persisted.topAgents.length).not.toBe(fresh.topAgents.length);
+    // ... but drift is false because the buckets agree.
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.hasDrift).toBe(false);
   });
 });

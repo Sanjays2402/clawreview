@@ -215,3 +215,162 @@ export function severityIterationOrder(): readonly Severity[] {
     (a, b) => SEVERITY_ORDER[a] - SEVERITY_ORDER[b],
   );
 }
+
+/**
+ * Drift report: per-bucket delta between two `FindingDigest` snapshots.
+ *
+ * Use case (tick 13): tick 12 persists `digest` on `ReviewRecord` for
+ * the dashboard. After a bulk dismiss / reopen, the persisted digest's
+ * totals no longer match the live findings. A consumer (dashboard
+ * banner, CLI export, future drift-alert metric) calls
+ * `findingDigest(record.findings)` to get the fresh shape, hands both
+ * digests to `computeDigestDrift`, and renders a "review header counts
+ * are stale, refresh comment?" prompt without re-walking findings.
+ *
+ * The drift is INTENTIONALLY shallow at the top-level bucket maps
+ * (mirrors `computePresetDelta`'s shallow contract on
+ * `clawreview presets diff`). A nested change inside `topFiles[i]`
+ * surfaces as "topFiles: changed"; the caller can drill into the
+ * digest itself for fine-grained data.
+ *
+ * Shape:
+ *   - `totalDelta`         -- fresh.total - persisted.total
+ *   - `bySeverityDelta`    -- per-severity (fresh - persisted); zeros
+ *                              kept for the fixed-shape histogram.
+ *   - `byAgentDelta`       -- sparse: agent keys that changed (or
+ *                              appear in only one side); zeros omitted.
+ *   - `byCategoryDelta`    -- sparse, same shape.
+ *   - `byFileDelta`        -- sparse, same shape.
+ *   - `hasDrift`           -- true iff any of the above is non-empty
+ *                              or carries a non-zero delta. The
+ *                              dashboard's "stale?" check is a single
+ *                              `report.hasDrift`.
+ *
+ * Pure: never mutates either input digest.
+ */
+export interface FindingDigestDrift {
+  /** total delta = fresh.total - persisted.total. Negative = findings dropped. */
+  totalDelta: number;
+  /**
+   * Per-severity delta. Fixed-shape (every severity present) so a
+   * dashboard histogram can render without defaulting keys.
+   * Positive = the fresh recompute has more findings of that severity;
+   * negative = fewer; zero = no change.
+   */
+  bySeverityDelta: Record<Severity, number>;
+  /**
+   * Per-agent delta. Sparse: keys appear only when they exist in
+   * either side AND the delta is non-zero. Zero-deltas are omitted
+   * so a dashboard can render "agents that changed" without filtering.
+   */
+  byAgentDelta: Record<string, number>;
+  /** Per-category delta. Sparse, same shape as byAgentDelta. */
+  byCategoryDelta: Partial<Record<FindingCategory, number>>;
+  /** Per-file delta. Sparse, same shape as byAgentDelta. */
+  byFileDelta: Record<string, number>;
+  /**
+   * True iff at least one bucket has a non-zero delta. The dashboard's
+   * "stale?" check is a single `report.hasDrift` rather than a fold
+   * over every bucket.
+   */
+  hasDrift: boolean;
+}
+
+const EMPTY_SEVERITY_DELTA: Record<Severity, number> = {
+  critical: 0,
+  high: 0,
+  medium: 0,
+  low: 0,
+  nit: 0,
+};
+
+/**
+ * Compute the bucket-level drift between two FindingDigest snapshots.
+ *
+ * The conventional shape is `computeDigestDrift(persisted, fresh)`:
+ * deltas are `fresh - persisted` so a positive delta means "the live
+ * data has more than the persisted snapshot showed". This matches
+ * the natural "what changed since we wrote it down" framing.
+ *
+ * The two digests may have different `topFiles` / `topAgents` / etc.
+ * cap settings; this helper compares the underlying bucket maps
+ * (`byAgent`, `byCategory`, `byFile`, `totalsBySeverity`), NOT the
+ * sorted top-N slices, so a different cap doesn't trigger spurious
+ * drift. The caller can compare slices directly if needed.
+ *
+ * Symmetric in that `computeDigestDrift(a, b)` and
+ * `computeDigestDrift(b, a)` produce numerically-opposite deltas;
+ * `hasDrift` is identical in both directions.
+ *
+ * Hotspots are intentionally NOT in the drift report. Hotspot
+ * detection is a derived view (clustering passes over findings); a
+ * drift consumer would compute hotspots on the fresh shape if they
+ * needed the new cluster list, not by diffing the persisted clusters.
+ */
+export function computeDigestDrift(
+  persisted: FindingDigest,
+  fresh: FindingDigest,
+): FindingDigestDrift {
+  const totalDelta = fresh.total - persisted.total;
+
+  // Severity: walk the closed five-value set so the output stays
+  // fixed-shape even when both sides had zero of a bucket.
+  const bySeverityDelta: Record<Severity, number> = { ...EMPTY_SEVERITY_DELTA };
+  let severityChanged = false;
+  for (const sev of Object.keys(EMPTY_SEVERITY_DELTA) as Severity[]) {
+    const d = (fresh.totalsBySeverity[sev] ?? 0) - (persisted.totalsBySeverity[sev] ?? 0);
+    bySeverityDelta[sev] = d;
+    if (d !== 0) severityChanged = true;
+  }
+
+  // Agent / category / file: sparse maps. Walk the union of keys and
+  // omit zero-deltas so the rendered drift focuses on what actually
+  // changed.
+  const byAgentDelta = sparseDelta(persisted.byAgent, fresh.byAgent);
+  const byFileDelta = sparseDelta(persisted.byFile, fresh.byFile);
+  const byCategoryDelta = sparseDelta(
+    persisted.byCategory as Record<string, number>,
+    fresh.byCategory as Record<string, number>,
+  ) as Partial<Record<FindingCategory, number>>;
+
+  const hasDrift =
+    totalDelta !== 0 ||
+    severityChanged ||
+    Object.keys(byAgentDelta).length > 0 ||
+    Object.keys(byFileDelta).length > 0 ||
+    Object.keys(byCategoryDelta).length > 0;
+
+  return {
+    totalDelta,
+    bySeverityDelta,
+    byAgentDelta,
+    byCategoryDelta,
+    byFileDelta,
+    hasDrift,
+  };
+}
+
+/**
+ * Internal: walk the union of two sparse `string -> number` bucket
+ * maps and return the per-key delta, omitting zero-deltas so the
+ * caller's rendered drift focuses on what actually changed.
+ *
+ * Reused by `computeDigestDrift` for the byAgent / byCategory / byFile
+ * buckets which all share the same sparse contract. Kept module-internal
+ * so the export surface stays minimal -- callers want the typed wrapper.
+ */
+function sparseDelta(
+  persisted: Record<string, number>,
+  fresh: Record<string, number>,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  const allKeys = new Set<string>([
+    ...Object.keys(persisted),
+    ...Object.keys(fresh),
+  ]);
+  for (const k of allKeys) {
+    const d = (fresh[k] ?? 0) - (persisted[k] ?? 0);
+    if (d !== 0) out[k] = d;
+  }
+  return out;
+}
