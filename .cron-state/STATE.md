@@ -143,10 +143,35 @@ Gate results: types 27/27 (+5 new), telemetry 29/29 (+5 new), aggregator 172/172
 - **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API. Drives the Top Contributors PR block AND the Prometheus counter from the server side.
 - **Dashboard widget for `/api/internal/webhook/stats`** — carried from tick 7. Wire it into apps/dashboard so on-calls see the by-event / sparkline (now multi-granularity after tick 7) without curl.
 - **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried from tick 7. Same store, list view rather than aggregate.
-- **Aggregator `applyMinConfidence(findings, threshold)` extracted helper** — the tick-6 floor logic is inlined inside `aggregate()`; pull it into a standalone helper so the CLI can run it in `clawreview stats` without re-running aggregation, AND so the worker can count drops *before* the `aggregate()` call without re-computing the filter.
-- **`clawreview stats --by category|agent|severity` grouping** — today `clawreview stats` only buckets by severity. Let the operator slice the findings by any of the three primary axes for ad-hoc reporting.
-- **`/api/internal/webhook/recent` + `/stats` rate-limit class** — both endpoints currently land under the default per-token bucket. Add a small dedicated class for "operator dashboard polling" so a chatty dashboard doesn't eat the operator's budget for real work.
-- **CLI `clawreview presets show <name>`** — second sub-command on top of tick 7's `presets list`. Print the fully-resolved (extends-flattened) preset body for a single name, so an operator can preview exactly what a config would inherit before adopting it.
+- ~~Aggregator `applyMinConfidence(findings, threshold)` extracted helper~~ — DONE tick 8 (a0196fc). Standalone helper that worker + CLI now use to count drops without re-walking sim.findings.
+- ~~`clawreview stats --by category|agent|severity` grouping~~ — DONE tick 8 (433383f). Also added `--format json` (totals / byAgent / byCategory / topFiles / totalCostUsd) so dashboards consume the same numbers.
+- ~~`/api/internal/webhook/recent` + `/stats` rate-limit class~~ — DONE tick 8 (f1404d6). Dedicated operator-poll class with its own bucket (default 3000/min) so chatty dashboards don't eat the operator's rerun / replay budget.
+- ~~CLI `clawreview presets show <name>`~~ — DONE tick 8 (9973372). Yaml (default) / json / text, prints the extends-flattened body so an operator can preview before adopting.
+
+### Tick 8 — 2026-06-20 22:27 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Aggregator `applyMinConfidence(findings, threshold)` extracted helper + worker / CLI rewiring | a0196fc | +177/-20 | 6 new (aggregate.test.ts) |
+| 2 | CLI `clawreview stats --by severity\|agent\|category` + `--format json` | 433383f | +366/-27 | 9 new (stats.test.ts: 5 --by + 4 --format json) |
+| 3 | CLI `clawreview presets show <name>` (yaml default + json + text) | 9973372 | +367/-12 | 8 new (presets.test.ts) |
+| 4 | Server operator-poll rate-limit class for /api/internal/webhook/{recent,stats} | f1404d6 | +292/-2 | 7 new (rate-limit-operator.test.ts: 2 pure + 5 wired) |
+| 5 | Webhook stats `byRepo` slice + `?topRepos=` cap with `(other)` tail | 02d0eed | +229/0 | 5 new (webhook-replay.test.ts) |
+
+Gate results: aggregator 178/178 (+6 new), cli 111/111 (+18 new = 9 stats + 8 presets show + 1 incidental from a stats sample-report refactor), server 217/217 (+12 new = 7 operator-poll + 5 byRepo), telemetry 29/29, types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 712 tests verified passing (+56 over tick 7)**. Touched-package typecheck delta: `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (aggregate.ts additions clean); `@clawreview/cli` clean across stats.ts, presets.ts, cli.ts, help.ts, run.ts changes; `@clawreview/telemetry` clean; `apps/server` red only on the pre-existing api-auth.ts / rate-limit.ts / server.ts / worker.ts (`pino`) baseline -- zero new errors on the new operator-poll class, webhook-store.ts byRepo additions, or webhook-replay.ts route changes. Push verified: `git ls-remote origin feature/autoship` -> `02d0eed`.
+
+**Tick-8 refill: 4 of 7 backlog items shipped this tick (#1 helper, #2 stats --by, #3 presets show, #4 operator-poll class). The three dashboard / blame-fetcher items still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 9 below.**
+
+### Backlog seeded for tick 9 (refill — three follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7. Pair the tick-6 counter helper with a blame fetcher that uses the GitHub API. Drives the Top Contributors PR block AND the Prometheus counter from the server side.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried from tick 7. Wire it into apps/dashboard so on-calls see the by-event / sparkline / byRepo (tick 8) without curl.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination** — carried from tick 7. Same store, list view rather than aggregate.
+- **`/api/internal/webhook/stats` peak-bucket detection** — emit `peakBucketIndex` and `peakBucketCount` alongside the buckets array so a dashboard can label the sparkline's peak without re-scanning the array in JS.
+- **`/api/internal/webhook/stats` Prometheus exposition** — add a small `clawreview_webhook_deliveries_total{event,repo}` counter on the `put()` path so Prometheus can scrape the same shape the dashboard reads.
+- **CLI `clawreview presets resolve <chain>`** — third sub-command on top of show/list. Resolve an ad-hoc extends chain (`presets resolve strict,security-focused`) without writing a file. Pairs with show; useful for sandboxing a candidate config before committing it.
+- **CLI `clawreview stats --top-files <n>` + `--by file`** — extend tick 8's --by to support per-file slicing, with --top-files capping the per-file rendering (today the top 5 is hard-coded).
+- **Aggregator `findingDigest()` helper** — small pure function that returns `{ totalsBySeverity, byCategory, byAgent, byFile, hotspots }` over a Finding[] in one pass. Pulls today's inlined groupCount+sortedEntries from cli/stats.ts up to the package so the worker, CLI, and dashboard share the exact same numbers.
+- **Operator-poll class: `?force=1` bypass for in-band probes** — small QOL knob for the dashboard's own health check so the limiter does NOT 429 the polling endpoint when the dashboard itself is sanity-probing them.
 
 ## TICK LOG
 
