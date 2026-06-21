@@ -8,7 +8,7 @@ Usage:
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]
-  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--format text|json]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
@@ -33,6 +33,8 @@ Flags:
                      for multiple, e.g. --pattern .clawreview.yml,clawreview.config.yml.
   --by <axis>        stats: primary grouping axis: severity (default), agent, category, or file.
   --top-files <n>    stats: cap on the top-files block / topFiles JSON array (default 5, max 200).
+  --top-agents <n>   stats: cap on the --by agent block / topAgents JSON array (default 10, max 200).
+  --top-categories <n> stats: cap on the --by category block / topCategories JSON array (default 10, max 200).
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
@@ -58,6 +60,8 @@ Examples:
   clawreview presets resolve strict,security-focused --format json | jq '.fields'
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
+  clawreview run --format json | clawreview stats --by agent --top-agents 3
+  clawreview run --format json | clawreview stats --by category --top-categories 5
   clawreview run --format json | clawreview stats --by file --top-files 10
   clawreview run --format json | clawreview stats --format json --by category | jq '.byCategory'
   clawreview run --format json > report.json && clawreview baseline save --input report.json

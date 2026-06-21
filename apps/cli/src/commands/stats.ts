@@ -50,7 +50,20 @@ const VALID_GROUPINGS: readonly StatsGroupBy[] = [
  * seeing the same five rows when they omit `--top-files`.
  */
 const DEFAULT_TOP_FILES = 5;
-const MAX_TOP_FILES = 200;
+
+/**
+ * Default cap on the rendered top-agents / top-categories blocks.
+ * Mirror of DEFAULT_TOP_FILES at a slightly looser default (10) since
+ * the agent / category cardinality is bounded by AGENT_REGISTRY and
+ * the closed FindingCategory union; an operator running --by agent or
+ * --by category usually wants to see everything by default.
+ *
+ * MAX_TOP applies to ALL three --top-* flags so the clamp logic is one
+ * constant.
+ */
+const DEFAULT_TOP_AGENTS = 10;
+const DEFAULT_TOP_CATEGORIES = 10;
+const MAX_TOP = 200;
 
 /**
  * `clawreview stats` reads a previously generated JSON report (the output of
@@ -115,18 +128,14 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // misconfigured caller can't disable or blow it up. A non-numeric
   // value (e.g. "bogus") falls back to the default; a finite numeric
   // value (including 0 and negatives) clamps into the allowed range.
-  const topFilesRaw = args.flags['top-files'];
-  let topFiles: number;
-  if (topFilesRaw === undefined) {
-    topFiles = DEFAULT_TOP_FILES;
-  } else {
-    const parsedNum = Number(topFilesRaw);
-    if (!Number.isFinite(parsedNum)) {
-      topFiles = DEFAULT_TOP_FILES;
-    } else {
-      topFiles = Math.max(1, Math.min(MAX_TOP_FILES, Math.floor(parsedNum)));
-    }
-  }
+  const topFiles = parseTopFlag(args.flags['top-files'], DEFAULT_TOP_FILES);
+  // `--top-agents <n>` / `--top-categories <n>` mirror --top-files
+  // for the agent / category groupings. Default 10 (closed cardinality
+  // bounds: AGENT_REGISTRY + FindingCategory union); clamped into
+  // [1, 200]. Used to cap BOTH the text render of --by agent / --by
+  // category AND the json topAgents / topCategories arrays.
+  const topAgents = parseTopFlag(args.flags['top-agents'], DEFAULT_TOP_AGENTS);
+  const topCategories = parseTopFlag(args.flags['top-categories'], DEFAULT_TOP_CATEGORIES);
 
   let raw: string;
   if (inputPath) {
@@ -154,7 +163,7 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // @clawreview/aggregator); the worker and PR comment header use it
   // too, so this CLI shows exactly the same numbers without inlining
   // its own loops.
-  const digest = findingDigest(findings, { topFiles });
+  const digest = findingDigest(findings, { topFiles, topAgents, topCategories });
   const totals = computeTotals(findings, parsed.aggregated?.totals, digest);
 
   if (format === 'json') {
@@ -166,6 +175,8 @@ export async function runStats(args: ParsedArgs): Promise<void> {
           byCategory: digest.byCategory,
           byFile: digest.byFile,
           topFiles: digest.topFiles,
+          topAgents: digest.topAgents,
+          topCategories: digest.topCategories,
           totalCostUsd: parsed.summary?.totalCostUsd,
           groupBy,
         },
@@ -190,15 +201,15 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // block when the user asks for them.
   if (groupBy === 'severity') {
     renderSeverityBlock(lines, totals, c);
-    renderAgentCategoryBlocks(lines, digest.byAgent, digest.byCategory);
+    renderAgentCategoryBlocks(lines, digest, topAgents, topCategories);
   } else if (groupBy === 'agent') {
-    renderGroupBlock(lines, 'By agent', digest.byAgent);
+    renderAgentBlock(lines, digest, topAgents);
     renderSeverityBlock(lines, totals, c);
-    renderGroupBlock(lines, 'By category', digest.byCategory);
+    renderCategoryBlock(lines, digest, topCategories);
   } else if (groupBy === 'category') {
-    renderGroupBlock(lines, 'By category', digest.byCategory);
+    renderCategoryBlock(lines, digest, topCategories);
     renderSeverityBlock(lines, totals, c);
-    renderGroupBlock(lines, 'By agent', digest.byAgent);
+    renderAgentBlock(lines, digest, topAgents);
   } else {
     // --by file: lead with the per-file block capped at top-files,
     // then severity, then agent/category as secondaries so the
@@ -206,7 +217,7 @@ export async function runStats(args: ParsedArgs): Promise<void> {
     // different --by.
     renderTopFilesAsBlock(lines, digest, topFiles);
     renderSeverityBlock(lines, totals, c);
-    renderAgentCategoryBlocks(lines, digest.byAgent, digest.byCategory);
+    renderAgentCategoryBlocks(lines, digest, topAgents, topCategories);
   }
 
   // Per-agent EXECUTION breakdown is distinct from the per-agent
@@ -248,14 +259,6 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   applyFailOn(failOn, totals);
 }
 
-/** Sort a count map by descending count, then by key for deterministic output. */
-function sortedEntries(counts: Record<string, number>): Array<[string, number]> {
-  return Object.entries(counts).sort((a, b) => {
-    if (b[1] !== a[1]) return b[1] - a[1];
-    return a[0].localeCompare(b[0]);
-  });
-}
-
 function renderSeverityBlock(
   lines: string[],
   totals: Record<Severity, number>,
@@ -270,19 +273,53 @@ function renderSeverityBlock(
   lines.push('');
 }
 
-function renderGroupBlock(
+/**
+ * Render the `--by agent` primary block (or the secondary block under
+ * severity-default rendering). Consumes the digest's already-sorted
+ * topAgents slice so the CLI and any other consumer of findingDigest
+ * (worker, PR comment header) render byte-identical numbers.
+ *
+ * The header includes `(top N of M)` when the cap trimmed the list,
+ * so the operator notices that --top-agents was effective.
+ */
+function renderAgentBlock(
   lines: string[],
-  title: string,
-  counts: Record<string, number>,
+  digest: FindingDigest,
+  topAgents: number,
 ): void {
-  const entries = sortedEntries(counts);
-  if (entries.length === 0) return;
-  lines.push(`${title}:`);
-  const widest = Math.max(8, ...entries.map(([k]) => k.length));
-  for (const [k, n] of entries) {
-    lines.push(`  ${k.padEnd(widest)} ${String(n).padStart(4)}`);
+  if (digest.topAgents.length === 0) return;
+  const totalAgents = Object.keys(digest.byAgent).length;
+  const shown = digest.topAgents.length;
+  const suffix = totalAgents > shown ? ` (top ${shown} of ${totalAgents})` : '';
+  lines.push(`By agent${suffix}:`);
+  const widest = Math.max(8, ...digest.topAgents.map(({ agent }) => agent.length));
+  for (const { agent, count } of digest.topAgents) {
+    lines.push(`  ${agent.padEnd(widest)} ${String(count).padStart(4)}`);
   }
   lines.push('');
+  void topAgents;
+}
+
+/**
+ * Render the `--by category` primary block. Same shape contract as
+ * renderAgentBlock; consumes digest.topCategories (already sorted).
+ */
+function renderCategoryBlock(
+  lines: string[],
+  digest: FindingDigest,
+  topCategories: number,
+): void {
+  if (digest.topCategories.length === 0) return;
+  const totalCategories = Object.keys(digest.byCategory).length;
+  const shown = digest.topCategories.length;
+  const suffix = totalCategories > shown ? ` (top ${shown} of ${totalCategories})` : '';
+  lines.push(`By category${suffix}:`);
+  const widest = Math.max(8, ...digest.topCategories.map(({ category }) => category.length));
+  for (const { category, count } of digest.topCategories) {
+    lines.push(`  ${category.padEnd(widest)} ${String(count).padStart(4)}`);
+  }
+  lines.push('');
+  void topCategories;
 }
 
 /**
@@ -316,30 +353,17 @@ function renderTopFilesAsBlock(
 
 function renderAgentCategoryBlocks(
   lines: string[],
-  byAgent: Record<string, number>,
-  byCategory: Partial<Record<string, number>>,
+  digest: FindingDigest,
+  topAgents: number,
+  topCategories: number,
 ): void {
   // Compact secondary blocks under the severity-default rendering, so a
   // user who does NOT pass --by still gets a quick agent / category
-  // glance without the dedicated big-block layout.
-  const agentEntries = sortedEntries(byAgent);
-  if (agentEntries.length > 0) {
-    lines.push('By agent:');
-    const widest = Math.max(8, ...agentEntries.map(([k]) => k.length));
-    for (const [k, n] of agentEntries) {
-      lines.push(`  ${k.padEnd(widest)} ${String(n).padStart(4)}`);
-    }
-    lines.push('');
-  }
-  const catEntries = sortedEntries(byCategory as Record<string, number>);
-  if (catEntries.length > 0) {
-    lines.push('By category:');
-    const widest = Math.max(8, ...catEntries.map(([k]) => k.length));
-    for (const [k, n] of catEntries) {
-      lines.push(`  ${k.padEnd(widest)} ${String(n).padStart(4)}`);
-    }
-    lines.push('');
-  }
+  // glance without the dedicated big-block layout. We reuse the same
+  // capped topAgents / topCategories slices so the secondary blocks
+  // honour --top-agents / --top-categories without re-walking the maps.
+  renderAgentBlock(lines, digest, topAgents);
+  renderCategoryBlock(lines, digest, topCategories);
 }
 
 function applyFailOn(
@@ -411,4 +435,24 @@ async function readStdin(): Promise<string> {
     chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : (chunk as Buffer));
   }
   return Buffer.concat(chunks).toString('utf8');
+}
+
+/**
+ * Parse a `--top-* <n>` flag value into a clamped integer.
+ *
+ *   - undefined input -> the supplied default (back-compat).
+ *   - non-numeric / NaN / Infinity -> the default. We deliberately
+ *     fall back rather than erroring so a careless `--top-agents bogus`
+ *     still produces a useful report; the value is documented in --help.
+ *   - finite numeric value (including 0 and negatives) clamps into
+ *     [1, MAX_TOP] so a misconfigured caller can't disable or blow up
+ *     the render.
+ *
+ * Exported so the CLI / a future test caller share the contract.
+ */
+function parseTopFlag(raw: string | boolean | undefined, defaultValue: number): number {
+  if (raw === undefined) return defaultValue;
+  const parsedNum = Number(raw);
+  if (!Number.isFinite(parsedNum)) return defaultValue;
+  return Math.max(1, Math.min(MAX_TOP, Math.floor(parsedNum)));
 }

@@ -48,6 +48,25 @@ export interface FindingDigest {
    */
   topFiles: Array<{ file: string; count: number }>;
   /**
+   * Top agents by descending count, then by agent name (ascending) on
+   * ties. Capped at `opts.topAgents` (default 10, hard ceiling 200).
+   * Mirror of `topFiles` so the CLI's `stats --by agent --top-agents n`
+   * (and the worker's PR comment header) can render an already-sorted
+   * slice without re-walking the `byAgent` map.
+   *
+   * Always sorted; consumers can render directly. The full unsliced
+   * map is still on `byAgent` for callers that want it.
+   */
+  topAgents: Array<{ agent: string; count: number }>;
+  /**
+   * Top categories by descending count, then by category (ascending)
+   * on ties. Capped at `opts.topCategories` (default 10, hard ceiling
+   * 200). Same rationale as `topAgents` -- the CLI's `stats --by
+   * category --top-categories n` consumes this directly so the worker
+   * and the CLI render identical numbers.
+   */
+  topCategories: Array<{ category: FindingCategory; count: number }>;
+  /**
    * Optional hotspot clusters, computed via `findHotspots`. Off by
    * default (clustering walks the findings array a second time and not
    * every consumer wants the cost). Pass `opts.hotspots = true` to
@@ -69,6 +88,17 @@ export interface FindingDigestOptions {
    */
   topFiles?: number;
   /**
+   * Cap on the rendered top-agents list. Defaults to 10 (matches the
+   * CLI `stats --by agent` text output). Hard ceiling 200 -- same
+   * shape contract as topFiles.
+   */
+  topAgents?: number;
+  /**
+   * Cap on the rendered top-categories list. Defaults to 10 (matches
+   * the CLI `stats --by category` text output). Hard ceiling 200.
+   */
+  topCategories?: number;
+  /**
    * When set, also compute hotspot clusters and attach them under
    * `digest.hotspots`. `true` uses the default `findHotspots` options;
    * an object value forwards those knobs through to the clusterer.
@@ -77,7 +107,9 @@ export interface FindingDigestOptions {
 }
 
 const DEFAULT_TOP_FILES = 5;
-const MAX_TOP_FILES = 200;
+const DEFAULT_TOP_AGENTS = 10;
+const DEFAULT_TOP_CATEGORIES = 10;
+const MAX_TOP = 200;
 
 const EMPTY_SEVERITY_TOTALS: Record<Severity, number> = {
   critical: 0,
@@ -101,7 +133,12 @@ export function findingDigest(
   findings: Finding[],
   opts: FindingDigestOptions = {},
 ): FindingDigest {
-  const topFiles = Math.max(1, Math.min(MAX_TOP_FILES, opts.topFiles ?? DEFAULT_TOP_FILES));
+  const topFiles = Math.max(1, Math.min(MAX_TOP, opts.topFiles ?? DEFAULT_TOP_FILES));
+  const topAgents = Math.max(1, Math.min(MAX_TOP, opts.topAgents ?? DEFAULT_TOP_AGENTS));
+  const topCategories = Math.max(
+    1,
+    Math.min(MAX_TOP, opts.topCategories ?? DEFAULT_TOP_CATEGORIES),
+  );
 
   const totalsBySeverity: Record<Severity, number> = { ...EMPTY_SEVERITY_TOTALS };
   const byCategory: Partial<Record<FindingCategory, number>> = {};
@@ -124,6 +161,28 @@ export function findingDigest(
   });
   const topFilesList = sortedFiles.slice(0, topFiles).map(([file, count]) => ({ file, count }));
 
+  // Same sort order as topFiles: descending count, ascending key on
+  // ties. Stable enough for a deterministic dashboard / CLI render.
+  const sortedAgents = Object.entries(byAgent).sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  const topAgentsList = sortedAgents
+    .slice(0, topAgents)
+    .map(([agent, count]) => ({ agent, count }));
+
+  // byCategory is keyed by the FindingCategory union; cast back when
+  // building the list so downstream consumers see the typed shape.
+  const sortedCategories = (
+    Object.entries(byCategory) as Array<[FindingCategory, number]>
+  ).sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  const topCategoriesList = sortedCategories
+    .slice(0, topCategories)
+    .map(([category, count]) => ({ category, count }));
+
   const digest: FindingDigest = {
     total: findings.length,
     totalsBySeverity,
@@ -131,6 +190,8 @@ export function findingDigest(
     byAgent,
     byFile,
     topFiles: topFilesList,
+    topAgents: topAgentsList,
+    topCategories: topCategoriesList,
   };
 
   if (opts.hotspots) {

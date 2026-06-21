@@ -157,6 +157,69 @@ describe('findingDigest', () => {
     expect(digest.byCategory.performance).toBeUndefined();
     expect(Object.keys(digest.byCategory)).toEqual(['security']);
   });
+
+  it('returns topAgents sorted by descending count then by agent name', () => {
+    const findings = [
+      f({ agent: 'security' }),
+      f({ agent: 'security' }),
+      f({ agent: 'style' }),
+      f({ agent: 'secrets' }),
+      f({ agent: 'secrets' }),
+    ];
+    const digest = findingDigest(findings, { topAgents: 5 });
+    // security and secrets tied at 2; alphabetical sort puts secrets
+    // first (s-e-c-r before s-e-c-u).
+    expect(digest.topAgents[0]).toEqual({ agent: 'secrets', count: 2 });
+    expect(digest.topAgents[1]).toEqual({ agent: 'security', count: 2 });
+    expect(digest.topAgents[2]).toEqual({ agent: 'style', count: 1 });
+  });
+
+  it('caps topAgents at the requested limit and defaults to 10', () => {
+    const findings: Finding[] = [];
+    for (let i = 0; i < 15; i += 1) {
+      findings.push(f({ agent: `agent-${String(i).padStart(2, '0')}` }));
+    }
+    const explicit = findingDigest(findings, { topAgents: 3 });
+    expect(explicit.topAgents).toHaveLength(3);
+    expect(explicit.topAgents[0]!.agent).toBe('agent-00');
+    // Default cap is 10 when --top-agents is omitted.
+    const defaulted = findingDigest(findings);
+    expect(defaulted.topAgents).toHaveLength(10);
+    // Underlying byAgent map still carries everything; the cap is just
+    // on the topAgents render slice.
+    expect(Object.keys(defaulted.byAgent).length).toBe(15);
+  });
+
+  it('clamps topAgents into [1, 200] like topFiles', () => {
+    const findings: Finding[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      findings.push(f({ agent: `agent-${i}` }));
+    }
+    const tooLow = findingDigest(findings, { topAgents: 0 });
+    expect(tooLow.topAgents).toHaveLength(1);
+    const negative = findingDigest(findings, { topAgents: -100 });
+    expect(negative.topAgents).toHaveLength(1);
+    const huge = findingDigest(findings, { topAgents: 10_000 });
+    expect(huge.topAgents).toHaveLength(4);
+  });
+
+  it('returns topCategories sorted and capped', () => {
+    const findings = [
+      f({ category: 'security' }),
+      f({ category: 'security' }),
+      f({ category: 'style' }),
+      f({ category: 'performance' }),
+      f({ category: 'performance' }),
+      f({ category: 'performance' }),
+    ];
+    const digest = findingDigest(findings, { topCategories: 2 });
+    expect(digest.topCategories).toHaveLength(2);
+    // performance > security > style ; top 2 are performance + security.
+    expect(digest.topCategories[0]).toEqual({ category: 'performance', count: 3 });
+    expect(digest.topCategories[1]).toEqual({ category: 'security', count: 2 });
+    // The full sparse map is still on byCategory.
+    expect(digest.byCategory.style).toBe(1);
+  });
 });
 
 describe('severityIterationOrder', () => {

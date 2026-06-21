@@ -498,4 +498,143 @@ describe('runStats', () => {
       expect(parsed.topFiles[1]).toEqual({ file: 'src/b.ts', count: 2 });
     });
   });
+
+  // Tick 10: --top-agents <n> + --top-categories <n> mirror --top-files
+  // for the agent / category groupings. They cap BOTH the text render
+  // of --by agent / --by category AND the json topAgents / topCategories
+  // arrays.
+  describe('--top-agents and --top-categories', () => {
+    const MANY_AGENTS_REPORT = {
+      aggregated: {
+        findings: Array.from({ length: 25 }, (_, i) => ({
+          agent: `agent-${String(i % 12).padStart(2, '0')}`,
+          category: i % 2 === 0 ? 'security' : 'style',
+          severity: 'medium' as const,
+          title: `t${i}`,
+          rationale: `r${i}`,
+          file: `src/f${i % 4}.ts`,
+          startLine: i,
+          confidence: 0.5,
+          tags: [],
+        })),
+      },
+    };
+
+    it('caps the rendered --by agent text block at --top-agents', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'agent', 'top-agents': 3, 'no-color': true },
+      });
+      const o = out();
+      // 12 distinct agents -> header shows the trim.
+      expect(o).toMatch(/By agent \(top 3 of 12\):/);
+      // Only three agent rows render in the BY AGENT primary block.
+      // (The header line is the only "By agent" occurrence in the
+      // primary slot, so we count agent-* rows under it instead.)
+      const rows = o.match(/^\s+agent-\d{2}\b/gm) ?? [];
+      // Three primary-block rows + zero secondary (--by agent puts
+      // the agent block first, no agent secondary).
+      expect(rows.length).toBe(3);
+    });
+
+    it('caps the rendered --by category text block at --top-categories', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, by: 'category', 'top-categories': 1, 'no-color': true },
+      });
+      const o = out();
+      // 2 distinct categories -> header shows the trim.
+      expect(o).toMatch(/By category \(top 1 of 2\):/);
+    });
+
+    it('caps the secondary --by agent block in severity-default mode too', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, 'top-agents': 4, 'no-color': true },
+      });
+      const o = out();
+      // Default severity-first render still honors the agent cap in
+      // the secondary block so an operator setting --top-agents sees
+      // the trim regardless of which --by primary they chose.
+      expect(o).toMatch(/By agent \(top 4 of 12\):/);
+    });
+
+    it('--format json carries topAgents and topCategories arrays alongside the maps', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          format: 'json',
+          'top-agents': 5,
+          'top-categories': 1,
+          'no-color': true,
+        },
+      });
+      const parsed = JSON.parse(out());
+      expect(parsed.topAgents).toHaveLength(5);
+      // First entry is the highest-count agent; assert it has agent +
+      // count shape (we don't assert the specific agent because the
+      // sort order on ties is alphabetical).
+      expect(typeof parsed.topAgents[0].agent).toBe('string');
+      expect(typeof parsed.topAgents[0].count).toBe('number');
+      // topCategories capped to 1.
+      expect(parsed.topCategories).toHaveLength(1);
+      // The full sparse byAgent / byCategory maps still contain
+      // everything (the cap is only on the topAgents / topCategories
+      // render slices).
+      expect(Object.keys(parsed.byAgent).length).toBe(12);
+      expect(Object.keys(parsed.byCategory).length).toBe(2);
+    });
+
+    it('--top-agents clamps to [1, 200] when given garbage', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+
+      // Zero collapses to 1.
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-agents': 0, 'no-color': true },
+      });
+      let parsed = JSON.parse(out());
+      expect(parsed.topAgents).toHaveLength(1);
+
+      stdoutSpy.mockClear();
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'top-agents': 'bogus', 'no-color': true },
+      });
+      parsed = JSON.parse(out());
+      // Bad value falls back to default 10 (but only 12 agents exist,
+      // so we get min(10, 12) == 10).
+      expect(parsed.topAgents).toHaveLength(10);
+    });
+
+    it('defaults to 10 / 10 when neither flag is set', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(MANY_AGENTS_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'no-color': true },
+      });
+      const parsed = JSON.parse(out());
+      // Default cap is 10 for both. 12 agents -> 10; 2 categories -> 2.
+      expect(parsed.topAgents).toHaveLength(10);
+      expect(parsed.topCategories).toHaveLength(2);
+    });
+  });
 });
