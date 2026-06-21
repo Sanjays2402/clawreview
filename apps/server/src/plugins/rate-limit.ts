@@ -235,5 +235,120 @@ export async function registerRateLimit(app: FastifyInstance): Promise<RateLimit
   return registerPerTokenRateLimit(app, { redis });
 }
 
+/**
+ * Paths that operate as the "operator dashboard polling" class. These
+ * are the endpoints a dashboard or on-call CLI walks on a tight loop
+ * (every few seconds) to render a live status view — they generate
+ * far more traffic per session than ordinary `/api/*` reads, so a
+ * chatty dashboard would otherwise eat the operator's default token
+ * budget for genuine work like rerun / replay / config edits.
+ *
+ * Today: webhook recent/stats. Easy to extend as more polling endpoints
+ * land (queue stats, sla, repo-health summaries).
+ *
+ * Match is by path PREFIX so query strings (`?event=push&limit=25`)
+ * don't break the classification.
+ */
+export function isOperatorPollPath(url: string): boolean {
+  const path = url.split('?', 1)[0] ?? '';
+  return (
+    path === '/api/internal/webhook/recent' ||
+    path === '/api/internal/webhook/stats'
+  );
+}
+
+/**
+ * Default budget for the operator-polling class. ~5x the default
+ * per-token budget so a dashboard polling every 2-3 seconds for a long
+ * shift never exhausts it, while still bounding a runaway
+ * `while true; do curl ...; done` script.
+ *
+ * The class consumes its own bucket first; on the way through, the
+ * default per-token limiter still observes the hit, so a wildly
+ * misbehaving client still trips that limit at PER_TOKEN_DEFAULT_PER_MINUTE.
+ */
+export const OPERATOR_POLL_DEFAULT_PER_MINUTE = 3000;
+
+/**
+ * Registers the operator-polling rate limit class. Runs BEFORE the
+ * default per-token limiter (registered in server.ts) so dashboards
+ * land in the dedicated bucket and don't compete with the operator's
+ * default budget for rerun / replay / config edits.
+ *
+ * Keys are the same shape as the default limiter: `token:<name>` when
+ * api-auth resolved a token, else `ip:<addr>`. Path classification is
+ * `isOperatorPollPath`; non-matching requests are pass-through.
+ *
+ * The Redis backend is intentionally NOT plumbed here in tick 8: the
+ * default per-token limiter remains the canonical multi-replica
+ * coordinator (it sees every request), and the dashboard class is an
+ * in-process cushion so dashboards don't eat the operator budget on a
+ * single pod. A future tick can swap in a class-aware Redis backend
+ * once we run multi-pod with chatty dashboards.
+ */
+export async function registerOperatorPollRateLimit(
+  app: FastifyInstance,
+  opts: { perMinute?: number } = {},
+): Promise<RateLimiterState> {
+  const perMinute = opts.perMinute ?? OPERATOR_POLL_DEFAULT_PER_MINUTE;
+  const state = createPerTokenLimiter(perMinute);
+  startSweeper(state);
+
+  app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
+    if (!isOperatorPollPath(req.url)) return;
+
+    const tokenName = req.apiAuth?.tokenName;
+    const key = tokenName ? `token:${tokenName}` : `ip:${req.ip ?? 'unknown'}`;
+    const result = checkAndRecord(state, key);
+
+    // Use distinct header names so an operator (or a client library)
+    // can tell which class a 429 came from. The default per-token
+    // headers still land on the response when the request makes it
+    // through this hook.
+    reply.header('x-ratelimit-operator-limit', String(perMinute));
+    reply.header(
+      'x-ratelimit-operator-remaining',
+      String(Math.max(0, result.remaining)),
+    );
+
+    if (!result.ok) {
+      reply.header('retry-after', String(result.retryAfterSec));
+      reply.code(429);
+      return reply.send({
+        error: 'TooManyRequests',
+        message:
+          `operator-poll rate limit exceeded for ` +
+          `${tokenName ? 'token ' + tokenName : 'ip ' + (req.ip ?? 'unknown')}`,
+        class: 'operator-poll',
+        limit: perMinute,
+        retryAfter: result.retryAfterSec,
+        requestId: req.id,
+      });
+    }
+  });
+
+  app.log.info(
+    { perMinute, windowMs: WINDOW_MS, class: 'operator-poll' },
+    'operator-poll rate limit enabled for /api/internal/webhook/{recent,stats}',
+  );
+
+  return state;
+}
+
+/**
+ * Convenience entrypoint mirroring `registerRateLimit`. Honours
+ * DISABLE_PER_TOKEN_RATE_LIMIT=1 in tests so the same env knob disables
+ * BOTH classes for hammer-the-API integration tests.
+ */
+export async function registerOperatorPollRateLimitWithEnv(
+  app: FastifyInstance,
+): Promise<RateLimiterState | null> {
+  if (env.NODE_ENV !== 'production' && process.env.DISABLE_PER_TOKEN_RATE_LIMIT === '1') {
+    app.log.warn('operator-poll rate limit disabled by DISABLE_PER_TOKEN_RATE_LIMIT');
+    return null;
+  }
+  return registerOperatorPollRateLimit(app);
+}
+
 // Exported for tests.
-export const _internals = { isExempt, checkAndRecord, createPerTokenLimiter, WINDOW_MS };
+export const _internals = { isExempt, isOperatorPollPath, checkAndRecord, createPerTokenLimiter, WINDOW_MS };

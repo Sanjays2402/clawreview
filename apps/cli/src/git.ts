@@ -29,3 +29,27 @@ export async function revParse(ref: string, cwd: string): Promise<string> {
   const { stdout } = await exec('git', ['rev-parse', ref], { cwd });
   return stdout.trim();
 }
+
+/**
+ * Run `git blame --line-porcelain <ref> -- <file>` and return raw stdout.
+ *
+ * Returns an empty string when the file is not present in `ref`
+ * (newly-added files have no prior blame) rather than throwing — the
+ * caller falls back to the unknown-author bucket and moves on.
+ */
+export async function gitBlameFile(
+  ref: string,
+  file: string,
+  cwd: string,
+): Promise<string> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['blame', '--line-porcelain', ref, '--', file],
+      { cwd, maxBuffer: 32 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return '';
+  }
+}

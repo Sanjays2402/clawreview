@@ -1,0 +1,6 @@
+chore(autoship): bootstrap cron state and roadmap
+
+Records the autoship loop's working memory under .cron-state/:
+STATE.md captures the monorepo map I learned by reading, the
+conventions to match, and a 20-item feature roadmap. Each tick
+ships ~5 vertical slices off this list and updates the TICK LOG.

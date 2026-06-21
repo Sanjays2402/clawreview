@@ -47,6 +47,25 @@ const DIFF_SCOPED = `diff --git a/src/c.ts b/src/c.ts
 +const other = "y";
 `;
 
+const DIFF_DISABLE_FILE = `diff --git a/src/legacy.ts b/src/legacy.ts
+--- a/src/legacy.ts
++++ b/src/legacy.ts
+@@ -1,0 +1,4 @@
++// clawreview-disable-file
++const a = 1;
++const b = 2;
++const c = 3;
+`;
+
+const DIFF_DISABLE_FILE_SCOPED = `diff --git a/src/styles.ts b/src/styles.ts
+--- a/src/styles.ts
++++ b/src/styles.ts
+@@ -1,0 +1,3 @@
++// clawreview-disable-file: style
++const a = 1;
++const b = 2;
+`;
+
 describe('buildSuppressionMap', () => {
   it('marks a same-line clawreview-ignore as covering all rules', () => {
     const map = buildSuppressionMap(DIFF_SAME_LINE);
@@ -88,6 +107,22 @@ Binary files a/img.png and b/img.png differ
 `;
     const map = buildSuppressionMap(diff);
     expect(map.byFile.size).toBe(0);
+  });
+
+  it('records a file-level clawreview-disable-file marker as "all rules"', () => {
+    const map = buildSuppressionMap(DIFF_DISABLE_FILE);
+    const sup = map.fileLevel.get('src/legacy.ts');
+    expect(sup).toBeDefined();
+    expect(sup!.rules.size).toBe(0);
+    // The disable-file line itself must NOT also land in the per-line map,
+    // otherwise we'd double-account it as an "ignore" marker.
+    expect(map.byFile.get('src/legacy.ts')).toBeUndefined();
+  });
+
+  it('honours scoped file-level markers', () => {
+    const map = buildSuppressionMap(DIFF_DISABLE_FILE_SCOPED);
+    const sup = map.fileLevel.get('src/styles.ts')!;
+    expect([...sup.rules]).toEqual(['style']);
   });
 });
 
@@ -175,5 +210,41 @@ describe('applySuppressions', () => {
     const res = applySuppressions(fs, map);
     expect(res.kept).toEqual(fs);
     expect(res.suppressed).toEqual([]);
+  });
+
+  it('drops every finding in a file marked clawreview-disable-file', () => {
+    const map = buildSuppressionMap(DIFF_DISABLE_FILE);
+    const res = applySuppressions(
+      [
+        finding({ file: 'src/legacy.ts', startLine: 2, agent: 'style', category: 'style' }),
+        finding({ file: 'src/legacy.ts', startLine: 999, agent: 'security', category: 'security' }),
+      ],
+      map,
+    );
+    expect(res.suppressed).toHaveLength(2);
+    expect(res.kept).toHaveLength(0);
+  });
+
+  it('respects rule scope on a file-level marker', () => {
+    const map = buildSuppressionMap(DIFF_DISABLE_FILE_SCOPED);
+    const res = applySuppressions(
+      [
+        finding({ file: 'src/styles.ts', startLine: 2, agent: 'style', category: 'style' }),
+        // security is not in the file-level scope -> kept
+        finding({ file: 'src/styles.ts', startLine: 2, agent: 'security', category: 'security' }),
+      ],
+      map,
+    );
+    expect(res.suppressed.map((f) => f.agent)).toEqual(['style']);
+    expect(res.kept.map((f) => f.agent)).toEqual(['security']);
+  });
+
+  it('does not touch findings in unrelated files when a file-level marker exists elsewhere', () => {
+    const map = buildSuppressionMap(DIFF_DISABLE_FILE);
+    const res = applySuppressions(
+      [finding({ file: 'src/other.ts', startLine: 1, agent: 'style', category: 'style' })],
+      map,
+    );
+    expect(res.kept).toHaveLength(1);
   });
 });

@@ -11,6 +11,23 @@ export interface AggregateOptions {
   maxPerFile?: number;
   /** Lines distance to treat two findings as duplicates. */
   dedupRadius?: number;
+  /**
+   * Floor on a finding's `confidence` field. Findings strictly below
+   * this value are dropped, regardless of severity. Independent of the
+   * `calibrateConfidence` pass: calibration NUDGES severity (and adds
+   * a `calibrated:*` tag); `minConfidence` HARD-DROPS noise that is so
+   * low-confidence it shouldn't reach the reviewer at all.
+   *
+   * Default `0` (no floor). A typical production knob lands around
+   * `0.25-0.4` -- low enough to keep most genuine findings, high
+   * enough to silence a model that hallucinates a `severity: medium`
+   * with `confidence: 0.1`.
+   *
+   * Findings dropped here are not counted toward `maxPerFile` so the
+   * cap continues to mean "best N per file" rather than "first N to
+   * survive the floor".
+   */
+  minConfidence?: number;
 }
 
 export interface AggregateResult {
@@ -83,6 +100,77 @@ function sharedWords(wa: string[], wb: string[]): number {
   return hits;
 }
 
+/**
+ * Clamp a confidence-shaped option into [0, 1]. Mirrors the helper in
+ * `calibrate.ts`; kept local so this file's only cross-module dep
+ * stays `@clawreview/types`.
+ */
+function clampConfidence(n: number | undefined): number {
+  if (n === undefined || !Number.isFinite(n)) return 0;
+  if (n < 0) return 0;
+  if (n > 1) return 1;
+  return n;
+}
+
+/**
+ * Result of a standalone `applyMinConfidence` pass.
+ *
+ * `kept` is the findings that survived the floor (in input order);
+ * `dropped` is everything that fell below it. Both arrays together
+ * always reconstruct the input — useful for callers that want to count
+ * drops separately (e.g. for telemetry) without re-running the filter.
+ *
+ * `threshold` is the effective floor used (after clamping into [0, 1]).
+ * Callers that want to surface the actual cutoff to the user (logs, PR
+ * comments) should read it from here, not from the raw config knob.
+ */
+export interface ApplyMinConfidenceResult {
+  kept: Finding[];
+  dropped: Finding[];
+  threshold: number;
+}
+
+/**
+ * Drop findings whose `confidence` falls strictly below `threshold`.
+ *
+ * Extracted from `aggregate()` so callers can run JUST the floor (and
+ * count the drops) without re-running dedup, sort, and per-file capping.
+ * Two real callers today:
+ *
+ *   - the worker emits `clawreview_findings_dropped_total{reason="min_confidence"}`
+ *     from the dropped count BEFORE calling `aggregate()`, so the
+ *     counter reflects findings the floor removed rather than findings
+ *     the cap removed.
+ *   - the CLI's stderr summary ("dropped N finding(s) below
+ *     min_confidence=...") wants the same count without rebuilding the
+ *     filter inline.
+ *
+ * Semantics match the inline path in `aggregate()`:
+ *   - `threshold` is clamped into [0, 1] (NaN / negative / >1 are
+ *     normalised), matching the runtime behaviour of `aggregate()`.
+ *   - The comparison is `f.confidence >= threshold` (inclusive at the
+ *     boundary), so `threshold: 0.5` keeps a finding with `confidence: 0.5`.
+ *   - With `threshold: 0` everything passes through (no floor).
+ *
+ * Pure: never mutates the input array or its findings.
+ */
+export function applyMinConfidence(
+  findings: Finding[],
+  threshold: number,
+): ApplyMinConfidenceResult {
+  const t = clampConfidence(threshold);
+  if (t === 0) {
+    return { kept: [...findings], dropped: [], threshold: 0 };
+  }
+  const kept: Finding[] = [];
+  const dropped: Finding[] = [];
+  for (const f of findings) {
+    if (f.confidence >= t) kept.push(f);
+    else dropped.push(f);
+  }
+  return { kept, dropped, threshold: t };
+}
+
 export function rankFindings(findings: Finding[]): Finding[] {
   return [...findings].sort((a, b) => {
     const sev = compareSeverity(a.severity, b.severity);
@@ -97,8 +185,13 @@ export function aggregate(findings: Finding[], opts: AggregateOptions = {}): Agg
   const threshold = opts.threshold ?? 'low';
   const maxPerFile = opts.maxPerFile ?? 8;
   const radius = opts.dedupRadius ?? 2;
+  // Floor low-confidence noise via the extracted helper so the floor
+  // semantics are defined in exactly one place. `applyMinConfidence`
+  // clamps the threshold into [0, 1] internally; we drop the result on
+  // the floor and continue with the kept set.
+  const floored = applyMinConfidence(findings, opts.minConfidence ?? 0);
 
-  const filtered = findings.filter(
+  const filtered = floored.kept.filter(
     (f) => SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold],
   );
   const deduped = dedupFindings(filtered, radius);

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   getMetrics,
+  observeAgentExecutions,
   registerQueueDepthCollector,
   resetMetricsForTests,
 } from '@clawreview/telemetry';
@@ -99,5 +100,20 @@ describe('worker + queue Prometheus surface', () => {
     const res = await app.inject({ method: 'GET', url: '/metrics' });
     expect(res.statusCode).toBe(200);
     expect(res.body).toMatch(/clawreview_queue_depth\{[^}]*queue="test-queue"[^}]*\} 4/);
+  });
+
+  it('exposes per-agent histogram + counters when observeAgentExecutions is called', async () => {
+    const metrics = getMetrics({ service: 'clawreview-server' });
+    observeAgentExecutions(metrics, [
+      { agent: 'security', status: 'ok', durationMs: 1500, findings: 2 },
+      { agent: 'style', status: 'error', durationMs: 400, findings: 0, error: 'rate limit' },
+    ]);
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(200);
+    const body = res.body;
+    expect(body).toContain('# TYPE clawreview_agent_duration_seconds histogram');
+    expect(body).toMatch(/clawreview_agent_invocations_total\{[^}]*agent="security"[^}]*outcome="ok"[^}]*\} 1/);
+    expect(body).toMatch(/clawreview_agent_invocations_total\{[^}]*agent="style"[^}]*outcome="error"[^}]*\} 1/);
+    expect(body).toMatch(/clawreview_agent_findings_total\{[^}]*agent="security"[^}]*\} 2/);
   });
 });

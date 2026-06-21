@@ -9,6 +9,7 @@ import { REVIEW_JOB, getQueue } from '../queue.js';
 import { getDeliveryCache } from '../services/delivery-cache.js';
 import { getReviewStore } from '../services/review-store.js';
 import { getRepoHealth } from '../services/repo-health.js';
+import { getWebhookStore } from '../services/webhook-store.js';
 import { getMetrics } from '@clawreview/telemetry';
 
 const SUPPORTED_PR_ACTIONS = new Set(['opened', 'synchronize', 'reopened', 'ready_for_review']);
@@ -89,42 +90,81 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
       return { ok: true, duplicate: true, delivery };
     }
 
+    // Store the raw delivery for operator-driven replay. Capture happens
+    // BEFORE handling so we still have the payload if dispatch throws.
+    getWebhookStore().put({
+      deliveryId: delivery,
+      event,
+      action: extractAction(req.body),
+      payload: req.body,
+      receivedAt: new Date().toISOString(),
+      repoFullName: extractRepoFullName(req.body),
+      installationId: extractInstallationId(req.body),
+    });
+
     try {
+      const result = await dispatchWebhook(event, delivery, req.body, req.log);
+      if ('statusCode' in result) {
+        reply.code(result.statusCode);
+        return result.body;
+      }
+      return result.body;
+    } catch (err) {
+      req.log.error({ err, event, delivery }, 'webhook handling failed');
+      reply.code(400);
+      return { error: 'BadPayload', message: (err as Error).message };
+    }
+  });
+}
+
+/**
+ * Dispatch logic for a single webhook delivery. Extracted from the route
+ * handler so both the live POST endpoint and the operator-facing replay
+ * endpoint share one code path. Returns either `{ body }` (200) or
+ * `{ statusCode, body }` for explicit non-200 responses.
+ */
+export async function dispatchWebhook(
+  event: string,
+  delivery: string,
+  body: unknown,
+  log: { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void },
+): Promise<{ statusCode?: number; body: Record<string, unknown> }> {
       if (event === 'pull_request') {
-        const payload = PullRequestPayloadSchema.parse(req.body);
+        const payload = PullRequestPayloadSchema.parse(body);
         if (!SUPPORTED_PR_ACTIONS.has(payload.action)) {
-          return { ok: true, ignored: true };
+          return { body: { ok: true, ignored: true } };
         }
         if (!payload.installation) {
-          reply.code(400);
-          return { error: 'MissingInstallation' };
+          return { statusCode: 400, body: { error: 'MissingInstallation' } };
         }
         if (payload.pull_request.draft && payload.action !== 'ready_for_review') {
-          return { ok: true, ignored: true, reason: 'draft' };
+          return { body: { ok: true, ignored: true, reason: 'draft' } };
         }
         const authorSkip = shouldSkipAuthor(payload.pull_request.user?.login, {
           allowBots: env.REVIEW_BOT_PRS,
           skipAuthors: parseLoginList(env.REVIEW_SKIP_AUTHORS),
         });
         if (authorSkip.skip) {
-          req.log.info(
+          log.info(
             { author: payload.pull_request.user?.login, reason: authorSkip.reason },
             'webhook ignored: author filter',
           );
-          return { ok: true, ignored: true, reason: authorSkip.reason };
+          return { body: { ok: true, ignored: true, reason: authorSkip.reason } };
         }
         const health = getRepoHealth();
         if (health.isPaused(payload.repository.owner.login, payload.repository.name)) {
           const state = health.get(payload.repository.owner.login, payload.repository.name);
-          req.log.warn(
+          log.warn(
             { repo: payload.repository.full_name, reason: state?.pausedReason },
             'webhook ignored: repo paused',
           );
           return {
-            ok: true,
-            ignored: true,
-            reason: 'repo_paused',
-            pausedUntil: state?.pausedUntil,
+            body: {
+              ok: true,
+              ignored: true,
+              reason: 'repo_paused',
+              pausedUntil: state?.pausedUntil,
+            },
           };
         }
         const queue = getQueue();
@@ -166,21 +206,21 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
               delivery,
             },
           },
-          { logger: req.log },
+          { logger: log as never },
         );
-        return { ok: true, queued: jobId, reviewId: started.id };
+        return { body: { ok: true, queued: jobId, reviewId: started.id } };
       }
 
       if (event === 'installation' || event === 'installation_repositories') {
-        const payload = InstallationPayloadSchema.safeParse(req.body);
-        if (!payload.success) return { ok: true };
-        req.log.info({ event, action: payload.data.action, installation: payload.data.installation.id }, 'installation event');
+        const payload = InstallationPayloadSchema.safeParse(body);
+        if (!payload.success) return { body: { ok: true } };
+        log.info({ event, action: payload.data.action, installation: payload.data.installation.id }, 'installation event');
         getMetrics({ service: 'clawreview-server' }).webhookEventsTotal.inc({
           event,
           action: payload.data.action,
           result: 'accepted',
         });
-        return { ok: true };
+        return { body: { ok: true } };
       }
 
       if (event === 'ping') {
@@ -189,18 +229,36 @@ export async function registerWebhookRoutes(app: FastifyInstance): Promise<void>
           action: 'ping',
           result: 'accepted',
         });
-        return { ok: true, pong: true };
+        return { body: { ok: true, pong: true } };
       }
       getMetrics({ service: 'clawreview-server' }).webhookEventsTotal.inc({
         event,
         action: 'unknown',
         result: 'ignored',
       });
-      return { ok: true, ignored: true, event };
-    } catch (err) {
-      req.log.error({ err, event, delivery }, 'webhook handling failed');
-      reply.code(400);
-      return { error: 'BadPayload', message: (err as Error).message };
-    }
-  });
+      return { body: { ok: true, ignored: true, event } };
+}
+
+function extractAction(body: unknown): string | undefined {
+  if (body && typeof body === 'object' && 'action' in body) {
+    const a = (body as { action?: unknown }).action;
+    if (typeof a === 'string') return a;
+  }
+  return undefined;
+}
+
+function extractRepoFullName(body: unknown): string | undefined {
+  const repo = (body as { repository?: { full_name?: unknown } } | null)?.repository;
+  if (repo && typeof repo === 'object' && typeof repo.full_name === 'string') {
+    return repo.full_name;
+  }
+  return undefined;
+}
+
+function extractInstallationId(body: unknown): number | undefined {
+  const inst = (body as { installation?: { id?: unknown } } | null)?.installation;
+  if (inst && typeof inst === 'object' && typeof inst.id === 'number') {
+    return inst.id;
+  }
+  return undefined;
 }

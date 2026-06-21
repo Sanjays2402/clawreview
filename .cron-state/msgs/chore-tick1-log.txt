@@ -1,0 +1,13 @@
+chore(autoship): tick 1 log and session note
+
+Records the five features shipped this tick (gitlab exporter, SARIF
+enrichment, file-level suppression, PR comment run summary, CLI
+markdown/gitlab formats) plus the vite override that unblocked the
+test suite. STATE.md gains a Done section, a Known baseline issues
+section documenting the pre-existing red gates on origin/main, and a
+backlog entry for the foundational @types/node fix.
+
+The session note (2026-06-20-0211.md) captures the per-feature SHAs,
+gate evidence (385 tests verified passing across 10 packages), and
+the environment notes future ticks need (TMPDIR override for vitest;
+commit-message scratch directory inside .cron-state/msgs/).

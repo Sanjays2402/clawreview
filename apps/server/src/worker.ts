@@ -6,10 +6,21 @@ import {
   GitHubClient,
 } from '@clawreview/github';
 import { ProviderRegistry } from '@clawreview/llm';
-import { aggregate, applySeverityRules, applySuppressions, buildInlineComments, buildSuppressionMap, deriveCheckRun, renderPrComment } from '@clawreview/aggregator';
-import { runPipeline } from '@clawreview/agents';
+import {
+  aggregate,
+  applyMinConfidence,
+  applySeverityRules,
+  applySuppressions,
+  buildInlineComments,
+  buildSuppressionMap,
+  calibrateConfidence,
+  deriveCheckRun,
+  renderPrComment,
+  similarityMerge,
+} from '@clawreview/aggregator';
+import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeSimilarityMerges } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -26,6 +37,20 @@ const BUDGET_BLOCKED_BODY = (limitUsd: number, spentUsd: number, periodKey: stri
       `($${spentUsd.toFixed(2)} of $${limitUsd.toFixed(2)} spent).`,
     '',
     'Raise `budget.monthly_usd` in `.clawreview.yml`, or wait for the next billing month.',
+  ].join('\n');
+
+const PREFLIGHT_BLOCKED_BODY = (estimateUsd: number, spentUsd: number, limitUsd: number) =>
+  [
+    '### ClawReview',
+    '',
+    `Skipping this review. The estimated LLM cost for this PR ($${estimateUsd.toFixed(2)}) plus ` +
+      `prior spend this month ($${spentUsd.toFixed(2)}) would exceed the monthly budget ` +
+      `($${limitUsd.toFixed(2)}).`,
+    '',
+    'Options:',
+    '- Split the PR into smaller changes so each one fits the remaining budget',
+    '- Raise `budget.monthly_usd` in `.clawreview.yml`',
+    '- Disable agents you do not need via `agents:` in `.clawreview.yml`',
   ].join('\n');
 
 export async function startWorker(logger: Logger): Promise<void> {
@@ -105,6 +130,42 @@ export async function startWorker(logger: Logger): Promise<void> {
 
     const diff = await gh.fetchPrDiff({ owner: data.owner, repo: data.repo, number: data.prNumber });
 
+    // Cost pre-flight: estimate the LLM spend for this PR from the diff
+    // shape + configured agents, and bail before any tokens are spent
+    // when the estimate would push the installation past its monthly
+    // budget. This catches cases the post-hoc `budget.wouldExceed(.., 0)`
+    // check misses (an installation that is under budget but where a
+    // very large PR would push it over in a single run).
+    const preflightSpent = budget.snapshot(data.installationId, limit).spentUsd;
+    const preflight = preflightBudget({
+      diffText: diff,
+      config: cfg,
+      spentUsd: preflightSpent,
+    });
+    if (!preflight.ok) {
+      log.warn(
+        {
+          estimateUsd: preflight.estimate.totalUsd,
+          spentUsd: preflight.spentUsd,
+          limitUsd: preflight.limitUsd,
+          chunks: preflight.estimate.chunks,
+        },
+        'cost preflight blocked review',
+      );
+      const skipBody = `${COMMENT_MARKER}\n${PREFLIGHT_BLOCKED_BODY(
+        preflight.estimate.totalUsd,
+        preflight.spentUsd,
+        preflight.limitUsd,
+      )}`;
+      await gh.upsertReviewComment(
+        { owner: data.owner, repo: data.repo, number: data.prNumber },
+        { marker: COMMENT_MARKER, body: skipBody },
+      );
+      await store.fail(data.reviewId, new Error('budget_preflight_blocked'));
+      recordOutcome('budget_exhausted');
+      return;
+    }
+
     // Surface progress on the PR immediately so a long review run doesn't
     // look like silence. We create the check-run as `in_progress` here and
     // PATCH it to `completed` after aggregation. If creation fails (e.g.
@@ -151,11 +212,72 @@ export async function startWorker(logger: Logger): Promise<void> {
         'severity_rules_applied',
       );
     }
+    if (ruled.dropped.length > 0) {
+      // Surface the drop count separately so dashboards can show
+      // "rule-dropped" findings as a distinct bucket from the
+      // min_confidence floor and inline suppressions.
+      log.info(
+        { rulesDropped: ruled.dropped.length },
+        'severity_rules_dropped',
+      );
+      observeFindingsDropped(metrics, 'severity_rule', ruled.dropped.length);
+    }
 
-    const aggregated = aggregate(ruled.findings, {
+    // Confidence calibration: floor low-confidence nits, promote
+    // high-confidence security findings. Runs BEFORE aggregate so the
+    // promoted severities compete on the maxPerFile cap.
+    const calibrated = calibrateConfidence(ruled.findings);
+    if (calibrated.applied.length > 0) {
+      log.info(
+        {
+          calibrationApplied: calibrated.applied.length,
+          rules: calibrated.applied.reduce<Record<string, number>>((acc, c) => {
+            acc[c.rule] = (acc[c.rule] ?? 0) + 1;
+            return acc;
+          }, {}),
+        },
+        'confidence_calibration_applied',
+      );
+    }
+
+    // Cross-agent similarity merge: collapse findings that two different
+    // agents reported on the same line with overlapping rationale. The
+    // CLI runs the same step so a local run and a server-driven run
+    // produce identical aggregated output for the same diff.
+    const sim = similarityMerge(calibrated.findings);
+    if (sim.merged.length > 0) {
+      log.info(
+        {
+          mergedCount: sim.merged.length,
+          examples: sim.merged.slice(0, 5),
+        },
+        'similarity_merge_applied',
+      );
+      // Emit a Prometheus counter per (winner, loser) pair so dashboards
+      // can graph which agent pairs duplicate most often -- those are the
+      // best candidates for prompt consolidation.
+      observeSimilarityMerges(metrics, sim.merged);
+    }
+
+    const aggregated = aggregate(sim.findings, {
       threshold: cfg.severity_threshold,
       maxPerFile: cfg.max_findings_per_file,
+      minConfidence: cfg.min_confidence,
     });
+    if (cfg.min_confidence > 0) {
+      // Use the standalone helper so the dropped count comes from the
+      // exact same filter `aggregate()` uses, AND we count drops only
+      // once (no re-walking sim.findings inline). The helper clamps the
+      // threshold; we treat any non-zero result as "floor is active".
+      const floorCheck = applyMinConfidence(sim.findings, cfg.min_confidence);
+      if (floorCheck.dropped.length > 0) {
+        log.info(
+          { droppedByFloor: floorCheck.dropped.length, minConfidence: floorCheck.threshold },
+          'min_confidence floor applied',
+        );
+        observeFindingsDropped(metrics, 'min_confidence', floorCheck.dropped.length);
+      }
+    }
 
     // Honor inline `clawreview-ignore` / `clawreview-ignore-next-line`
     // markers in the diff. Suppressed findings are recorded for telemetry
@@ -167,6 +289,7 @@ export async function startWorker(logger: Logger): Promise<void> {
         { suppressed: suppression.suppressed.length, kept: suppression.kept.length },
         'inline suppression applied',
       );
+      observeFindingsDropped(metrics, 'inline_suppression', suppression.suppressed.length);
     }
     aggregated.findings = suppression.kept;
     // Recompute totals and per-file groups from the surviving findings so
@@ -276,6 +399,10 @@ export async function startWorker(logger: Logger): Promise<void> {
     for (const f of aggregated.findings) {
       metrics.reviewFindingsTotal.inc({ severity: f.severity });
     }
+    // Per-agent latency / outcome / findings counts derived from the
+    // pipeline summary. Gives operators the same per-agent visibility
+    // the dashboard already has, scoped to Prometheus.
+    observeAgentExecutions(metrics, summary.agentExecutions);
     recordOutcome('completed');
 
     log.info(

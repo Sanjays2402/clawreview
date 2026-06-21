@@ -1,6 +1,13 @@
 import { randomUUID } from 'node:crypto';
 
-import type { JobHandle, QueueAdapter, QueueHealth } from './adapter.js';
+import type {
+  JobHandle,
+  QueueAdapter,
+  QueueDetails,
+  QueueFailure,
+  QueueHealth,
+  QueueJobNameCounts,
+} from './adapter.js';
 
 interface PendingJob {
   id: string;
@@ -9,12 +16,32 @@ interface PendingJob {
   runAt: number;
 }
 
+interface InflightJob {
+  id: string;
+  name: string;
+  startedAt: number;
+}
+
+const DEFAULT_FAILURE_RING = 25;
+
+export interface InMemoryQueueOptions {
+  /** Max recent failures to retain for `details()`. Defaults to 25. */
+  failureRingSize?: number;
+}
+
 export class InMemoryQueue implements QueueAdapter {
   private handlers = new Map<string, (data: unknown) => Promise<void>>();
   private pending: PendingJob[] = [];
+  private inflightJobs: InflightJob[] = [];
   private timer?: NodeJS.Timeout;
   private closed = false;
   private inflight = 0;
+  private failures: QueueFailure[] = [];
+  private readonly failureRingSize: number;
+
+  constructor(opts: InMemoryQueueOptions = {}) {
+    this.failureRingSize = Math.max(1, opts.failureRingSize ?? DEFAULT_FAILURE_RING);
+  }
 
   async enqueue(name: string, data: unknown, opts: { delayMs?: number; jobId?: string } = {}): Promise<JobHandle> {
     if (this.closed) throw new Error('Queue closed');
@@ -46,6 +73,7 @@ export class InMemoryQueue implements QueueAdapter {
     this.timer = undefined;
     this.handlers.clear();
     this.pending = [];
+    this.inflightJobs = [];
   }
 
   async health(): Promise<QueueHealth> {
@@ -56,6 +84,52 @@ export class InMemoryQueue implements QueueAdapter {
       inflight: this.inflight,
       ...(this.closed ? { error: 'queue_closed' } : {}),
     };
+  }
+
+  async details(): Promise<QueueDetails> {
+    const base = await this.health();
+    const byNameMap = new Map<string, QueueJobNameCounts>();
+    for (const job of this.pending) {
+      const cur = byNameMap.get(job.name) ?? { name: job.name, pending: 0, inflight: 0 };
+      cur.pending += 1;
+      byNameMap.set(job.name, cur);
+    }
+    for (const job of this.inflightJobs) {
+      const cur = byNameMap.get(job.name) ?? { name: job.name, pending: 0, inflight: 0 };
+      cur.inflight += 1;
+      byNameMap.set(job.name, cur);
+    }
+    const byName = [...byNameMap.values()].sort((a, b) => a.name.localeCompare(b.name));
+    return {
+      ...base,
+      byName,
+      // Newest first; tests rely on this ordering for predictable assertions.
+      recentFailures: [...this.failures].sort((a, b) => b.failedAt - a.failedAt),
+      sampledAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Exposed for tests + adapters that wrap InMemoryQueue (replay endpoint,
+   * future on-disk persistence). NOT part of the public QueueAdapter
+   * contract; production code should rely on `details()` instead.
+   */
+  _failuresForTests(): QueueFailure[] {
+    return [...this.failures];
+  }
+
+  private recordFailure(job: PendingJob, err: unknown): void {
+    const failure: QueueFailure = {
+      id: job.id,
+      name: job.name,
+      error: err instanceof Error ? err.message : String(err),
+      failedAt: Date.now(),
+      attempts: 1,
+    };
+    this.failures.push(failure);
+    if (this.failures.length > this.failureRingSize) {
+      this.failures.splice(0, this.failures.length - this.failureRingSize);
+    }
   }
 
   private kick(): void {
@@ -79,10 +153,17 @@ export class InMemoryQueue implements QueueAdapter {
         continue;
       }
       this.inflight += 1;
+      const inflightEntry: InflightJob = { id: job.id, name: job.name, startedAt: now };
+      this.inflightJobs.push(inflightEntry);
       handler(job.data)
-        .catch((err) => console.error(`[queue] handler ${job.name} failed`, err))
+        .catch((err) => {
+          console.error(`[queue] handler ${job.name} failed`, err);
+          this.recordFailure(job, err);
+        })
         .finally(() => {
           this.inflight -= 1;
+          const idx = this.inflightJobs.indexOf(inflightEntry);
+          if (idx >= 0) this.inflightJobs.splice(idx, 1);
         });
     }
     this.pending = remaining;
