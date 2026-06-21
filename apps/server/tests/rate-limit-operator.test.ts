@@ -279,3 +279,198 @@ describe('operator-poll bypass via ?force=1 (wired into fastify)', () => {
     expect(res.headers['x-ratelimit-operator-limit']).toBeUndefined();
   });
 });
+
+describe('operatorPollProbeParam (pure)', () => {
+  it('returns the sanitised probe name when present', () => {
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/recent?probe=stats-sidebar'),
+    ).toBe('stats-sidebar');
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=replay.recent'),
+    ).toBe('replay.recent');
+    // Underscores survive the strict allowlist.
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=top_repos_widget'),
+    ).toBe('top_repos_widget');
+  });
+
+  it('lower-cases the probe name so Casing variations agree', () => {
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/recent?probe=Stats-Sidebar'),
+    ).toBe('stats-sidebar');
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/recent?probe=REPLAY'),
+    ).toBe('replay');
+  });
+
+  it('returns null when no probe is present, or when the value is empty', () => {
+    expect(_internals.operatorPollProbeParam('/api/internal/webhook/recent')).toBeNull();
+    expect(_internals.operatorPollProbeParam('/api/internal/webhook/recent?force=1')).toBeNull();
+    expect(_internals.operatorPollProbeParam('/api/internal/webhook/recent?probe=')).toBeNull();
+  });
+
+  it('strips disallowed characters and falls back to "unknown" when the value collapses', () => {
+    // Slashes are not in the allowlist -> dropped.
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=stats/sidebar'),
+    ).toBe('statssidebar');
+    // All-disallowed value -> the bucket is still surfaced as "unknown"
+    // so a dashboard with a fully bogus probe param is still
+    // attributable to "someone fed us nonsense" rather than silently
+    // dropped.
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=!@#$%^&buckets=24'),
+    ).toBe('unknown');
+  });
+
+  it('decodes percent-escapes before sanitising', () => {
+    // %2D == '-', %2E == '.'. Both survive the sanitiser.
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=stats%2Dsidebar'),
+    ).toBe('stats-sidebar');
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/stats?probe=v1%2Estats'),
+    ).toBe('v1.stats');
+  });
+
+  it('caps at 64 chars so a paste accident does not blow up log size', () => {
+    const long = 'a'.repeat(120);
+    const out = _internals.operatorPollProbeParam(
+      `/api/internal/webhook/stats?probe=${long}`,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.length).toBe(64);
+    expect(out!.startsWith('a'.repeat(64))).toBe(true);
+  });
+
+  it('parses probe alongside other params (force / event / buckets) regardless of position', () => {
+    expect(
+      _internals.operatorPollProbeParam(
+        '/api/internal/webhook/stats?force=1&probe=stats-sidebar&buckets=24',
+      ),
+    ).toBe('stats-sidebar');
+    expect(
+      _internals.operatorPollProbeParam(
+        '/api/internal/webhook/stats?probe=stats-sidebar&force=1',
+      ),
+    ).toBe('stats-sidebar');
+    expect(
+      _internals.operatorPollProbeParam('/api/internal/webhook/recent?event=push&probe=replay'),
+    ).toBe('replay');
+  });
+});
+
+describe('operator-poll probe annotation (wired into fastify)', () => {
+  let app: ReturnType<typeof Fastify>;
+  beforeEach(async () => {
+    app = Fastify();
+    app.addHook('onRequest', async (req) => {
+      (req as unknown as { apiAuth?: { tokenName: string } }).apiAuth = {
+        tokenName: 'rl-op-probe',
+      };
+    });
+  });
+  afterEach(async () => {
+    await app.close();
+  });
+
+  it('mirrors the probe identifier on the response via x-ratelimit-operator-probe', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 10 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?probe=stats-sidebar',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-operator-probe']).toBe('stats-sidebar');
+  });
+
+  it('omits the probe header when no probe param is present', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 10 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    const res = await app.inject({ method: 'GET', url: '/api/internal/webhook/recent' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-operator-probe']).toBeUndefined();
+  });
+
+  it('attaches the probe header alongside the bypass header when both flags are set', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 2 });
+    app.get('/api/internal/webhook/recent', async () => ({ ok: true }));
+    await app.ready();
+
+    // force=1 bypasses the bucket; probe attribute survives so an
+    // operator can see WHICH widget did the bypass.
+    const res = await app.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/recent?force=1&probe=stats-sidebar',
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-operator-bypass']).toBe('force');
+    expect(res.headers['x-ratelimit-operator-probe']).toBe('stats-sidebar');
+    // Remaining header is still absent on a bypass (the request did
+    // not draw down the bucket).
+    expect(res.headers['x-ratelimit-operator-remaining']).toBeUndefined();
+  });
+
+  it('logs the probe via req.log.info so operators can grep by probe name', async () => {
+    const logged: Array<{ obj: unknown; msg: string }> = [];
+    const probeApp = Fastify({
+      loggerInstance: {
+        info: (obj: unknown, msg?: string) => {
+          if (typeof msg === 'string' && msg === 'operator-poll probe') {
+            logged.push({ obj, msg });
+          }
+        },
+        warn: () => {},
+        error: () => {},
+        debug: () => {},
+        trace: () => {},
+        fatal: () => {},
+        silent: () => {},
+        level: 'info',
+        child() { return this; },
+      } as unknown as never,
+    });
+    probeApp.addHook('onRequest', async (req: import('fastify').FastifyRequest) => {
+      (req as unknown as { apiAuth?: { tokenName: string } }).apiAuth = {
+        tokenName: 'rl-op-probe-log',
+      };
+    });
+    await registerOperatorPollRateLimit(probeApp, { perMinute: 10 });
+    probeApp.get('/api/internal/webhook/stats', async () => ({ ok: true }));
+    await probeApp.ready();
+
+    await probeApp.inject({
+      method: 'GET',
+      url: '/api/internal/webhook/stats?probe=replay-recent&buckets=24',
+    });
+
+    // At least one info call landed with our probe attribution.
+    const probeLogs = logged.filter(
+      (l) => (l.obj as { probe?: string }).probe === 'replay-recent',
+    );
+    expect(probeLogs.length).toBeGreaterThanOrEqual(1);
+    // The recorded path is the bare route (no query string) so the
+    // log groups by endpoint instead of fragmenting per call.
+    expect((probeLogs[0]!.obj as { path?: string }).path).toBe(
+      '/api/internal/webhook/stats',
+    );
+    await probeApp.close();
+  });
+
+  it('does not surface the probe header on non-polling routes', async () => {
+    await registerOperatorPollRateLimit(app, { perMinute: 5 });
+    app.get('/api/reviews', async () => ({ ok: true }));
+    await app.ready();
+
+    // The probe header is gated behind the operator-poll classifier;
+    // unrelated /api routes never see it.
+    const res = await app.inject({ method: 'GET', url: '/api/reviews?probe=stats-sidebar' });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-operator-probe']).toBeUndefined();
+  });
+});

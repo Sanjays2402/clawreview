@@ -312,6 +312,63 @@ export function operatorPollForceParam(url: string): boolean {
 }
 
 /**
+ * Optional probe identifier from a `?probe=<name>` query parameter.
+ * Returns the sanitised name when present, `null` otherwise. Pairs
+ * with `?force=1` so a dashboard can both bypass the operator-poll
+ * bucket AND tell operators which named widget did the bypass.
+ *
+ * Use case: a dashboard has several widgets that each ping the
+ * polling endpoints on their own timers. When something starts
+ * misbehaving (a chatty new widget, a wedged auto-refresh), the
+ * operator wants to know which one without going through every
+ * client. Tagging probes with a stable identifier (`probe=stats-
+ * sidebar` / `probe=replay-recent`) gives `req.log` a label to
+ * attach to the audit line so dashboard noise becomes attributable.
+ *
+ * Sanitisation rules (keep log noise / cardinality bounded):
+ *   - Trimmed; values that collapse to empty return `null`.
+ *   - Lower-cased so `stats-sidebar` and `Stats-Sidebar` agree.
+ *   - Only `[a-z0-9._-]` survives; everything else is dropped.
+ *     This is strict on purpose: a probe identifier is a developer-
+ *     chosen label, not arbitrary user input. Garbage in -> bucket
+ *     under `'unknown'` rather than letting a hostile / typo'd
+ *     value pollute the log.
+ *   - Capped at 64 chars so a long mistakenly-pasted token can't
+ *     blow up log size.
+ *
+ * Pure / exported for tests; the route wiring is a thin call into
+ * this helper followed by a `req.log.info({ probe, ... })`.
+ */
+export function operatorPollProbeParam(url: string): string | null {
+  const qIdx = url.indexOf('?');
+  if (qIdx < 0) return null;
+  const query = url.slice(qIdx + 1);
+  for (const part of query.split('&')) {
+    const eq = part.indexOf('=');
+    const key = eq < 0 ? part : part.slice(0, eq);
+    if (key !== 'probe') continue;
+    const rawValue = eq < 0 ? '' : part.slice(eq + 1);
+    if (rawValue.length === 0) return null;
+    // Percent-decode lightly so `probe=stats%2Dsidebar` works without
+    // pulling in `URL` for the cheap path. Failures (malformed escape)
+    // fall back to the raw value so we don't lose the probe entirely.
+    let value: string;
+    try {
+      value = decodeURIComponent(rawValue);
+    } catch {
+      value = rawValue;
+    }
+    const cleaned = value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9._-]/g, '');
+    if (cleaned.length === 0) return 'unknown';
+    return cleaned.length > 64 ? cleaned.slice(0, 64) : cleaned;
+  }
+  return null;
+}
+
+/**
  * Registers the operator-polling rate limit class. Runs BEFORE the
  * default per-token limiter (registered in server.ts) so dashboards
  * land in the dedicated bucket and don't compete with the operator's
@@ -338,6 +395,24 @@ export async function registerOperatorPollRateLimit(
 
   app.addHook('onRequest', async (req: FastifyRequest, reply: FastifyReply) => {
     if (!isOperatorPollPath(req.url)) return;
+
+    // Optional probe identifier: a dashboard can tag each named widget
+    // with `?probe=<name>` so the operator can attribute polling
+    // traffic to a specific UI surface. The probe label survives BOTH
+    // the bypass and the normal-flow paths so operators see consistent
+    // attribution either way -- and so a chatty client polling without
+    // ?force=1 is still attributable.
+    const probe = operatorPollProbeParam(req.url);
+    if (probe !== null) {
+      // Single structured log line so an operator grep can filter by
+      // probe name without parsing free-form text. The route name and
+      // request id are already in the request log context.
+      req.log.info({ probe, path: req.url.split('?', 1)[0] }, 'operator-poll probe');
+      // Mirror the probe on the response so a client / proxy can see
+      // its own attribution without consulting server logs. Distinct
+      // header name so it doesn't clash with the rate-limit headers.
+      reply.header('x-ratelimit-operator-probe', probe);
+    }
 
     // In-band probe bypass: a dashboard can send `?force=1` on its
     // own health-check ping so the limiter does NOT count it against
@@ -410,4 +485,4 @@ export async function registerOperatorPollRateLimitWithEnv(
 }
 
 // Exported for tests.
-export const _internals = { isExempt, isOperatorPollPath, operatorPollForceParam, checkAndRecord, createPerTokenLimiter, WINDOW_MS };
+export const _internals = { isExempt, isOperatorPollPath, operatorPollForceParam, operatorPollProbeParam, checkAndRecord, createPerTokenLimiter, WINDOW_MS };
