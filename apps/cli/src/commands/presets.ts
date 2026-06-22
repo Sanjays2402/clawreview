@@ -1097,7 +1097,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       headerLines.push(`# since-target: ${sinceTarget}  (chain b resolved at this git ref)`);
     }
     if (sinceRangeParsed.kind === 'ok') {
-      headerLines.push(`# since-range: ${sinceRangeParsed.raw}  (split into base + target)`);
+      const shorthandNote = sinceRangeParsed.targetWasShorthand
+        ? '  (target resolved to HEAD via shorthand)'
+        : '';
+      headerLines.push(
+        `# since-range: ${sinceRangeParsed.raw}  (split into base + target)${shorthandNote}`,
+      );
     }
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
@@ -1149,8 +1154,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       );
     }
     if (sinceRangeParsed.kind === 'ok') {
+      const shorthandNote = sinceRangeParsed.targetWasShorthand
+        ? kleur.gray(' (target resolved to HEAD via shorthand)')
+        : '';
       process.stdout.write(
-        `${kleur.bold('since-range')}: ${sinceRangeParsed.raw} ${kleur.gray('(split into base + target)')}\n`,
+        `${kleur.bold('since-range')}: ${sinceRangeParsed.raw} ${kleur.gray('(split into base + target)')}${shorthandNote}\n`,
       );
     }
     if (onlyFields !== null) {
@@ -1225,7 +1233,7 @@ function parseChain(raw: string): string[] | null {
  * Result of parsing the `--since-range <a>..<b>` flag (or its
  * triple-dot symmetric-diff variant added in tick 17).
  *
- * Four states the caller can branch on without inspecting strings:
+ * States the caller can branch on without inspecting strings:
  *   - `'absent'`     -- flag was not passed at all; no error.
  *   - `'ok'`         -- two-dot form parsed cleanly; `base` + `target`
  *                       are trimmed and non-empty; `raw` echoes the
@@ -1239,6 +1247,18 @@ function parseChain(raw: string): string[] | null {
  *   - `'invalid'`    -- flag was passed but malformed; `message` carries
  *                       a human-readable reason for the stderr line.
  *
+ * Tick 18: a two-dot range with an EMPTY target (`<ref>..`) is now
+ * accepted as HEAD-shorthand to match `git log a..` semantics. The
+ * parsed result carries `target: 'HEAD'` plus
+ * `targetWasShorthand: true` so the JSON/YAML/text headers can echo
+ * \"resolved from <ref>..\" rather than printing a literal 'HEAD' that
+ * the operator never typed. The asymmetric shape (empty target ->
+ * HEAD; empty base -> error) is deliberate: `git log ..feature` and
+ * `git log feature..` mean DIFFERENT things in git, and only the
+ * trailing-empty form has the \"resolve to HEAD\" precedent worth
+ * mirroring. An empty base still rejects with the \"--since-target
+ * instead\" hint.
+ *
  * Exported (alongside `parseSinceRange`) so the diff command and the
  * test suite share one parser. The CLI rejects the flag at the
  * top-level when this returns `'invalid'`; an `'absent'` result lets
@@ -1246,7 +1266,22 @@ function parseChain(raw: string): string[] | null {
  */
 export type SinceRangeParse =
   | { kind: 'absent' }
-  | { kind: 'ok'; raw: string; base: string; target: string; range: 'two-dot' | 'triple-dot' }
+  | {
+      kind: 'ok';
+      raw: string;
+      base: string;
+      target: string;
+      range: 'two-dot' | 'triple-dot';
+      /**
+       * Tick 18: true when the target ref was resolved from a
+       * trailing-empty shorthand (`<ref>..`) to HEAD. False on every
+       * other arm (including triple-dot, which has no shorthand --
+       * `git diff a...` is rejected by git too). Lets the renderer
+       * tell the operator \"target resolved to HEAD via shorthand\"
+       * without re-parsing the raw string.
+       */
+      targetWasShorthand: boolean;
+    }
   | { kind: 'invalid'; message: string };
 
 /**
@@ -1302,12 +1337,23 @@ export function parseSinceRange(raw: unknown): SinceRangeParse {
       };
     }
     if (targetRaw.length === 0) {
+      // Triple-dot has no shorthand precedent in git (`git diff a...`
+      // is rejected too), so we keep the rejection on this arm. An
+      // operator who wants to compare against current-HEAD should
+      // use `a...HEAD` explicitly.
       return {
         kind: 'invalid',
         message: `target ref (after '...') is empty; use --since-base instead if you only need a chain-a ref`,
       };
     }
-    return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw, range: 'triple-dot' };
+    return {
+      kind: 'ok',
+      raw: trimmed,
+      base: baseRaw,
+      target: targetRaw,
+      range: 'triple-dot',
+      targetWasShorthand: false,
+    };
   }
   const parts = trimmed.split('..');
   if (parts.length !== 2) {
@@ -1324,13 +1370,30 @@ export function parseSinceRange(raw: unknown): SinceRangeParse {
       message: `base ref (before '..') is empty; use --since-target instead if you only need a chain-b ref`,
     };
   }
+  // Tick 18: trailing-empty shorthand (`<ref>..`) is now accepted as
+  // sugar for `<ref>..HEAD`, matching `git log a..` semantics. The
+  // shorthand only fires on the two-dot arm (triple-dot has no git
+  // precedent) and only on an EMPTY target (a present-but-whitespace
+  // target trimmed to empty is treated identically -- a stray
+  // `--since-range main.. \t \n` is shorthand, not a typo).
   if (targetRaw.length === 0) {
     return {
-      kind: 'invalid',
-      message: `target ref (after '..') is empty; use --since-base instead if you only need a chain-a ref`,
+      kind: 'ok',
+      raw: trimmed,
+      base: baseRaw,
+      target: 'HEAD',
+      range: 'two-dot',
+      targetWasShorthand: true,
     };
   }
-  return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw, range: 'two-dot' };
+  return {
+    kind: 'ok',
+    raw: trimmed,
+    base: baseRaw,
+    target: targetRaw,
+    range: 'two-dot',
+    targetWasShorthand: false,
+  };
 }
 
 /**

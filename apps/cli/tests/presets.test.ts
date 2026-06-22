@@ -2671,14 +2671,9 @@ describe('parseSinceRange (tick 16)', () => {
     expect(r.message).toContain('--since-target');
   });
 
-  it('rejects an empty target ref with a hint', async () => {
-    const { parseSinceRange } = await import('../src/commands/presets.js');
-    const r = parseSinceRange('main..');
-    expect(r.kind).toBe('invalid');
-    if (r.kind !== 'invalid') return;
-    expect(r.message).toContain('target ref');
-    expect(r.message).toContain('--since-base');
-  });
+  // Tick 18: the `main..` reject test was replaced by the
+  // HEAD-shorthand contract (`<ref>..` -> HEAD). See the
+  // `parseSinceRange HEAD-shorthand (tick 18)` block below.
 
   it('parses triple-dot syntax as a symmetric-diff range (tick 17)', async () => {
     const { parseSinceRange } = await import('../src/commands/presets.js');
@@ -2726,6 +2721,84 @@ describe('parseSinceRange (tick 16)', () => {
     expect(r.kind).toBe('invalid');
     if (r.kind !== 'invalid') return;
     expect(r.message).toContain('exactly one');
+  });
+});
+
+describe('parseSinceRange HEAD-shorthand (tick 18)', () => {
+  // Trailing-empty two-dot shorthand: `<ref>..` resolves the target
+  // to HEAD, matching `git log a..` semantics. Triple-dot keeps the
+  // rejection (no git precedent).
+  it('two-dot `<ref>..` resolves target to HEAD with targetWasShorthand=true', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main..');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('main');
+    expect(r.target).toBe('HEAD');
+    expect(r.range).toBe('two-dot');
+    expect(r.targetWasShorthand).toBe(true);
+    // raw echoes the original (operator-typed) string so headers
+    // still show `main..` -- the shorthand flag tells the renderer
+    // to add the resolution note.
+    expect(r.raw).toBe('main..');
+  });
+
+  it('two-dot `<ref>..   ` (trailing whitespace) is still the shorthand', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('release/2.6..   ');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('release/2.6');
+    expect(r.target).toBe('HEAD');
+    expect(r.targetWasShorthand).toBe(true);
+  });
+
+  it('two-dot `..<ref>` is STILL rejected (asymmetric -- no git precedent)', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('..HEAD');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('base ref');
+    expect(r.message).toContain('--since-target');
+  });
+
+  it('triple-dot `<ref>...` is STILL rejected (no shorthand on this arm)', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main...');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('target ref');
+    expect(r.message).toContain('--since-base');
+  });
+
+  it('explicit `<ref>..HEAD` and shorthand `<ref>..` resolve to the same target', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const explicit = parseSinceRange('main..HEAD');
+    const shorthand = parseSinceRange('main..');
+    expect(explicit.kind).toBe('ok');
+    expect(shorthand.kind).toBe('ok');
+    if (explicit.kind !== 'ok' || shorthand.kind !== 'ok') return;
+    expect(explicit.target).toBe(shorthand.target);
+    expect(explicit.target).toBe('HEAD');
+    // Shorthand flag distinguishes the two forms for header rendering.
+    expect(explicit.targetWasShorthand).toBe(false);
+    expect(shorthand.targetWasShorthand).toBe(true);
+  });
+
+  it('every non-shorthand `ok` arm carries targetWasShorthand=false', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    // Two-dot explicit
+    const twoDot = parseSinceRange('main..HEAD');
+    expect(twoDot.kind).toBe('ok');
+    if (twoDot.kind === 'ok') expect(twoDot.targetWasShorthand).toBe(false);
+    // Triple-dot
+    const tripleDot = parseSinceRange('main...feature');
+    expect(tripleDot.kind).toBe('ok');
+    if (tripleDot.kind === 'ok') expect(tripleDot.targetWasShorthand).toBe(false);
+    // Trimmed two-dot with whitespace
+    const padded = parseSinceRange('  v1 .. v2  ');
+    expect(padded.kind).toBe('ok');
+    if (padded.kind === 'ok') expect(padded.targetWasShorthand).toBe(false);
   });
 });
 
@@ -2841,7 +2914,66 @@ describe('clawreview presets diff --since-range (tick 16)', () => {
     expect(r.stderr).toContain('--since');
   });
 
-  it('rejects an invalid --since-range value (empty target)', async () => {
+  it('accepts a trailing-empty target as HEAD-shorthand (tick 18)', async () => {
+    // Tick 18: `<ref>..` is now sugar for `<ref>..HEAD`, matching
+    // `git log a..` semantics. The CLI should resolve target to HEAD
+    // and run a normal diff rather than rejecting the input. The
+    // previous tick-16 behaviour (reject as typo) has been replaced
+    // by the explicit shorthand. The base-side empty form (`..HEAD`)
+    // STILL rejects -- see the next test for the asymmetric contract.
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Move the file forward and commit so HEAD differs from v1.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    // Shorthand `<v1>..` should resolve target to HEAD and produce
+    // the same diff as the explicit `<v1>..HEAD`. We assert exit 3
+    // (drift) and the JSON sinceRange echoes the operator-typed
+    // string verbatim.
+    const shorthand = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': `${v1}..`,
+    });
+    expect(shorthand.exitCode).toBe(3);
+    const parsedShorthand = JSON.parse(shorthand.stdout);
+    expect(parsedShorthand.sinceRange).toBe(`${v1}..`);
+    expect(parsedShorthand.changed.severity_threshold).toEqual({ a: 'high', b: 'low' });
+    // Equivalence: explicit form should produce byte-identical delta.
+    const explicit = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': `${v1}..HEAD`,
+    });
+    const parsedExplicit = JSON.parse(explicit.stdout);
+    expect(parsedShorthand.changed).toEqual(parsedExplicit.changed);
+    expect(parsedShorthand.only_in_a).toEqual(parsedExplicit.only_in_a);
+    expect(parsedShorthand.only_in_b).toEqual(parsedExplicit.only_in_b);
+  });
+
+  it('rejects an empty BASE ref (asymmetric -- only target has HEAD-shorthand)', async () => {
+    // Mirror of the tick-18 shorthand: empty target -> HEAD;
+    // empty base -> error. This is intentional because
+    // `git log ..feature` and `git log feature..` are NOT
+    // symmetric in git, and only the trailing form has an
+    // unambiguous \"compare against HEAD\" interpretation.
     const dir = await tmpDir();
     await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
     await writeFile(
@@ -2851,11 +2983,11 @@ describe('clawreview presets diff --since-range (tick 16)', () => {
     );
     const r = await runDiff(dir, ['web', 'web'], {
       format: 'json',
-      'since-range': 'main..',
+      'since-range': '..HEAD',
     });
     expect(r.exitCode).toBe(2);
     expect(r.stderr).toContain('--since-range');
-    expect(r.stderr).toContain('target ref');
+    expect(r.stderr).toContain('base ref');
   });
 
   it('echoes the range in YAML and text headers', async () => {

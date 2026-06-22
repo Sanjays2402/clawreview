@@ -69,6 +69,7 @@ Examples:
   clawreview presets diff --base strict --target permissive --format json | jq '.changed'
   clawreview presets diff web-strict web-strict --since HEAD~5   # diff one local preset across 5 commits
   clawreview presets diff web web --since-range HEAD~5..HEAD     # range sugar: split into base+target
+  clawreview presets diff web web --since-range HEAD~5..          # HEAD-shorthand: target resolves to HEAD
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
   clawreview run --format json | clawreview stats --by agent --top-agents 3
