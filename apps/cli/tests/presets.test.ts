@@ -2092,3 +2092,272 @@ describe('clawreview presets diff --max-output-bytes', () => {
     expect(r.stderr).toContain('--max-output-bytes must be a non-negative integer');
   });
 });
+
+describe('loadLocalPresetsAtRef (tick 14 --since support)', () => {
+  it('uses injected loaders so the contract is testable without a real repo', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['web-strict.yml', 'web-lax.yml', 'README.md'];
+    const stubLoad = async (_ref: string, path: string) => {
+      if (path.endsWith('web-strict.yml')) return 'severity_threshold: high\nmin_confidence: 0.9\n';
+      if (path.endsWith('web-lax.yml')) return 'severity_threshold: low\n';
+      return null;
+    };
+    const out = await loadLocalPresetsAtRef('/fake', 'HEAD~3', stubLoad, stubList);
+    expect(Object.keys(out).sort()).toEqual(['web-lax', 'web-strict']);
+    expect(out['web-strict']!.severity_threshold).toBe('high');
+    expect(out['web-strict']!.min_confidence).toBe(0.9);
+    expect(out['web-lax']!.severity_threshold).toBe('low');
+  });
+
+  it('returns {} when the directory does not exist at the ref (empty listing)', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => [];
+    const stubLoad = async () => null;
+    const out = await loadLocalPresetsAtRef('/fake', 'HEAD', stubLoad, stubList);
+    expect(out).toEqual({});
+  });
+
+  it('skips files that listed but cannot be loaded (race tolerance)', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['present.yml', 'vanished.yml'];
+    const stubLoad = async (_ref: string, path: string) => {
+      if (path.endsWith('present.yml')) return 'severity_threshold: medium\n';
+      return null; // vanished between listing and read
+    };
+    const out = await loadLocalPresetsAtRef('/fake', 'HEAD', stubLoad, stubList);
+    expect(Object.keys(out)).toEqual(['present']);
+    expect(out['vanished']).toBeUndefined();
+  });
+
+  it('only loads .yml / .yaml files (ignores README.md, etc)', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['a.yml', 'b.YAML', 'c.txt', 'README'];
+    const stubLoad = async (_ref: string, path: string) => {
+      if (path.endsWith('a.yml')) return 'severity_threshold: high\n';
+      if (path.endsWith('b.YAML')) return 'severity_threshold: low\n';
+      return null;
+    };
+    const out = await loadLocalPresetsAtRef('/fake', 'HEAD', stubLoad, stubList);
+    expect(Object.keys(out).sort()).toEqual(['a', 'b']);
+  });
+
+  it('treats an empty YAML body as an empty preset (parity with HEAD loader)', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['empty.yml'];
+    const stubLoad = async () => ''; // empty file -> YAML.parse returns null
+    const out = await loadLocalPresetsAtRef('/fake', 'HEAD', stubLoad, stubList);
+    expect(out['empty']).toEqual({});
+  });
+
+  it('rejects non-mapping YAML with a useful error mentioning ref + path', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['bad.yml'];
+    const stubLoad = async () => '- one\n- two\n'; // YAML array, not a mapping
+    await expect(
+      loadLocalPresetsAtRef('/fake', 'HEAD~2', stubLoad, stubList),
+    ).rejects.toThrow(/HEAD~2:.clawreview\/presets\/bad\.yml.*must be a YAML mapping/);
+  });
+
+  it('rejects invalid YAML with a useful error mentioning ref + path', async () => {
+    const { loadLocalPresetsAtRef } = await import('../src/config.js');
+    const stubList = async () => ['broken.yml'];
+    const stubLoad = async () => 'severity_threshold: [unclosed';
+    await expect(
+      loadLocalPresetsAtRef('/fake', 'main', stubLoad, stubList),
+    ).rejects.toThrow(/invalid YAML.*main:.clawreview\/presets\/broken\.yml/);
+  });
+});
+
+describe('clawreview presets diff --since (tick 14)', () => {
+  it('echoes the ref in JSON output when --since is active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+
+    // Bootstrap a real git repo so --since has something to look up.
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // Commit v1 of `web` preset.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\nmin_confidence: 0.9\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+
+    // Mutate web preset to v2 in the working tree (uncommitted -- HEAD still v1, but
+    // loadLocalPresets reads the working tree, so chain B sees v2).
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\nmin_confidence: 0.4\n',
+      'utf8',
+    );
+
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      since: v1,
+    });
+    expect(r.exitCode).toBe(3); // there IS drift between v1 and the working tree
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.since).toBe(v1);
+    expect(parsed.chainA).toEqual(['web']);
+    expect(parsed.chainB).toEqual(['web']);
+    // The drift surfaces: chain A (at v1) had severity_threshold: high; chain B
+    // (working tree) has low.
+    expect(parsed.changed.severity_threshold).toEqual({ a: 'high', b: 'low' });
+    expect(parsed.changed.min_confidence).toEqual({ a: 0.9, b: 0.4 });
+  });
+
+  it('emits since=null in JSON output when --since is absent (back-compat)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.since).toBeNull();
+  });
+
+  it('rejects a stray --since= with no value (empty ref)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // Pure-whitespace --since degrades to null in the parser (treated as
+    // absent). Verify the diff still runs cleanly without the historical
+    // resolver firing.
+    const r = await runDiff(dir, ['a', 'b'], { format: 'json', since: '   ' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.since).toBeNull();
+  });
+
+  it('shows since: in the text header when --since is active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    // Mutate working tree.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], { format: 'text', since: 'HEAD' });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('since:');
+    expect(r.stdout).toContain('HEAD');
+    expect(r.stdout).toContain('high'); // chain a was high
+    expect(r.stdout).toContain('low'); // chain b is low
+  });
+
+  it('emits since: in the YAML header when --since is active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], { format: 'yaml', since: 'HEAD' });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('# since: HEAD  (chain a resolved at this git ref)');
+  });
+
+  it('falls back to HEAD presets for chain B even when chain A uses --since', async () => {
+    // The two chains share the BUILT-IN namespace (which is package-
+    // versioned, not git-versioned). Only the local namespace varies.
+    // A built-in preset like `strict` MUST resolve identically on both
+    // sides; chain A's local resolver augments / shadows it from the
+    // historical ref while chain B's augments from HEAD.
+    const dir = await tmpDir();
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // No local presets at all yet.
+    await writeFile(join(dir, 'placeholder'), '', 'utf8');
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'empty'], { cwd: dir });
+    // Both chain a + chain b = 'strict' (built-in); --since changes only
+    // the local namespace, which neither side uses here.
+    const r = await runDiff(dir, ['strict', 'strict'], {
+      format: 'json',
+      since: 'HEAD',
+    });
+    expect(r.exitCode).toBe(0); // no drift; both sides resolve to the same built-in
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.since).toBe('HEAD');
+    expect(parsed.hasChanges).toBe(false);
+  });
+
+  it('returns a useful error when --since references an unknown ref', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    // Not a git repo -> git ls-tree fails -> loader returns []. The diff
+    // proceeds with an empty local namespace for chain A, which means a
+    // chain referencing `a` (local-only) fails to resolve.
+    const r = await runDiff(dir, ['a', 'a'], {
+      format: 'json',
+      since: 'no-such-ref',
+    });
+    // chainA can't resolve `a` (no local preset at ref since the loader
+    // failed) -> the chain unknown-name path fires with a clear message.
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('<a>');
+  });
+});

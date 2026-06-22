@@ -12,6 +12,8 @@ import {
   type ConfigPreset,
 } from '@clawreview/types';
 
+import { gitShow } from './git.js';
+
 /**
  * Where project-local presets live, relative to the config's cwd.
  *
@@ -190,6 +192,110 @@ export async function loadLocalPresets(cwd: string): Promise<Record<string, Conf
     out[name] = resolveLocalPresetExtends(name, body, raw);
   }
   return out;
+}
+
+/**
+ * Load every local preset at a specific git ref, returning the same
+ * flattened `Record<string, ConfigPreset>` shape `loadLocalPresets`
+ * returns at HEAD.
+ *
+ * Implementation parallels `loadLocalPresets` step-for-step but reads
+ * each file's body via `gitShow(ref, <relative-path>)` instead of
+ * `readFile`. The directory listing comes from `git ls-tree` at the
+ * ref so a preset deleted on HEAD still shows up in the historical
+ * namespace.
+ *
+ * Used by `clawreview presets diff --since <ref>` to resolve chain A
+ * against the preset definitions as they existed at that ref, while
+ * chain B continues to resolve against HEAD. The two namespaces share
+ * NO state: a local preset that was renamed between `<ref>` and HEAD
+ * appears under its old name in the ref-side namespace and its new
+ * name in the HEAD-side namespace.
+ *
+ * Returns an empty object when `.clawreview/presets/` did not exist
+ * at `ref` (no historical local presets) so the feature degrades
+ * gracefully on projects that adopted local presets after `<ref>`.
+ *
+ * `loadFile` is the per-file reader; injected so a unit test can
+ * stub git out without spinning up a real repo. Defaults to the
+ * production `gitShow` lookup.
+ */
+export async function loadLocalPresetsAtRef(
+  cwd: string,
+  ref: string,
+  loadFile: (ref: string, path: string, cwd: string) => Promise<string | null> = gitShow,
+  listEntries: (ref: string, dir: string, cwd: string) => Promise<string[]> = gitLsTreeDir,
+): Promise<Record<string, ConfigPreset>> {
+  const entries = await listEntries(ref, LOCAL_PRESET_DIR, cwd);
+  if (entries.length === 0) return {};
+  const raw: Record<string, Record<string, unknown>> = {};
+  for (const entry of entries) {
+    const ext = extname(entry).toLowerCase();
+    if (ext !== '.yml' && ext !== '.yaml') continue;
+    const name = entry.slice(0, entry.length - ext.length);
+    if (!name) continue;
+    const rel = `${LOCAL_PRESET_DIR}/${entry}`;
+    const rawText = await loadFile(ref, rel, cwd);
+    // `null` means the file disappeared between ls-tree and show (race),
+    // or the loader stub returned absent. Either way, skip silently --
+    // the listing was advisory.
+    if (rawText === null) continue;
+    let body: unknown;
+    try {
+      body = YAML.parse(rawText);
+    } catch (err) {
+      throw new Error(
+        `clawreview: invalid YAML in local preset '${name}' at ${ref}:${rel}: ${(err as Error).message}`,
+      );
+    }
+    if (body === null || body === undefined) {
+      raw[name] = {};
+      continue;
+    }
+    if (typeof body !== 'object' || Array.isArray(body)) {
+      throw new Error(
+        `clawreview: local preset '${name}' at ${ref}:${rel} must be a YAML mapping, got ${Array.isArray(body) ? 'array' : typeof body}`,
+      );
+    }
+    raw[name] = body as Record<string, unknown>;
+  }
+  const out: Record<string, ConfigPreset> = {};
+  for (const [name, body] of Object.entries(raw)) {
+    out[name] = resolveLocalPresetExtends(name, body, raw);
+  }
+  return out;
+}
+
+/**
+ * `git ls-tree --name-only <ref>:<dir>` returning the bare entry
+ * names. Returns an empty array when the directory does not exist at
+ * the ref (git's own "fatal: not a tree object" surfaces as exec
+ * failure -- treated as absent).
+ *
+ * Internal: split out so `loadLocalPresetsAtRef` can take it as a
+ * dependency injection seam for unit tests.
+ */
+async function gitLsTreeDir(
+  ref: string,
+  dir: string,
+  cwd: string,
+): Promise<string[]> {
+  const { execFile } = await import('node:child_process');
+  const { promisify } = await import('node:util');
+  const exec = promisify(execFile);
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['ls-tree', '--name-only', `${ref}:${dir}`],
+      { cwd, maxBuffer: 8 * 1024 * 1024 },
+    );
+    return stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  } catch {
+    return [];
+  }
 }
 
 /**

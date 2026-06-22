@@ -31,6 +31,35 @@ export async function revParse(ref: string, cwd: string): Promise<string> {
 }
 
 /**
+ * Run `git show <ref>:<path>` and return raw stdout.
+ *
+ * Returns `null` when the file is not present at `ref` (the preset
+ * didn't exist yet, or the path has since been renamed) rather than
+ * throwing -- the caller decides whether "absent at ref" is a hard
+ * error or a graceful skip.
+ *
+ * Used by `clawreview presets diff --since <ref>` so a preset's
+ * resolved body at HEAD can be compared against the same preset's
+ * body at a prior commit without checking out the old tree.
+ */
+export async function gitShow(
+  ref: string,
+  path: string,
+  cwd: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['show', `${ref}:${path}`],
+      { cwd, maxBuffer: 16 * 1024 * 1024 },
+    );
+    return stdout;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Run `git blame --line-porcelain <ref> -- <file>` and return raw stdout.
  *
  * Returns an empty string when the file is not present in `ref`

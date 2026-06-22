@@ -4,10 +4,10 @@ import kleur from 'kleur';
 import {
   computeDigestDrift,
   findingDigest,
-  type Finding,
   type FindingDigest,
   type FindingDigestDrift,
 } from '@clawreview/aggregator';
+import type { Finding } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
 

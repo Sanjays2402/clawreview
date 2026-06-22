@@ -13,7 +13,7 @@ import {
 } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
-import { loadLocalPresets } from '../config.js';
+import { loadLocalPresets, loadLocalPresetsAtRef } from '../config.js';
 
 /**
  * `clawreview presets list [--root <dir>] [--format text|json]`
@@ -746,14 +746,50 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  const localPresets = await loadLocalPresets(root);
+  // --since <ref>: resolve chain A against the preset definitions as
+  // they existed at <ref>, not at HEAD. Chain B always resolves
+  // against HEAD. This is the workflow for "what changed in this
+  // preset chain since last release?" -- the operator picks a git
+  // ref, the CLI checks both bodies and diffs the result.
+  //
+  // Built-in presets are version-agnostic (they live in the
+  // @clawreview/types package source); only LOCAL presets are
+  // resolved at a different ref, mirroring `loadLocalPresets`'s
+  // ref-aware sibling.
+  //
+  // An empty / pure-whitespace ref is rejected up front so a stray
+  // `--since=` doesn't silently degrade to "same namespace as HEAD".
+  const sinceRefRaw = args.flags.since;
+  const sinceRef =
+    typeof sinceRefRaw === 'string' && sinceRefRaw.trim().length > 0
+      ? sinceRefRaw.trim()
+      : null;
+
+  const localPresetsHead = await loadLocalPresets(root);
+  let localPresetsRef: Record<string, ConfigPreset> | null = null;
+  if (sinceRef !== null) {
+    try {
+      localPresetsRef = await loadLocalPresetsAtRef(root, sinceRef);
+    } catch (err) {
+      process.stderr.write(
+        `clawreview presets diff: --since '${sinceRef}' failed: ${(err as Error).message}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+  }
+  // ChainA resolver: uses the ref-side local namespace when --since is
+  // active, otherwise the HEAD namespace. Built-in presets fall back
+  // through getPreset regardless.
+  const localPresetsForA = localPresetsRef ?? localPresetsHead;
+  const localPresetsForB = localPresetsHead;
 
   // Resolve each chain. Unknown names / cycles surface here.
   let bodyA: ConfigPreset;
   let bodyB: ConfigPreset;
   try {
     bodyA = resolveExtendsChain(chainA, (n) => {
-      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      if (Object.prototype.hasOwnProperty.call(localPresetsForA, n)) return localPresetsForA[n];
       return getPreset(n);
     });
   } catch (err) {
@@ -766,7 +802,7 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   }
   try {
     bodyB = resolveExtendsChain(chainB, (n) => {
-      if (Object.prototype.hasOwnProperty.call(localPresets, n)) return localPresets[n];
+      if (Object.prototype.hasOwnProperty.call(localPresetsForB, n)) return localPresetsForB[n];
       return getPreset(n);
     });
   } catch (err) {
@@ -853,6 +889,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       {
         chainA,
         chainB,
+        // When --since is active, echo the ref so a downstream tool
+        // can attribute the diff to the historical comparison. `null`
+        // (rather than omitted) when --since was absent so a consumer's
+        // "is this a historical diff?" check is a single
+        // `since !== null` comparison.
+        since: sinceRef,
         // Surface the active filter so a downstream tool can verify
         // the diff was scoped (or not). Sorted for deterministic
         // JSON output. Exactly one of `onlyFields` / `excludeFields`
@@ -887,6 +929,9 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       `# a: ${chainA.join(' -> ')}`,
       `# b: ${chainB.join(' -> ')}`,
     ];
+    if (sinceRef !== null) {
+      headerLines.push(`# since: ${sinceRef}  (chain a resolved at this git ref)`);
+    }
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
     }
@@ -921,6 +966,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       `${kleur.bold('chain a')}: ${chainA.join(' -> ')}\n` +
         `${kleur.bold('chain b')}: ${chainB.join(' -> ')}\n`,
     );
+    if (sinceRef !== null) {
+      process.stdout.write(
+        `${kleur.bold('since')}:   ${sinceRef} ${kleur.gray('(chain a resolved at this git ref)')}\n`,
+      );
+    }
     if (onlyFields !== null) {
       process.stdout.write(
         `${kleur.bold('only-fields')}: ${[...onlyFields].sort().join(', ')}\n`,
