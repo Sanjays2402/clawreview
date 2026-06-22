@@ -681,3 +681,134 @@ describe('findingDigest topTags slice (tick 15)', () => {
     expect(digest.byTag['c']).toBe(1);
   });
 });
+
+describe('findingDigest topAuthors slice (tick 17)', () => {
+  // Inline BlameMap fixture builder so the tests don't have to import
+  // the full authors module surface; mirrors the shape of
+  // `attributeFindingsToAuthors`'s input.
+  const blame = (entries: Array<[file: string, line: number, name: string, email: string]>): Map<
+    string,
+    { authorName: string; authorEmail: string }
+  > => {
+    const m = new Map<string, { authorName: string; authorEmail: string }>();
+    for (const [file, line, authorName, authorEmail] of entries) {
+      m.set(`${file}:${line}`, { authorName, authorEmail });
+    }
+    return m;
+  };
+
+  it('omits topAuthors entirely when opts.blame is not supplied', () => {
+    const findings = [f({ file: 'src/a.ts', startLine: 1 })];
+    const digest = findingDigest(findings);
+    // Sentinel: the field stays undefined, not [], so a JSON consumer
+    // can tell "no blame attempted" from "blame attempted, empty".
+    expect(digest.topAuthors).toBeUndefined();
+  });
+
+  it('returns topAuthors ranked by count when blame is supplied', () => {
+    const findings = [
+      f({ file: 'src/a.ts', startLine: 1 }),
+      f({ file: 'src/a.ts', startLine: 2 }),
+      f({ file: 'src/a.ts', startLine: 3 }),
+      f({ file: 'src/b.ts', startLine: 1 }),
+    ];
+    const blameMap = blame([
+      ['src/a.ts', 1, 'Alice', 'alice@ex.com'],
+      ['src/a.ts', 2, 'Alice', 'alice@ex.com'],
+      ['src/a.ts', 3, 'Bob', 'bob@ex.com'],
+      ['src/b.ts', 1, 'Bob', 'bob@ex.com'],
+    ]);
+    const digest = findingDigest(findings, { blame: blameMap });
+    expect(digest.topAuthors).toEqual([
+      { authorName: 'Alice', authorEmail: 'alice@ex.com', count: 2 },
+      { authorName: 'Bob', authorEmail: 'bob@ex.com', count: 2 },
+    ]);
+  });
+
+  it('tie-breaks on email (ascending) so identical-display-name authors stay deterministic', () => {
+    // Two authors with the same display name but different emails;
+    // tie-break MUST be on email so a downstream dashboard sees a
+    // stable ordering across recomputes.
+    const findings = [
+      f({ file: 'src/a.ts', startLine: 1 }),
+      f({ file: 'src/a.ts', startLine: 2 }),
+    ];
+    const blameMap = blame([
+      ['src/a.ts', 1, 'Sam', 'zeta@ex.com'],
+      ['src/a.ts', 2, 'Sam', 'alpha@ex.com'],
+    ]);
+    const digest = findingDigest(findings, { blame: blameMap });
+    expect(digest.topAuthors).toEqual([
+      { authorName: 'Sam', authorEmail: 'alpha@ex.com', count: 1 },
+      { authorName: 'Sam', authorEmail: 'zeta@ex.com', count: 1 },
+    ]);
+  });
+
+  it('includes the (unknown) sentinel for findings outside the blame map', () => {
+    // src/a.ts:1 is in blame; src/missing.ts:5 is NOT -> (unknown) bucket.
+    const findings = [
+      f({ file: 'src/a.ts', startLine: 1 }),
+      f({ file: 'src/missing.ts', startLine: 5 }),
+      f({ file: 'src/missing.ts', startLine: 6 }),
+    ];
+    const blameMap = blame([['src/a.ts', 1, 'Alice', 'alice@ex.com']]);
+    const digest = findingDigest(findings, { blame: blameMap });
+    // (unknown) has 2 findings, Alice has 1; (unknown) ranks first.
+    expect(digest.topAuthors).toHaveLength(2);
+    expect(digest.topAuthors![0]).toEqual({
+      authorName: '(unknown)',
+      authorEmail: '',
+      count: 2,
+    });
+    expect(digest.topAuthors![1]).toEqual({
+      authorName: 'Alice',
+      authorEmail: 'alice@ex.com',
+      count: 1,
+    });
+  });
+
+  it('caps topAuthors at the requested limit and defaults to 10', () => {
+    const findings: Finding[] = [];
+    const entries: Array<[string, number, string, string]> = [];
+    for (let i = 0; i < 15; i += 1) {
+      const file = `src/file-${i}.ts`;
+      findings.push(f({ file, startLine: 1 }));
+      // Pad the name so alphabetical tie-break is deterministic.
+      const tag = String(i).padStart(2, '0');
+      entries.push([file, 1, `Author-${tag}`, `author-${tag}@ex.com`]);
+    }
+    const blameMap = blame(entries);
+    const explicit = findingDigest(findings, { blame: blameMap, topAuthors: 3 });
+    expect(explicit.topAuthors).toHaveLength(3);
+    // Default cap is 10 -- matches the other top-N defaults.
+    const defaulted = findingDigest(findings, { blame: blameMap });
+    expect(defaulted.topAuthors).toHaveLength(10);
+  });
+
+  it('clamps topAuthors into [1, 200]', () => {
+    const findings = [
+      f({ file: 'src/a.ts', startLine: 1 }),
+      f({ file: 'src/b.ts', startLine: 1 }),
+    ];
+    const blameMap = blame([
+      ['src/a.ts', 1, 'Alice', 'alice@ex.com'],
+      ['src/b.ts', 1, 'Bob', 'bob@ex.com'],
+    ]);
+    const tooLow = findingDigest(findings, { blame: blameMap, topAuthors: 0 });
+    expect(tooLow.topAuthors).toHaveLength(1);
+    const negative = findingDigest(findings, { blame: blameMap, topAuthors: -50 });
+    expect(negative.topAuthors).toHaveLength(1);
+    const huge = findingDigest(findings, { blame: blameMap, topAuthors: 5_000 });
+    expect(huge.topAuthors).toHaveLength(2);
+  });
+
+  it('returns an empty array when blame is supplied but findings is empty', () => {
+    // The contract: blame supplied -> field PRESENT (empty array).
+    // No blame -> field OMITTED. This distinction lets a JSON
+    // consumer reliably check `'topAuthors' in digest` to know
+    // whether attribution was attempted.
+    const digest = findingDigest([], { blame: blame([]) });
+    expect(digest.topAuthors).toEqual([]);
+  });
+});
+

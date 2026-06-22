@@ -5,6 +5,11 @@ import {
   type Severity,
 } from '@clawreview/types';
 
+import {
+  attributeFindingsToAuthors,
+  UNKNOWN_AUTHOR_KEY,
+  type BlameMap,
+} from './authors.js';
 import { detectHotspots, type Hotspot, type HotspotOptions } from './hotspots.js';
 
 /**
@@ -106,6 +111,43 @@ export interface FindingDigest {
    */
   topTags: Array<{ tag: string; count: number }>;
   /**
+   * Top authors by descending count, then by author email (ascending)
+   * on ties. Tie-break on email (not display name) so two contributors
+   * with identical commit-time display names stay deterministically
+   * ordered.
+   *
+   * Computed by attributing each finding via `opts.blame` (the same
+   * `BlameMap` shape the comment renderer's authors block consumes);
+   * findings whose `<file>:<line>` is not in the blame map land in
+   * the synthetic `'(unknown)'` bucket, ranked alongside real
+   * authors. Capped at `opts.topAuthors` (default 10, hard ceiling
+   * 200).
+   *
+   * Field is OMITTED ENTIRELY when `opts.blame` is not supplied --
+   * that lets a JSON consumer distinguish "no blame map available"
+   * from "blame map available but every author landed in (unknown)".
+   * A blame map that resolves to zero attributed findings still
+   * surfaces an empty array (the consumer knows attribution was
+   * attempted).
+   *
+   * Use case: the dashboard's Top Contributors panel reads this
+   * directly instead of re-running `attributeFindingsToAuthors` and
+   * re-sorting in the browser; the PR comment header (tick 5) can
+   * eventually consume the same slice for byte-identical ranking
+   * across CLI / worker / dashboard. The full per-author breakdown
+   * (with findings arrays, severity bands, etc.) is still available
+   * via the separate `attributeFindingsToAuthors` helper for
+   * consumers that need it.
+   */
+  topAuthors?: Array<{
+    /** Display name (matches `BlameEntry.authorName`). */
+    authorName: string;
+    /** Email (matches `BlameEntry.authorEmail`; '' for (unknown)). */
+    authorEmail: string;
+    /** Total findings attributed to this author. */
+    count: number;
+  }>;
+  /**
    * Optional hotspot clusters, computed via `findHotspots`. Off by
    * default (clustering walks the findings array a second time and not
    * every consumer wants the cost). Pass `opts.hotspots = true` to
@@ -144,6 +186,26 @@ export interface FindingDigestOptions {
    */
   topTags?: number;
   /**
+   * Cap on the rendered top-authors list. Defaults to 10 (matches
+   * topAgents / topCategories / topTags). Hard ceiling 200. Only
+   * consulted when `opts.blame` is also supplied; when blame is
+   * absent, the `topAuthors` field is omitted entirely.
+   */
+  topAuthors?: number;
+  /**
+   * Blame map keyed by `<file>:<line>` (built via the CLI's
+   * `buildBlameMap` adapter or fetched from cache by the server
+   * worker). When present, `findingDigest` will compute the
+   * `topAuthors` slice via `attributeFindingsToAuthors` and the
+   * synthetic `'(unknown)'` bucket for unmapped findings.
+   *
+   * Omitted by default -- a digest computed from a context with no
+   * blame info (e.g. a fresh recompute on /api/reviews/:id/digest
+   * without re-fetching blame) simply skips the slice and the
+   * `topAuthors` field stays undefined.
+   */
+  blame?: BlameMap;
+  /**
    * When set, also compute hotspot clusters and attach them under
    * `digest.hotspots`. `true` uses the default `findHotspots` options;
    * an object value forwards those knobs through to the clusterer.
@@ -155,6 +217,7 @@ const DEFAULT_TOP_FILES = 5;
 const DEFAULT_TOP_AGENTS = 10;
 const DEFAULT_TOP_CATEGORIES = 10;
 const DEFAULT_TOP_TAGS = 10;
+const DEFAULT_TOP_AUTHORS = 10;
 const MAX_TOP = 200;
 
 /**
@@ -201,6 +264,7 @@ export function findingDigest(
     Math.min(MAX_TOP, opts.topCategories ?? DEFAULT_TOP_CATEGORIES),
   );
   const topTags = Math.max(1, Math.min(MAX_TOP, opts.topTags ?? DEFAULT_TOP_TAGS));
+  const topAuthors = Math.max(1, Math.min(MAX_TOP, opts.topAuthors ?? DEFAULT_TOP_AUTHORS));
 
   const totalsBySeverity: Record<Severity, number> = { ...EMPTY_SEVERITY_TOTALS };
   const byCategory: Partial<Record<FindingCategory, number>> = {};
@@ -287,6 +351,55 @@ export function findingDigest(
     topCategories: topCategoriesList,
     topTags: topTagsList,
   };
+
+  // topAuthors: only computed when a blame map is supplied. We attribute
+  // via the existing `attributeFindingsToAuthors` helper (single source
+  // of truth for the `<file>:<line>` lookup and the (unknown) sentinel)
+  // and project its per-author shape down to the {authorName,
+  // authorEmail, count} tuple that mirrors topFiles / topAgents / etc.
+  //
+  // The (unknown) sentinel is included alongside real authors so a
+  // dashboard panel can see "N findings had no blame entry" without a
+  // second pass over the full breakdown. A consumer that wants to
+  // hide it can `.filter(x => x.authorName !== UNKNOWN_AUTHOR_KEY)`
+  // -- the constant is re-exported from the aggregator barrel.
+  //
+  // When blame is supplied but resolves to zero buckets (all findings
+  // landed in (unknown) AND there were zero findings overall), the
+  // field stays an empty array (not undefined) so a JSON consumer can
+  // tell "blame was attempted, found nothing" from "blame was not
+  // supplied at all".
+  if (opts.blame) {
+    const breakdown = attributeFindingsToAuthors([...findings], opts.blame);
+    const list: Array<{ authorName: string; authorEmail: string; count: number }> = [];
+    for (const a of breakdown.authors) {
+      list.push({
+        authorName: a.authorName,
+        authorEmail: a.authorEmail,
+        count: a.total,
+      });
+    }
+    if (breakdown.unknown.length > 0) {
+      list.push({
+        authorName: UNKNOWN_AUTHOR_KEY,
+        authorEmail: '',
+        count: breakdown.unknown.length,
+      });
+    }
+    // Sort descending by count; tie-break on email (ascending) so two
+    // contributors with identical display names stay deterministic.
+    // The (unknown) sentinel sorts alongside real authors by count;
+    // a corpus where every finding was on a brand-new file will see
+    // it ranked #1, which is the right dashboard signal.
+    list.sort((a, b) => {
+      if (b.count !== a.count) return b.count - a.count;
+      // Email tie-break: empty-string email (the (unknown) sentinel)
+      // sorts before non-empty emails, but we explicitly keep that
+      // deterministic ordering rather than special-casing the sentinel.
+      return a.authorEmail.localeCompare(b.authorEmail);
+    });
+    digest.topAuthors = list.slice(0, topAuthors);
+  }
 
   if (opts.hotspots) {
     const hotspotOpts: HotspotOptions = typeof opts.hotspots === 'object' ? opts.hotspots : {};
