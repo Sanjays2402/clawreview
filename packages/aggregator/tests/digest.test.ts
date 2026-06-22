@@ -812,3 +812,147 @@ describe('findingDigest topAuthors slice (tick 17)', () => {
   });
 });
 
+describe('findingDigest minConfidence pre-filter (tick 19)', () => {
+  it('drops findings below the threshold BEFORE bucketing so totals reflect the floor', () => {
+    const findings = [
+      f({ agent: 'A', file: 'a.ts', confidence: 0.9, severity: 'high' }),
+      f({ agent: 'B', file: 'b.ts', confidence: 0.6, severity: 'medium' }),
+      f({ agent: 'C', file: 'c.ts', confidence: 0.4, severity: 'low' }),
+      f({ agent: 'D', file: 'd.ts', confidence: 0.2, severity: 'nit' }),
+    ];
+    // No filter: all 4 findings counted.
+    const wide = findingDigest(findings);
+    expect(wide.total).toBe(4);
+    // minConfidence: 0.5 keeps the 0.9 + 0.6 findings.
+    const narrow = findingDigest(findings, { minConfidence: 0.5 });
+    expect(narrow.total).toBe(2);
+    // Every bucket reflects the post-filter view.
+    expect(narrow.totalsBySeverity.high).toBe(1);
+    expect(narrow.totalsBySeverity.medium).toBe(1);
+    expect(narrow.totalsBySeverity.low).toBe(0);
+    expect(narrow.totalsBySeverity.nit).toBe(0);
+    expect(narrow.byAgent).toEqual({ A: 1, B: 1 });
+    expect(narrow.byFile).toEqual({ 'a.ts': 1, 'b.ts': 1 });
+  });
+
+  it('minConfidence: 0 is a pass-through (back-compat with tick-18 callers)', () => {
+    const findings = [
+      f({ confidence: 0.1, severity: 'nit' }),
+      f({ confidence: 0.9, severity: 'high' }),
+    ];
+    const a = findingDigest(findings);
+    const b = findingDigest(findings, { minConfidence: 0 });
+    expect(a.total).toBe(b.total);
+    expect(a.totalsBySeverity).toEqual(b.totalsBySeverity);
+  });
+
+  it('minConfidence: 1 keeps only findings with confidence >= 1 (rare but valid)', () => {
+    const findings = [
+      f({ confidence: 0.99, severity: 'high' }),
+      f({ confidence: 1.0, severity: 'critical' }),
+    ];
+    const r = findingDigest(findings, { minConfidence: 1 });
+    expect(r.total).toBe(1);
+    expect(r.totalsBySeverity.critical).toBe(1);
+    expect(r.totalsBySeverity.high).toBe(0);
+  });
+
+  it('minConfidence above 1 clamps to 1 (no silent "drop everything" trap)', () => {
+    // A stray config value (someone thought the range was 0-10)
+    // shouldn't silently drop every finding. The clamp keeps the
+    // semantics safe.
+    const findings = [
+      f({ confidence: 1.0, severity: 'critical' }),
+      f({ confidence: 0.9, severity: 'high' }),
+    ];
+    const r = findingDigest(findings, { minConfidence: 1.5 });
+    expect(r.total).toBe(1);
+    expect(r.totalsBySeverity.critical).toBe(1);
+  });
+
+  it('minConfidence below 0 clamps to 0 (negative thresholds make no sense)', () => {
+    const findings = [
+      f({ confidence: 0, severity: 'nit' }),
+      f({ confidence: 0.5, severity: 'medium' }),
+    ];
+    const r = findingDigest(findings, { minConfidence: -0.5 });
+    expect(r.total).toBe(2);
+  });
+
+  it('minConfidence: NaN / null / undefined treated as no filter', () => {
+    const findings = [
+      f({ confidence: 0.1, severity: 'nit' }),
+      f({ confidence: 0.9, severity: 'high' }),
+    ];
+    const baseline = findingDigest(findings);
+    const nan = findingDigest(findings, { minConfidence: Number.NaN });
+    expect(nan.total).toBe(baseline.total);
+    expect(nan.totalsBySeverity).toEqual(baseline.totalsBySeverity);
+    // null cast through unknown for the documented shape
+    const nul = findingDigest(findings, { minConfidence: null as unknown as number });
+    expect(nul.total).toBe(baseline.total);
+  });
+
+  it('does not mutate the input findings array', () => {
+    const findings = [
+      f({ confidence: 0.2, severity: 'low' }),
+      f({ confidence: 0.8, severity: 'high' }),
+    ];
+    const snapshot = findings.map((x) => ({ ...x }));
+    findingDigest(findings, { minConfidence: 0.5 });
+    expect(findings.map((x) => ({ ...x }))).toEqual(snapshot);
+    expect(findings.length).toBe(2);
+  });
+
+  it('minConfidence affects topAgents / topFiles / topCategories slices too', () => {
+    const findings = [
+      f({ agent: 'A', file: 'a.ts', category: 'security', confidence: 0.9 }),
+      f({ agent: 'A', file: 'a.ts', category: 'security', confidence: 0.4 }),
+      f({ agent: 'B', file: 'b.ts', category: 'style', confidence: 0.3 }),
+      f({ agent: 'B', file: 'b.ts', category: 'style', confidence: 0.2 }),
+    ];
+    const r = findingDigest(findings, { minConfidence: 0.5 });
+    expect(r.total).toBe(1);
+    expect(r.topAgents).toEqual([{ agent: 'A', count: 1 }]);
+    expect(r.topFiles).toEqual([{ file: 'a.ts', count: 1 }]);
+    expect(r.topCategories).toEqual([{ category: 'security', count: 1 }]);
+  });
+});
+
+describe('normaliseDigestMinConfidence (tick 19, pure helper)', () => {
+  // We test the exported helper directly so a downstream consumer
+  // (CLI / dashboard) that wants to surface the resolved threshold
+  // in a --dry-run report can rely on the same clamping policy
+  // findingDigest applies internally.
+
+  it('returns 0 for undefined / null / non-number / NaN inputs', async () => {
+    const { normaliseDigestMinConfidence } = await import('../src/digest.js');
+    expect(normaliseDigestMinConfidence(undefined)).toBe(0);
+    expect(normaliseDigestMinConfidence(null)).toBe(0);
+    expect(normaliseDigestMinConfidence('0.5')).toBe(0);
+    expect(normaliseDigestMinConfidence(Number.NaN)).toBe(0);
+    expect(normaliseDigestMinConfidence(Number.POSITIVE_INFINITY)).toBe(0);
+    expect(normaliseDigestMinConfidence(Number.NEGATIVE_INFINITY)).toBe(0);
+  });
+
+  it('clamps negative numbers to 0', async () => {
+    const { normaliseDigestMinConfidence } = await import('../src/digest.js');
+    expect(normaliseDigestMinConfidence(-0.1)).toBe(0);
+    expect(normaliseDigestMinConfidence(-5)).toBe(0);
+  });
+
+  it('clamps values above 1 to 1', async () => {
+    const { normaliseDigestMinConfidence } = await import('../src/digest.js');
+    expect(normaliseDigestMinConfidence(1.5)).toBe(1);
+    expect(normaliseDigestMinConfidence(100)).toBe(1);
+  });
+
+  it('passes finite values in [0, 1] through verbatim', async () => {
+    const { normaliseDigestMinConfidence } = await import('../src/digest.js');
+    expect(normaliseDigestMinConfidence(0)).toBe(0);
+    expect(normaliseDigestMinConfidence(0.5)).toBe(0.5);
+    expect(normaliseDigestMinConfidence(0.99)).toBe(0.99);
+    expect(normaliseDigestMinConfidence(1)).toBe(1);
+  });
+});
+

@@ -206,6 +206,31 @@ export interface FindingDigestOptions {
    */
   blame?: BlameMap;
   /**
+   * Tick 19: Pre-bucket confidence filter. Findings with `confidence < minConfidence`
+   * are dropped BEFORE any bucket arithmetic, so the resulting digest reflects
+   * the same shape the worker / CLI would render after applying a `min_confidence`
+   * floor (mirrors the aggregator's `applyMinConfidence` helper).
+   *
+   * Common case: the worker's pipeline applies a `min_confidence: 0.6` floor to
+   * drop noisy findings, then builds the comment header from `digest`. Today
+   * the digest counts every finding regardless of confidence, so the header
+   * may double-count findings that the floor dropped. Passing the same
+   * threshold here keeps the digest in lock-step with the rendered output.
+   *
+   * Validation: values outside `[0, 1]` are clamped (0 below, 1 above) so a
+   * stray `minConfidence: 5` doesn't drop every finding. `undefined` / null /
+   * NaN means "no filtering" (back-compat: the tick-18 contract returned every
+   * finding regardless of confidence).
+   *
+   * The filter applies to EVERY bucket (severity, category, agent, file, tag,
+   * authors, hotspots) so a dashboard rendering the digest sees an internally
+   * consistent picture -- topAgents sums to total, sum-by-severity sums to
+   * total, etc. The drop count is NOT surfaced (a consumer that needs to know
+   * "how many were filtered?" should run `applyMinConfidence` directly to get
+   * the explicit count); the digest is the post-filter snapshot.
+   */
+  minConfidence?: number;
+  /**
    * When set, also compute hotspot clusters and attach them under
    * `digest.hotspots`. `true` uses the default `findHotspots` options;
    * an object value forwards those knobs through to the clusterer.
@@ -244,6 +269,31 @@ const EMPTY_SEVERITY_TOTALS: Record<Severity, number> = {
 };
 
 /**
+ * Tick 19: Normalise / clamp the `minConfidence` opt to a usable
+ * threshold. The clamping policy is intentionally forgiving so a
+ * stray config value (a hand-typed `1.5` from someone who thought
+ * the range was 0-10) doesn't silently drop every finding.
+ *
+ *   - undefined / null / NaN / non-number  -> 0 (back-compat: pass-through)
+ *   - < 0                                  -> 0
+ *   - > 1                                  -> 1 (every finding passes since
+ *                                                 confidence is in [0, 1])
+ *   - finite in [0, 1]                     -> verbatim
+ *
+ * Pure / exported so a CLI / dashboard consumer that wants to apply
+ * the same clamping policy outside the digest helper (e.g. when
+ * echoing the resolved threshold in a `--dry-run` report) gets one
+ * source of truth.
+ */
+export function normaliseDigestMinConfidence(raw: unknown): number {
+  if (typeof raw !== 'number') return 0;
+  if (!Number.isFinite(raw)) return 0;
+  if (raw < 0) return 0;
+  if (raw > 1) return 1;
+  return raw;
+}
+
+/**
  * Walk a `Finding[]` once and return a digest with the shapes a
  * dashboard / CLI / PR-comment renderer needs.
  *
@@ -265,6 +315,19 @@ export function findingDigest(
   );
   const topTags = Math.max(1, Math.min(MAX_TOP, opts.topTags ?? DEFAULT_TOP_TAGS));
   const topAuthors = Math.max(1, Math.min(MAX_TOP, opts.topAuthors ?? DEFAULT_TOP_AUTHORS));
+
+  // Tick 19: pre-bucket confidence filter. Apply BEFORE any bucket
+  // arithmetic so every downstream slice (severity, category, agent,
+  // file, tag, authors, hotspots) sees the post-filter view. Pass-
+  // through (no filter) when the threshold is absent / non-finite /
+  // <= 0 -- the latter is the back-compat default (a 0 floor accepts
+  // every finding since confidence is always >= 0).
+  const filterThreshold = normaliseDigestMinConfidence(opts.minConfidence);
+  const filtered =
+    filterThreshold > 0
+      ? findings.filter((f) => typeof f.confidence === 'number' && f.confidence >= filterThreshold)
+      : findings;
+  findings = filtered;
 
   const totalsBySeverity: Record<Severity, number> = { ...EMPTY_SEVERITY_TOTALS };
   const byCategory: Partial<Record<FindingCategory, number>> = {};
