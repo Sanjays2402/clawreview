@@ -181,11 +181,23 @@ interface PresetEntry {
  * @clawreview/types source), so the ref only affects locals. An
  * empty `--since=` is rejected (typo guard).
  *
+ * Tick 19: `--since-base <git-ref>` is an explicit-name alias for
+ * `--since` that matches `presets diff`'s terminology. The two flags
+ * resolve to the same `sinceRef` slot, so an operator who already
+ * uses `--since-base` on `presets diff` can carry the same flag over
+ * to `presets resolve` without renaming. Combining both rejects with
+ * a mutex error (the resolution would be identical so the operator
+ * almost certainly intended one or the other; refuse loudly so a
+ * silent override doesn't mask the typo). JSON output gains a
+ * `sinceBase` echo alongside `since` so a consumer that already
+ * keys on the diff-shaped name doesn't need to special-case the
+ * resolve-shaped one.
+ *
  * Output:
  *   - `--format yaml` (default): merged body as YAML, suitable for
  *     pasting into `.clawreview.yml`. Header comments record the
  *     chain so the source is auditable.
- *   - `--format json`: { chain, sources, body, fields, since } for tooling.
+ *   - `--format json`: { chain, sources, body, fields, since, sinceBase } for tooling.
  *   - `--format text`: human-readable, color-tagged. Mirrors `show`.
  *
  * Exit codes:
@@ -244,18 +256,47 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
   // Tick 18: --since <git-ref> resolves locals at the named ref. An
   // empty/whitespace ref is rejected as a typo guard -- a stray
   // `--since=` would otherwise silently degrade to HEAD.
+  //
+  // Tick 19: --since-base <ref> is the explicit-name alias that
+  // matches `presets diff`'s flag terminology so an operator who
+  // already uses --since-base on diff doesn't have to remember a
+  // different name on resolve. Both flags resolve to the same
+  // `sinceRef` slot; combining both rejects with a mutex error
+  // (silently picking one would mask a typo).
   const sinceRefRaw = args.flags.since;
-  const sinceRef =
+  const sinceRefFromSince =
     typeof sinceRefRaw === 'string' && sinceRefRaw.trim().length > 0
       ? sinceRefRaw.trim()
       : null;
-  if (sinceRefRaw !== undefined && sinceRef === null) {
+  if (sinceRefRaw !== undefined && sinceRefFromSince === null) {
     process.stderr.write(
       `clawreview presets resolve: --since requires a git ref (got empty string)\n`,
     );
     process.exitCode = 2;
     return;
   }
+  const sinceBaseRaw = args.flags['since-base'];
+  const sinceBase =
+    typeof sinceBaseRaw === 'string' && sinceBaseRaw.trim().length > 0
+      ? sinceBaseRaw.trim()
+      : null;
+  if (sinceBaseRaw !== undefined && sinceBase === null) {
+    process.stderr.write(
+      `clawreview presets resolve: --since-base requires a git ref (got empty string)\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (sinceRefFromSince !== null && sinceBase !== null) {
+    process.stderr.write(
+      `clawreview presets resolve: --since and --since-base are mutually exclusive ` +
+        `(both target the same chain); pick one\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  // Whichever flag is set wins; if both are absent, we resolve at HEAD.
+  const sinceRef = sinceBase ?? sinceRefFromSince;
 
   // Local namespace: HEAD by default, or the historical body at
   // --since. Built-ins are not ref-aware (live in package source)
@@ -324,7 +365,18 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
           // historical resolution ran. `null` (not omitted) when
           // --since was absent so a "is this a historical resolve?"
           // check is `since !== null`.
+          //
+          // Tick 19: --since-base resolves to the same slot. We
+          // echo BOTH the legacy `since` field (set when EITHER
+          // flag is active; tick-18 back-compat for any tooling
+          // that already keys off it) AND a new `sinceBase` field
+          // (set only when --since-base was the path the operator
+          // took, null otherwise). A consumer can pick the field
+          // matching their flag style; a "is this historical?"
+          // check stays `since !== null` regardless of which flag
+          // was passed.
           since: sinceRef,
+          sinceBase,
           body: composed,
         },
         null,
@@ -344,7 +396,11 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
         .join(', ')}`,
     ];
     if (sinceRef !== null) {
-      headerLines.push(`# since: ${sinceRef}  (locals resolved at this git ref)`);
+      // Tick 19: echo the operator-chosen flag name so the header
+      // mirrors what they typed (avoids the "wait, I passed
+      // --since-base, where did `# since:` come from?" confusion).
+      const flagName = sinceBase !== null ? 'since-base' : 'since';
+      headerLines.push(`# ${flagName}: ${sinceRef}  (locals resolved at this git ref)`);
     }
     const header = headerLines.join('\n');
     const body = YAML.stringify(composed, { lineWidth: 0 });
@@ -371,8 +427,9 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
       .join(' -> ')}\n`,
   );
   if (sinceRef !== null) {
+    const flagName = sinceBase !== null ? 'since-base' : 'since';
     process.stdout.write(
-      `${kleur.bold('since')}: ${sinceRef} ${kleur.gray('(locals resolved at this git ref)')}\n`,
+      `${kleur.bold(flagName)}: ${sinceRef} ${kleur.gray('(locals resolved at this git ref)')}\n`,
     );
   }
   if (fields.length === 0) {

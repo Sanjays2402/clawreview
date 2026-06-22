@@ -689,6 +689,146 @@ describe('clawreview presets resolve', () => {
     expect(text.stdout).toContain('since:');
     expect(text.stdout).toContain(v1);
   });
+
+  // ---------------------------------------------------------------------------
+  // Tick 19: `--since-base <ref>` is the explicit-name alias for `--since`
+  // that matches `presets diff`'s terminology so an operator who already
+  // uses --since-base on diff doesn't have to remember a different name
+  // on resolve. Both flags resolve to the same slot.
+  // ---------------------------------------------------------------------------
+
+  it('--since-base resolves a local preset at the named ref (alias for --since)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    // --since-base v1 should see `high` (same as --since v1 would).
+    const r = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      'since-base': v1,
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.body.severity_threshold).toBe('high');
+    // BOTH echoes surface: `since` mirrors the resolved ref (back-compat
+    // for tooling that already keys on the tick-18 field name), and
+    // `sinceBase` carries the explicit flag value (null when --since-base
+    // wasn't passed).
+    expect(parsed.since).toBe(v1);
+    expect(parsed.sinceBase).toBe(v1);
+  });
+
+  it('--since-base= (empty value) rejects 2 as a typo guard', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      'since-base': '',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--since-base');
+    expect(r.stderr).toContain('git ref');
+  });
+
+  it('--since and --since-base together reject (both target the same chain)', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      since: 'HEAD',
+      'since-base': 'HEAD',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--since and --since-base are mutually exclusive');
+  });
+
+  it('sinceBase echo is null when only --since is passed (and vice versa)', async () => {
+    // Sanity-check the JSON shape so back-compat consumers of the
+    // tick-18 `since` field can rely on sinceBase staying null unless
+    // the operator explicitly opted into the new flag name.
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    // --since alone: since=ref, sinceBase=null.
+    const sinceOnly = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      since: 'HEAD',
+    });
+    const sinceOnlyParsed = JSON.parse(sinceOnly.stdout);
+    expect(sinceOnlyParsed.since).toBe('HEAD');
+    expect(sinceOnlyParsed.sinceBase).toBeNull();
+    // --since-base alone: since=ref, sinceBase=ref.
+    const baseOnly = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      'since-base': 'HEAD',
+    });
+    const baseOnlyParsed = JSON.parse(baseOnly.stdout);
+    expect(baseOnlyParsed.since).toBe('HEAD');
+    expect(baseOnlyParsed.sinceBase).toBe('HEAD');
+    // Neither: both null.
+    const neither = await runResolve(dir, ['local-only'], { format: 'json' });
+    const neitherParsed = JSON.parse(neither.stdout);
+    expect(neitherParsed.since).toBeNull();
+    expect(neitherParsed.sinceBase).toBeNull();
+  });
+
+  it('--since-base YAML header echoes the flag name (not "since:")', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const yaml = await runResolve(dir, ['local-only'], {
+      format: 'yaml',
+      'since-base': 'HEAD',
+    });
+    expect(yaml.stdout).toContain('# since-base: HEAD');
+    expect(yaml.stdout).not.toContain('# since: HEAD');
+    const text = await runResolve(dir, ['local-only'], {
+      format: 'text',
+      'since-base': 'HEAD',
+    });
+    expect(text.stdout).toContain('since-base:');
+  });
 });
 
 // ---------------------------------------------------------------------------
