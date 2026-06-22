@@ -41,6 +41,27 @@ export interface FindingDigest {
   /** File bucket counts. Sparse. */
   byFile: Record<string, number>;
   /**
+   * Tag bucket counts. Sparse: only tags that appeared on at least one
+   * finding are present. A single finding can contribute to MULTIPLE
+   * tag buckets (one per `finding.tags[i]`); a finding with no tags is
+   * counted under the synthetic `'(untagged)'` bucket so a dashboard
+   * panel rendering `byTag` always sums to >= `total` (the bucket sum
+   * equals total when every finding has 0 or 1 tags; it grows beyond
+   * total as findings accumulate multiple tags).
+   *
+   * Use case: tags are how callers attach cross-cutting labels --
+   * "owasp:a01", "needs-followup", a config preset's `tag:` audit note
+   * (see ClawReviewConfig.severity_rules.actions.tag). A dashboard
+   * panel keyed by tag answers "how many findings touched the
+   * `owasp:a07` policy this week?" without re-walking findings.
+   *
+   * The synthetic `'(untagged)'` bucket is the closed sentinel for
+   * findings that ship with `tags: []`. Wrapped in parens so it can
+   * never collide with a user-supplied tag (no real tag can start
+   * with `(` -- the convention is `namespace:value` or `kebab-case`).
+   */
+  byTag: Record<string, number>;
+  /**
    * Top files by descending count, then by file path (ascending) on
    * ties. Capped at `opts.topFiles` (default 5, hard ceiling 200) so a
    * misconfigured caller can't ask the digest to render a multi-thousand
@@ -111,6 +132,21 @@ const DEFAULT_TOP_AGENTS = 10;
 const DEFAULT_TOP_CATEGORIES = 10;
 const MAX_TOP = 200;
 
+/**
+ * Sentinel bucket key for findings that ship without any tags.
+ *
+ * Public + frozen so a dashboard / CLI consumer can compare against
+ * the canonical value without hard-coding the literal:
+ *
+ *     import { UNTAGGED_BUCKET } from '@clawreview/aggregator';
+ *     const untagged = digest.byTag[UNTAGGED_BUCKET] ?? 0;
+ *
+ * Wrapped in parens so it can never collide with a real tag (the
+ * established tag convention is `namespace:value` or `kebab-case`,
+ * neither of which can start with `(`).
+ */
+export const UNTAGGED_BUCKET = '(untagged)';
+
 const EMPTY_SEVERITY_TOTALS: Record<Severity, number> = {
   critical: 0,
   high: 0,
@@ -144,6 +180,7 @@ export function findingDigest(
   const byCategory: Partial<Record<FindingCategory, number>> = {};
   const byAgent: Record<string, number> = {};
   const byFile: Record<string, number> = {};
+  const byTag: Record<string, number> = {};
 
   for (const f of findings) {
     // Safe indexed access because `Severity` is the exact union the map
@@ -153,6 +190,22 @@ export function findingDigest(
     byCategory[f.category] = (byCategory[f.category] ?? 0) + 1;
     byAgent[f.agent] = (byAgent[f.agent] ?? 0) + 1;
     byFile[f.file] = (byFile[f.file] ?? 0) + 1;
+    // Tags: each finding contributes one bucket per tag (or one
+    // `(untagged)` bucket when `tags` is empty). The sentinel string
+    // uses parens so it can never collide with a user-supplied tag
+    // (no real tag can start with `(` -- the established convention
+    // is `namespace:value` or `kebab-case`). Empty / pure-whitespace
+    // tag values are dropped so a sloppy producer doesn't widen the
+    // bucket map with bogus keys; they're treated like `(untagged)`
+    // only when the WHOLE tags array degrades to empty.
+    const realTags = (f.tags ?? []).filter((t) => typeof t === 'string' && t.trim().length > 0);
+    if (realTags.length === 0) {
+      byTag[UNTAGGED_BUCKET] = (byTag[UNTAGGED_BUCKET] ?? 0) + 1;
+    } else {
+      for (const tag of realTags) {
+        byTag[tag] = (byTag[tag] ?? 0) + 1;
+      }
+    }
   }
 
   const sortedFiles = Object.entries(byFile).sort((a, b) => {
@@ -189,6 +242,7 @@ export function findingDigest(
     byCategory,
     byAgent,
     byFile,
+    byTag,
     topFiles: topFilesList,
     topAgents: topAgentsList,
     topCategories: topCategoriesList,
@@ -269,6 +323,14 @@ export interface FindingDigestDrift {
   /** Per-file delta. Sparse, same shape as byAgentDelta. */
   byFileDelta: Record<string, number>;
   /**
+   * Per-tag delta. Sparse, same shape as byAgentDelta. Includes the
+   * synthetic `'(untagged)'` bucket when its count differs between
+   * snapshots, since "untagged-finding count changed" is a real drift
+   * signal a dashboard should surface (e.g. a tag-rule landed and
+   * re-classified previously-untagged findings).
+   */
+  byTagDelta: Record<string, number>;
+  /**
    * True iff at least one bucket has a non-zero delta. The dashboard's
    * "stale?" check is a single `report.hasDrift` rather than a fold
    * over every bucket.
@@ -332,13 +394,22 @@ export function computeDigestDrift(
     persisted.byCategory as Record<string, number>,
     fresh.byCategory as Record<string, number>,
   ) as Partial<Record<FindingCategory, number>>;
+  // byTag may legitimately be missing on a digest persisted before
+  // tick 14 (the field was added then). Treat absent as empty so
+  // drift against legacy digests degrades to "every new tag is a
+  // positive delta" rather than throwing on the sparseDelta walk.
+  const byTagDelta = sparseDelta(
+    persisted.byTag ?? {},
+    fresh.byTag ?? {},
+  );
 
   const hasDrift =
     totalDelta !== 0 ||
     severityChanged ||
     Object.keys(byAgentDelta).length > 0 ||
     Object.keys(byFileDelta).length > 0 ||
-    Object.keys(byCategoryDelta).length > 0;
+    Object.keys(byCategoryDelta).length > 0 ||
+    Object.keys(byTagDelta).length > 0;
 
   return {
     totalDelta,
@@ -346,6 +417,7 @@ export function computeDigestDrift(
     byAgentDelta,
     byCategoryDelta,
     byFileDelta,
+    byTagDelta,
     hasDrift,
   };
 }

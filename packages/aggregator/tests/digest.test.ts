@@ -473,3 +473,122 @@ describe('computeDigestDrift', () => {
     expect(drift.hasDrift).toBe(false);
   });
 });
+
+describe('findingDigest byTag bucket (tick 14)', () => {
+  it('groups findings into per-tag buckets, multi-tag findings count once per tag', () => {
+    const findings = [
+      f({ tags: ['owasp:a01', 'security'], file: 'a.ts' }),
+      f({ tags: ['owasp:a01'], file: 'b.ts' }),
+      f({ tags: ['security'], file: 'c.ts' }),
+    ];
+    const digest = findingDigest(findings);
+    // owasp:a01 appears on f0 + f1 -> count 2; security on f0 + f2 -> 2.
+    expect(digest.byTag['owasp:a01']).toBe(2);
+    expect(digest.byTag['security']).toBe(2);
+    // Sum of buckets exceeds total when findings carry multiple tags.
+    const bucketSum = Object.values(digest.byTag).reduce((a, b) => a + b, 0);
+    expect(bucketSum).toBe(4);
+    expect(digest.total).toBe(3);
+  });
+
+  it('routes findings with empty tags into the (untagged) sentinel bucket', () => {
+    const findings = [
+      f({ tags: [] }),
+      f({ tags: [] }),
+      f({ tags: ['real-tag'] }),
+    ];
+    const digest = findingDigest(findings);
+    expect(digest.byTag['(untagged)']).toBe(2);
+    expect(digest.byTag['real-tag']).toBe(1);
+  });
+
+  it('drops empty / whitespace-only tag entries silently (sloppy producer defense)', () => {
+    const findings = [
+      f({ tags: ['real', '', '   ', 'other'] }),
+      f({ tags: ['   '] }), // ALL entries whitespace -> degrades to (untagged)
+    ];
+    const digest = findingDigest(findings);
+    expect(digest.byTag['real']).toBe(1);
+    expect(digest.byTag['other']).toBe(1);
+    expect(digest.byTag['']).toBeUndefined();
+    expect(digest.byTag['   ']).toBeUndefined();
+    // Pure-whitespace tags array degrades to (untagged) so a sloppy
+    // producer doesn't get its findings silently dropped from the
+    // tag panel.
+    expect(digest.byTag['(untagged)']).toBe(1);
+  });
+
+  it('emits an empty byTag when findings is empty (matches the other sparse maps)', () => {
+    const digest = findingDigest([]);
+    expect(digest.byTag).toEqual({});
+  });
+
+  it('UNTAGGED_BUCKET export is the literal "(untagged)" so consumers can avoid hard-coding', async () => {
+    const mod = await import('../src/digest.js');
+    expect(mod.UNTAGGED_BUCKET).toBe('(untagged)');
+    // And the symbol is reachable through the package re-export.
+    const pkg = await import('../src/index.js');
+    expect((pkg as { UNTAGGED_BUCKET?: string }).UNTAGGED_BUCKET).toBe('(untagged)');
+  });
+});
+
+describe('computeDigestDrift byTagDelta (tick 14)', () => {
+  it('surfaces per-tag deltas (sparse, omits zeros)', () => {
+    const persisted = findingDigest([
+      f({ tags: ['owasp:a01'], file: 'a.ts' }),
+      f({ tags: ['owasp:a01'], file: 'b.ts' }),
+    ]);
+    const fresh = findingDigest([
+      f({ tags: ['owasp:a01'], file: 'a.ts' }),
+      f({ tags: ['owasp:a07'], file: 'b.ts' }), // tag changed
+    ]);
+    const drift = computeDigestDrift(persisted, fresh);
+    // owasp:a01: 2 -> 1 (delta -1). owasp:a07: absent -> 1 (delta +1).
+    expect(drift.byTagDelta['owasp:a01']).toBe(-1);
+    expect(drift.byTagDelta['owasp:a07']).toBe(1);
+    expect(drift.hasDrift).toBe(true);
+  });
+
+  it('a (untagged) -> tagged transition surfaces as drift on both buckets', () => {
+    // An operator landed a tag-rule that re-classified previously-untagged
+    // findings. Drift should flag the (untagged) drop AND the new tag rise
+    // so the dashboard "stale?" banner triggers.
+    const persisted = findingDigest([f({ tags: [] }), f({ tags: [] })]);
+    const fresh = findingDigest([f({ tags: ['new-rule'] }), f({ tags: ['new-rule'] })]);
+    const drift = computeDigestDrift(persisted, fresh);
+    expect(drift.byTagDelta['(untagged)']).toBe(-2);
+    expect(drift.byTagDelta['new-rule']).toBe(2);
+    expect(drift.hasDrift).toBe(true);
+  });
+
+  it('tolerates a legacy persisted digest with no byTag (treats absent as empty)', () => {
+    // Pre-tick-14 digests don't have byTag. computeDigestDrift must
+    // degrade gracefully and treat each new tag as a positive delta
+    // rather than throwing on the sparseDelta walk.
+    const persistedFindings = [f({ tags: ['legacy-tag'] })];
+    const freshFindings = [f({ tags: ['legacy-tag'] })];
+    const persistedRaw = findingDigest(persistedFindings);
+    const fresh = findingDigest(freshFindings);
+    // Synthesize a legacy persisted by deleting byTag.
+    const persisted = { ...persistedRaw } as unknown as Record<string, unknown>;
+    delete persisted['byTag'];
+    const drift = computeDigestDrift(
+      persisted as unknown as ReturnType<typeof findingDigest>,
+      fresh,
+    );
+    // Because persisted treats absent as empty, every fresh tag is a
+    // positive delta -- legacy-tag: 1.
+    expect(drift.byTagDelta['legacy-tag']).toBe(1);
+    expect(drift.hasDrift).toBe(true);
+  });
+
+  it('agreeing tag buckets do not flag drift', () => {
+    const findings = [
+      f({ tags: ['ok'], file: 'a.ts' }),
+      f({ tags: ['ok'], file: 'b.ts' }),
+    ];
+    const drift = computeDigestDrift(findingDigest(findings), findingDigest(findings));
+    expect(drift.byTagDelta).toEqual({});
+    expect(drift.hasDrift).toBe(false);
+  });
+});
