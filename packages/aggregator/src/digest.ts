@@ -1,5 +1,6 @@
 import {
   SEVERITY_ORDER,
+  SeveritySchema,
   type Finding,
   type FindingCategory,
   type Severity,
@@ -231,6 +232,37 @@ export interface FindingDigestOptions {
    */
   minConfidence?: number;
   /**
+   * Tick 20: Pre-bucket severity floor. Findings whose severity ranks
+   * STRICTLY ABOVE (i.e. less severe than) `severityThreshold` are
+   * dropped BEFORE any bucket arithmetic. Mirror of `minConfidence` --
+   * lets the same digest helper preview "what would my report look
+   * like with a `severity_threshold: high` floor?" without re-running
+   * `aggregate()`.
+   *
+   * Closed enum: any of `critical | high | medium | low | nit`. A
+   * threshold of `nit` (the most permissive) accepts every finding;
+   * a threshold of `critical` (the strictest) keeps only critical
+   * findings.
+   *
+   * Semantics match `aggregate()`'s `threshold` opt: the comparison
+   * uses `SEVERITY_ORDER` (critical=0 .. nit=4) and accepts findings
+   * with `SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold]`.
+   * So `severityThreshold: 'medium'` keeps critical + high + medium
+   * and drops low + nit -- the same shape the worker's existing
+   * `cfg.severity_threshold` knob produces.
+   *
+   * Validation: an unrecognised string is treated as "no filter"
+   * (back-compat / forgiving). The pure `normaliseDigestSeverityThreshold`
+   * helper is exported so a CLI / dashboard consumer that wants to
+   * surface the resolved threshold in a `--dry-run` report gets one
+   * source of truth.
+   *
+   * Composes with `minConfidence`: both filters apply BEFORE bucketing,
+   * so a caller can drop low-confidence noise AND low-severity nits in
+   * one pass.
+   */
+  severityThreshold?: Severity | null;
+  /**
    * When set, also compute hotspot clusters and attach them under
    * `digest.hotspots`. `true` uses the default `findHotspots` options;
    * an object value forwards those knobs through to the clusterer.
@@ -294,6 +326,29 @@ export function normaliseDigestMinConfidence(raw: unknown): number {
 }
 
 /**
+ * Tick 20: Normalise the `severityThreshold` opt to a usable Severity
+ * literal (or `null` for "no filter"). The validation policy mirrors
+ * `normaliseDigestMinConfidence`: forgiving on stray values so a
+ * misconfigured caller (a hand-typed `Critical` from someone who
+ * thought the input was case-insensitive) doesn't silently drop
+ * every finding.
+ *
+ *   - undefined / null / non-string         -> null (no filter)
+ *   - string in SEVERITY_ORDER              -> the literal verbatim
+ *   - any other string (case mismatch, typo)-> null (no filter)
+ *
+ * Pure / exported so a CLI / dashboard consumer that wants to apply
+ * the same normalisation policy outside the digest helper (e.g. when
+ * echoing the resolved threshold in a `--dry-run` report) gets one
+ * source of truth. Mirrors `normaliseDigestMinConfidence`'s contract.
+ */
+export function normaliseDigestSeverityThreshold(raw: unknown): Severity | null {
+  if (typeof raw !== 'string') return null;
+  const parsed = SeveritySchema.safeParse(raw);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
  * Walk a `Finding[]` once and return a digest with the shapes a
  * dashboard / CLI / PR-comment renderer needs.
  *
@@ -322,11 +377,31 @@ export function findingDigest(
   // through (no filter) when the threshold is absent / non-finite /
   // <= 0 -- the latter is the back-compat default (a 0 floor accepts
   // every finding since confidence is always >= 0).
+  //
+  // Tick 20: ALSO apply a severity floor (severityThreshold) in the
+  // same pass. Composition is AND: a finding must pass BOTH the
+  // confidence floor AND the severity floor to be counted. We do the
+  // two filters in a single .filter() loop so the cost stays one
+  // additional pass even when both are active.
   const filterThreshold = normaliseDigestMinConfidence(opts.minConfidence);
-  const filtered =
-    filterThreshold > 0
-      ? findings.filter((f) => typeof f.confidence === 'number' && f.confidence >= filterThreshold)
-      : findings;
+  const severityFloor = normaliseDigestSeverityThreshold(opts.severityThreshold);
+  const severityFloorRank = severityFloor !== null ? SEVERITY_ORDER[severityFloor] : null;
+  const needsFilter = filterThreshold > 0 || severityFloorRank !== null;
+  const filtered = needsFilter
+    ? findings.filter((f) => {
+        if (filterThreshold > 0) {
+          if (typeof f.confidence !== 'number' || f.confidence < filterThreshold) return false;
+        }
+        if (severityFloorRank !== null) {
+          // SEVERITY_ORDER: critical=0 .. nit=4. A finding passes when
+          // its rank is <= the floor's rank (i.e. it is at least as
+          // severe as the threshold). Mirrors aggregate()'s
+          // `SEVERITY_ORDER[f.severity] <= SEVERITY_ORDER[threshold]`.
+          if (SEVERITY_ORDER[f.severity] > severityFloorRank) return false;
+        }
+        return true;
+      })
+    : findings;
   findings = filtered;
 
   const totalsBySeverity: Record<Severity, number> = { ...EMPTY_SEVERITY_TOTALS };

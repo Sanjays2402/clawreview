@@ -1,4 +1,4 @@
-import type { Finding } from '@clawreview/types';
+import type { Finding, Severity } from '@clawreview/types';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -953,6 +953,141 @@ describe('normaliseDigestMinConfidence (tick 19, pure helper)', () => {
     expect(normaliseDigestMinConfidence(0.5)).toBe(0.5);
     expect(normaliseDigestMinConfidence(0.99)).toBe(0.99);
     expect(normaliseDigestMinConfidence(1)).toBe(1);
+  });
+});
+
+describe('findingDigest severityThreshold pre-filter (tick 20)', () => {
+  it('drops findings less severe than the threshold BEFORE bucketing', () => {
+    const findings = [
+      f({ agent: 'A', file: 'a.ts', severity: 'critical' }),
+      f({ agent: 'B', file: 'b.ts', severity: 'high' }),
+      f({ agent: 'C', file: 'c.ts', severity: 'medium' }),
+      f({ agent: 'D', file: 'd.ts', severity: 'low' }),
+      f({ agent: 'E', file: 'e.ts', severity: 'nit' }),
+    ];
+    // No filter: all 5 findings counted.
+    const wide = findingDigest(findings);
+    expect(wide.total).toBe(5);
+    // severityThreshold: 'medium' keeps critical + high + medium (3).
+    const narrow = findingDigest(findings, { severityThreshold: 'medium' });
+    expect(narrow.total).toBe(3);
+    // Every bucket reflects the post-filter view.
+    expect(narrow.totalsBySeverity.critical).toBe(1);
+    expect(narrow.totalsBySeverity.high).toBe(1);
+    expect(narrow.totalsBySeverity.medium).toBe(1);
+    expect(narrow.totalsBySeverity.low).toBe(0);
+    expect(narrow.totalsBySeverity.nit).toBe(0);
+    expect(narrow.byAgent).toEqual({ A: 1, B: 1, C: 1 });
+    expect(narrow.byFile).toEqual({ 'a.ts': 1, 'b.ts': 1, 'c.ts': 1 });
+  });
+
+  it('severityThreshold: nit (the most permissive) is a pass-through', () => {
+    const findings = [
+      f({ severity: 'critical' }),
+      f({ severity: 'high' }),
+      f({ severity: 'medium' }),
+      f({ severity: 'low' }),
+      f({ severity: 'nit' }),
+    ];
+    const baseline = findingDigest(findings);
+    const r = findingDigest(findings, { severityThreshold: 'nit' });
+    expect(r.total).toBe(baseline.total);
+    expect(r.totalsBySeverity).toEqual(baseline.totalsBySeverity);
+  });
+
+  it('severityThreshold: critical (the strictest) keeps only critical findings', () => {
+    const findings = [
+      f({ severity: 'critical' }),
+      f({ severity: 'high' }),
+      f({ severity: 'medium' }),
+      f({ severity: 'nit' }),
+    ];
+    const r = findingDigest(findings, { severityThreshold: 'critical' });
+    expect(r.total).toBe(1);
+    expect(r.totalsBySeverity.critical).toBe(1);
+    expect(r.totalsBySeverity.high).toBe(0);
+  });
+
+  it('severityThreshold: null / undefined / unknown string is a no-op (back-compat)', () => {
+    const findings = [f({ severity: 'critical' }), f({ severity: 'nit' })];
+    const baseline = findingDigest(findings);
+    const explicitNull = findingDigest(findings, { severityThreshold: null });
+    const undef = findingDigest(findings, { severityThreshold: undefined });
+    const typo = findingDigest(findings, {
+      severityThreshold: 'Critical' as unknown as Severity,
+    });
+    const garbage = findingDigest(findings, {
+      severityThreshold: 'enormous' as unknown as Severity,
+    });
+    expect(explicitNull.total).toBe(baseline.total);
+    expect(undef.total).toBe(baseline.total);
+    expect(typo.total).toBe(baseline.total);
+    expect(garbage.total).toBe(baseline.total);
+  });
+
+  it('does not mutate the input findings array', () => {
+    const findings = [f({ severity: 'critical' }), f({ severity: 'nit' })];
+    const snapshot = findings.map((x) => ({ ...x }));
+    findingDigest(findings, { severityThreshold: 'high' });
+    expect(findings.map((x) => ({ ...x }))).toEqual(snapshot);
+    expect(findings.length).toBe(2);
+  });
+
+  it('composes with minConfidence (AND semantics: both filters apply)', () => {
+    const findings = [
+      f({ confidence: 0.9, severity: 'critical' }), // passes both
+      f({ confidence: 0.9, severity: 'nit' }), // fails severity
+      f({ confidence: 0.2, severity: 'critical' }), // fails confidence
+      f({ confidence: 0.2, severity: 'nit' }), // fails both
+    ];
+    const r = findingDigest(findings, {
+      minConfidence: 0.5,
+      severityThreshold: 'high',
+    });
+    expect(r.total).toBe(1);
+    expect(r.totalsBySeverity.critical).toBe(1);
+  });
+
+  it('severityThreshold affects topAgents / topFiles / topCategories slices too', () => {
+    const findings = [
+      f({ agent: 'A', file: 'a.ts', category: 'security', severity: 'high' }),
+      f({ agent: 'A', file: 'a.ts', category: 'security', severity: 'nit' }),
+      f({ agent: 'B', file: 'b.ts', category: 'style', severity: 'low' }),
+      f({ agent: 'B', file: 'b.ts', category: 'style', severity: 'nit' }),
+    ];
+    const r = findingDigest(findings, { severityThreshold: 'high' });
+    expect(r.total).toBe(1);
+    expect(r.topAgents).toEqual([{ agent: 'A', count: 1 }]);
+    expect(r.topFiles).toEqual([{ file: 'a.ts', count: 1 }]);
+    expect(r.topCategories).toEqual([{ category: 'security', count: 1 }]);
+  });
+});
+
+describe('normaliseDigestSeverityThreshold (tick 20, pure helper)', () => {
+  it('returns null for undefined / null / non-string inputs', async () => {
+    const { normaliseDigestSeverityThreshold } = await import('../src/digest.js');
+    expect(normaliseDigestSeverityThreshold(undefined)).toBeNull();
+    expect(normaliseDigestSeverityThreshold(null)).toBeNull();
+    expect(normaliseDigestSeverityThreshold(42)).toBeNull();
+    expect(normaliseDigestSeverityThreshold({})).toBeNull();
+    expect(normaliseDigestSeverityThreshold([])).toBeNull();
+  });
+
+  it('returns null for unknown / mis-cased strings (forgiving)', async () => {
+    const { normaliseDigestSeverityThreshold } = await import('../src/digest.js');
+    expect(normaliseDigestSeverityThreshold('Critical')).toBeNull();
+    expect(normaliseDigestSeverityThreshold('HIGH')).toBeNull();
+    expect(normaliseDigestSeverityThreshold('enormous')).toBeNull();
+    expect(normaliseDigestSeverityThreshold('')).toBeNull();
+  });
+
+  it('passes valid Severity literals through verbatim', async () => {
+    const { normaliseDigestSeverityThreshold } = await import('../src/digest.js');
+    expect(normaliseDigestSeverityThreshold('critical')).toBe('critical');
+    expect(normaliseDigestSeverityThreshold('high')).toBe('high');
+    expect(normaliseDigestSeverityThreshold('medium')).toBe('medium');
+    expect(normaliseDigestSeverityThreshold('low')).toBe('low');
+    expect(normaliseDigestSeverityThreshold('nit')).toBe('nit');
   });
 });
 
