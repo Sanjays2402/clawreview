@@ -684,6 +684,142 @@ describe('reviews and stats routes', () => {
       const body = res.json();
       expect(body.error).toBe('BadQuery');
     });
+
+    // Tick 16: `?slim=true` projection strips the full sparse bucket
+    // maps (byTag / byCategory / byAgent / byFile) from the digest
+    // payload, keeping just totals + top-N slices + hotspots. Aimed
+    // at dashboards that render only the ranked breakdowns.
+    it('strips byTag/byCategory/byAgent/byFile when ?slim=true on fresh path', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 16, owner: 'o', repo: 'r', prNumber: 60, headSha: 'h60', baseSha: 'b60' });
+      const findings = [
+        { agent: 'security', category: 'security', severity: 'high',   title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['owasp:a01'] },
+        { agent: 'style',    category: 'style',    severity: 'nit',    title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.4, tags: ['nit:trailing-whitespace'] },
+        { agent: 'perf',     category: 'performance', severity: 'medium', title: 'Z', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.6, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 60, headSha: 'h60', baseSha: 'b60' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 3, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=true` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(true);
+      // Heavy maps stripped from BOTH persisted and fresh.
+      expect(body.persisted.byTag).toBeUndefined();
+      expect(body.persisted.byAgent).toBeUndefined();
+      expect(body.persisted.byCategory).toBeUndefined();
+      expect(body.persisted.byFile).toBeUndefined();
+      expect(body.fresh.byTag).toBeUndefined();
+      expect(body.fresh.byAgent).toBeUndefined();
+      expect(body.fresh.byCategory).toBeUndefined();
+      expect(body.fresh.byFile).toBeUndefined();
+      // Light + dashboard-useful fields preserved.
+      expect(body.persisted.total).toBe(3);
+      expect(body.persisted.totalsBySeverity.high).toBe(1);
+      expect(Array.isArray(body.persisted.topAgents)).toBe(true);
+      expect(Array.isArray(body.persisted.topCategories)).toBe(true);
+      expect(Array.isArray(body.persisted.topFiles)).toBe(true);
+      expect(Array.isArray(body.fresh.topAgents)).toBe(true);
+      // Drift sparse deltas survive because they're already small.
+      expect(body.drift.hasDrift).toBe(false);
+      expect(body.drift.totalDelta).toBe(0);
+      // Drift's sparse delta maps (which legitimately have entries
+      // only when something changed) come through untouched.
+      expect(body.drift.byTagDelta).toEqual({});
+    });
+
+    it('echoes slim=false by default (back-compat: full byTag/byAgent/byCategory/byFile)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 16, owner: 'o', repo: 'r', prNumber: 61, headSha: 'h61', baseSha: 'b61' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 61, headSha: 'h61', baseSha: 'b61' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(false);
+      // Default: full sparse maps survive on the wire so existing
+      // dashboards / tools / tests keep working unchanged.
+      expect(body.persisted.byTag).toBeDefined();
+      expect(body.persisted.byAgent).toBeDefined();
+      expect(body.persisted.byCategory).toBeDefined();
+      expect(body.persisted.byFile).toBeDefined();
+      expect(body.fresh.byTag).toBeDefined();
+    });
+
+    it('composes ?recompute=cached&slim=true (slim persisted, fresh+drift null)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 16, owner: 'o', repo: 'r', prNumber: 62, headSha: 'h62', baseSha: 'b62' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'critical', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: ['secret'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 62, headSha: 'h62', baseSha: 'b62' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached&slim=true` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.recompute).toBe('cached');
+      expect(body.slim).toBe(true);
+      expect(body.fresh).toBeNull();
+      expect(body.drift).toBeNull();
+      // Persisted is slimmed.
+      expect(body.persisted.byTag).toBeUndefined();
+      expect(body.persisted.byFile).toBeUndefined();
+      expect(body.persisted.total).toBe(1);
+      expect(body.persisted.totalsBySeverity.critical).toBe(1);
+    });
+
+    it('?slim=true on a legacy review (persisted=null) leaves persisted null', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 16, owner: 'o', repo: 'r', prNumber: 63, headSha: 'h63', baseSha: 'b63' });
+      // Legacy review: no digest passed in.
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 63, headSha: 'h63', baseSha: 'b63' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=true` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Legacy: persisted stays null; slim has nothing to do.
+      expect(body.persisted).toBeNull();
+      // Fresh is slimmed (empty review: top-N slices are empty arrays).
+      expect(body.fresh.byTag).toBeUndefined();
+      expect(body.fresh.total).toBe(0);
+      expect(body.slim).toBe(true);
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {

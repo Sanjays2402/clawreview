@@ -111,9 +111,33 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // the read-side stale rate. The `recompute` label could be added
     // later if a "how often does a dashboard request the cached path?"
     // signal becomes useful.
+    //
+    // Tick 16: `?slim=true` projection knob STRIPS the full sparse
+    // bucket maps (byTag, byCategory, byAgent, byFile) from the
+    // persisted + fresh digests on the wire. The top-N slices
+    // (topTags, topCategories, topAgents, topFiles) plus totals
+    // (total, totalsBySeverity) survive so a dashboard rendering ONLY
+    // the ranked breakdowns can drop a large chunk of payload on
+    // tag-heavy reviews (a corpus with 200 distinct tags previously
+    // serialised 200 entries in `byTag` -- slim mode ships just the
+    // top-10 slice).
+    //
+    // The drift report's per-bucket deltas (byTagDelta etc.) are NOT
+    // stripped on slim mode -- they're already sparse (only changed
+    // keys appear) and a dashboard rendering drift wants to know
+    // which keys changed even if it doesn't render the full bucket
+    // counts. The drift summary (totalDelta + bySeverityDelta +
+    // hasDrift) is always preserved.
+    //
+    // Composes with cached: `?recompute=cached&slim=true` returns the
+    // slimmed persisted with fresh + drift null (the cached mode's
+    // existing shape, minus the full sparse maps).
     const queryParse = z
       .object({
         recompute: z.enum(['fresh', 'cached']).optional(),
+        slim: z
+          .union([z.literal('true'), z.literal('false'), z.literal('1'), z.literal('0')])
+          .optional(),
       })
       .safeParse(req.query ?? {});
     if (!queryParse.success) {
@@ -121,6 +145,8 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       return { error: 'BadQuery', issues: queryParse.error.flatten() };
     }
     const recomputeMode = queryParse.data.recompute ?? 'fresh';
+    const slim =
+      queryParse.data.slim === 'true' || queryParse.data.slim === '1';
     const rec = await store.get(params.data.id);
     if (!rec) {
       reply.code(404);
@@ -133,10 +159,14 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // one schema regardless of mode.
       return {
         reviewId: rec.id,
-        persisted: rec.digest ?? null,
+        persisted: rec.digest ? (slim ? slimDigest(rec.digest) : rec.digest) : null,
         fresh: null,
         drift: null,
         recompute: 'cached' as const,
+        // Echo the slim mode so a consumer can verify the projection
+        // was applied. `false` when slim was not passed -- consumers
+        // that don't care can ignore the field.
+        slim,
       };
     }
     // Match the worker's tick-12 / tick-13 cap choices so a dashboard
@@ -171,12 +201,15 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // persisted digest, so the dashboard can render a "legacy
       // review, no persisted snapshot" hint instead of a misleading
       // "every bucket dropped to zero" banner.
-      persisted: rec.digest ?? null,
-      fresh,
+      persisted: rec.digest ? (slim ? slimDigest(rec.digest) : rec.digest) : null,
+      fresh: slim ? slimDigest(fresh) : fresh,
       drift,
       // Echo the resolved mode so a consumer can verify which path the
       // server took. Always 'fresh' on this branch.
       recompute: 'fresh' as const,
+      // Tick 16: echo the slim mode too so a consumer can confirm the
+      // projection. `false` when slim was not passed (back-compat).
+      slim,
     };
   });
 
@@ -421,4 +454,60 @@ function toReviewDetailDto(r: Awaited<ReturnType<ReturnType<typeof getReviewStor
     // instead of `digest !== undefined && digest !== null`.
     digest: r.digest ?? null,
   };
+}
+
+/**
+ * Strip the full sparse bucket maps from a `FindingDigest` for the
+ * tick-16 `?slim=true` projection on `/api/reviews/:id/digest`.
+ *
+ * Removed (heavy):
+ *   - byCategory      -- can be hundreds of entries on tag-heavy reviews
+ *   - byAgent         -- one entry per agent; small but redundant with topAgents
+ *   - byFile          -- one entry per file touched; the heaviest field
+ *   - byTag           -- one entry per distinct tag; second-heaviest
+ *
+ * Preserved (light + dashboard-useful):
+ *   - total                                                       (single number)
+ *   - totalsBySeverity                                            (5 keys, fixed)
+ *   - topFiles / topAgents / topCategories / topTags              (capped slices)
+ *   - hotspots                                                    (already capped)
+ *
+ * The rationale: a dashboard rendering "top breakdowns + drift" only
+ * needs the ranked slices, never the full bucket maps. The full maps
+ * are still available via `?slim=false` (default) for any consumer
+ * that actually walks them (e.g. an export tool dumping every tag
+ * bucket to CSV).
+ *
+ * The function returns a NEW object so the persisted digest is never
+ * mutated -- consumers that hold a reference to `rec.digest` still
+ * see the full shape.
+ *
+ * Pure; exported via the route file's barrel so the test suite can
+ * pin the contract without injecting a fake digest through Fastify.
+ */
+export function slimDigest<T extends { total: number; totalsBySeverity: unknown }>(digest: T): {
+  total: T['total'];
+  totalsBySeverity: T['totalsBySeverity'];
+  topFiles?: unknown;
+  topAgents?: unknown;
+  topCategories?: unknown;
+  topTags?: unknown;
+  hotspots?: unknown;
+} {
+  // Cast through unknown so the helper accepts any FindingDigest-like
+  // shape (it only reads the documented fields; legacy digests
+  // missing topTags / hotspots are tolerated).
+  const d = digest as unknown as Record<string, unknown>;
+  const slim: Record<string, unknown> = {
+    total: d.total,
+    totalsBySeverity: d.totalsBySeverity,
+  };
+  // Top-N slices: include when present so a legacy digest (missing
+  // topTags) doesn't get a synthetic empty array.
+  if (d.topFiles !== undefined) slim.topFiles = d.topFiles;
+  if (d.topAgents !== undefined) slim.topAgents = d.topAgents;
+  if (d.topCategories !== undefined) slim.topCategories = d.topCategories;
+  if (d.topTags !== undefined) slim.topTags = d.topTags;
+  if (d.hotspots !== undefined) slim.hotspots = d.hotspots;
+  return slim as ReturnType<typeof slimDigest<T>>;
 }
