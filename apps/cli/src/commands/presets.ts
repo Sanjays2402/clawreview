@@ -145,7 +145,7 @@ interface PresetEntry {
 }
 
 /**
- * `clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]`
+ * `clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text] [--since <git-ref>]`
  *
  * Take an ad-hoc `extends:` chain (e.g. `strict,security-focused`) and
  * print the merged body that `extends: [strict, security-focused]`
@@ -172,19 +172,29 @@ interface PresetEntry {
  * name collision). Unknown names / cycles surface via
  * `resolveExtendsChain` and exit 2 with the error message.
  *
+ * Tick 18: `--since <git-ref>` resolves local presets against their
+ * historical body at the named ref instead of HEAD. Reuses
+ * `loadLocalPresetsAtRef` (same path the `presets diff --since` uses)
+ * so a caller can ask "what did `web-strict` compose to at the v2.4
+ * release?" without having to check out the ref or copy files
+ * around. Built-in presets aren't ref-aware (they live in
+ * @clawreview/types source), so the ref only affects locals. An
+ * empty `--since=` is rejected (typo guard).
+ *
  * Output:
  *   - `--format yaml` (default): merged body as YAML, suitable for
  *     pasting into `.clawreview.yml`. Header comments record the
  *     chain so the source is auditable.
- *   - `--format json`: { chain, sources, body, fields } for tooling.
+ *   - `--format json`: { chain, sources, body, fields, since } for tooling.
  *   - `--format text`: human-readable, color-tagged. Mirrors `show`.
  *
  * Exit codes:
  *   - 0 on success
  *   - 1 when the chain is empty (no positional, no --chain)
  *   - 2 when --format is invalid OR when a name in the chain is
- *     unknown / introduces a cycle. The error message includes the
- *     full chain so a stale alias is easy to spot.
+ *     unknown / introduces a cycle OR when --since fails to resolve.
+ *     The error message includes the full chain so a stale alias
+ *     is easy to spot.
  */
 export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
   // Chain can come from a positional ("resolve strict,security-focused")
@@ -231,7 +241,39 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
     return;
   }
 
-  const localPresets = await loadLocalPresets(root);
+  // Tick 18: --since <git-ref> resolves locals at the named ref. An
+  // empty/whitespace ref is rejected as a typo guard -- a stray
+  // `--since=` would otherwise silently degrade to HEAD.
+  const sinceRefRaw = args.flags.since;
+  const sinceRef =
+    typeof sinceRefRaw === 'string' && sinceRefRaw.trim().length > 0
+      ? sinceRefRaw.trim()
+      : null;
+  if (sinceRefRaw !== undefined && sinceRef === null) {
+    process.stderr.write(
+      `clawreview presets resolve: --since requires a git ref (got empty string)\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  // Local namespace: HEAD by default, or the historical body at
+  // --since. Built-ins are not ref-aware (live in package source)
+  // so the ref only redirects locals.
+  let localPresets: Record<string, ConfigPreset>;
+  if (sinceRef !== null) {
+    try {
+      localPresets = await loadLocalPresetsAtRef(root, sinceRef);
+    } catch (err) {
+      process.stderr.write(
+        `clawreview presets resolve: --since '${sinceRef}' failed: ${(err as Error).message}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+  } else {
+    localPresets = await loadLocalPresets(root);
+  }
   const builtinNames = listPresets();
 
   // Per-name source so the JSON output can attribute each chain entry
@@ -278,6 +320,11 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
           chain,
           sources,
           fields,
+          // Tick 18: echo --since so a consumer can verify the
+          // historical resolution ran. `null` (not omitted) when
+          // --since was absent so a "is this a historical resolve?"
+          // check is `since !== null`.
+          since: sinceRef,
           body: composed,
         },
         null,
@@ -290,12 +337,16 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
   if (format === 'yaml') {
     // YAML is the copy-pasteable shape. Header comments record the
     // chain so a config-file consumer can see what generated the body.
-    const header = [
+    const headerLines = [
       `# clawreview preset chain: ${chain.join(' -> ')}`,
       `# sources: ${sources
         .map((s) => `${s.name}=${s.source}${s.shadowsBuiltin ? '(shadows)' : ''}`)
         .join(', ')}`,
-    ].join('\n');
+    ];
+    if (sinceRef !== null) {
+      headerLines.push(`# since: ${sinceRef}  (locals resolved at this git ref)`);
+    }
+    const header = headerLines.join('\n');
     const body = YAML.stringify(composed, { lineWidth: 0 });
     process.stdout.write(`${header}\n${body}`);
     return;
@@ -319,6 +370,11 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
       })
       .join(' -> ')}\n`,
   );
+  if (sinceRef !== null) {
+    process.stdout.write(
+      `${kleur.bold('since')}: ${sinceRef} ${kleur.gray('(locals resolved at this git ref)')}\n`,
+    );
+  }
   if (fields.length === 0) {
     process.stdout.write(kleur.gray('  (resolved preset is empty)\n'));
     return;

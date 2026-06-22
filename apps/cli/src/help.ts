@@ -7,7 +7,7 @@ Usage:
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
-  clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]
+  clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text] [--since <git-ref>]
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>|<a>...<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
@@ -62,6 +62,7 @@ Examples:
   clawreview presets show web-strict --format yaml >> .clawreview.yml
   clawreview presets resolve strict,security-focused
   clawreview presets resolve strict,security-focused --format json | jq '.fields'
+  clawreview presets resolve web-strict --since v2.4    # what did web-strict compose at v2.4?
   clawreview presets diff strict permissive
   clawreview presets diff strict,security-focused web --format json | jq '.changed'
   clawreview presets diff strict permissive --only-fields severity_threshold,min_confidence

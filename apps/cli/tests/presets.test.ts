@@ -535,6 +535,160 @@ describe('clawreview presets resolve', () => {
     expect(r.stdout).toContain('body:');
     expect(r.stdout).toMatch(/severity_threshold:\s+high/);
   });
+
+  // Tick 18: --since <git-ref> resolves locals at the named ref.
+  // Built-ins are version-agnostic (live in package source) so the
+  // ref only affects local presets. Reuses loadLocalPresetsAtRef
+  // (same path the `presets diff --since` uses).
+
+  it('--since resolves a local preset against its historical body', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // v1: severity_threshold high
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // HEAD: severity_threshold low
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    // Default (HEAD) should see `low`.
+    const headRun = await runResolve(dir, ['local-only'], { format: 'json' });
+    const parsedHead = JSON.parse(headRun.stdout);
+    expect(parsedHead.body.severity_threshold).toBe('low');
+    expect(parsedHead.since).toBeNull();
+    // --since <v1> should see `high` (the historical body).
+    const sinceRun = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      since: v1,
+    });
+    const parsedSince = JSON.parse(sinceRun.stdout);
+    expect(parsedSince.body.severity_threshold).toBe('high');
+    expect(parsedSince.since).toBe(v1);
+  });
+
+  it('--since does NOT affect built-in presets (they live in package source)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/placeholder.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    // Built-in `strict` should resolve the same regardless of ref.
+    const sinceRun = await runResolve(dir, ['strict'], {
+      format: 'json',
+      since: 'HEAD',
+    });
+    expect(sinceRun.exitCode).toBe(0);
+    const parsed = JSON.parse(sinceRun.stdout);
+    expect(parsed.sources[0]).toEqual({
+      name: 'strict',
+      source: 'builtin',
+      shadowsBuiltin: false,
+    });
+    // since echo is still surfaced (the ref was active even though
+    // it didn't change the resolution -- a consumer might want to
+    // know the ref was requested).
+    expect(parsed.since).toBe('HEAD');
+  });
+
+  it('--since= (empty value) rejects 2 as a typo guard', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], { format: 'json', since: '' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--since');
+    expect(r.stderr).toContain('git ref');
+  });
+
+  it('--since with an unknown ref degrades to an empty local namespace (mirrors presets diff)', async () => {
+    // loadLocalPresetsAtRef returns {} for refs where the
+    // `.clawreview/presets/` directory does not exist, mirroring
+    // `presets diff --since`'s graceful degradation for projects
+    // that adopted local presets after the ref. The chain resolver
+    // then sees no locals and surfaces "unknown preset" via the
+    // standard cycle/unknown error path. The exit code stays 2 so
+    // a CI gate still fails -- but the operator gets the
+    // "no such local preset" message instead of a noisy git error.
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const r = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      since: 'this-ref-does-not-exist',
+    });
+    expect(r.exitCode).toBe(2);
+    // The error surfaces via the chain resolver -- the local preset
+    // wasn't found in the (empty) historical namespace.
+    expect(r.stderr).toContain('local-only');
+  });
+
+  it('--since YAML/text headers echo the ref', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // YAML header
+    const yaml = await runResolve(dir, ['local-only'], {
+      format: 'yaml',
+      since: v1,
+    });
+    expect(yaml.stdout).toContain(`# since: ${v1}`);
+    // Text header
+    const text = await runResolve(dir, ['local-only'], {
+      format: 'text',
+      since: v1,
+    });
+    expect(text.stdout).toContain('since:');
+    expect(text.stdout).toContain(v1);
+  });
 });
 
 // ---------------------------------------------------------------------------
