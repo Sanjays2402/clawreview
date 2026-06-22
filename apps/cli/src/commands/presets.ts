@@ -1053,6 +1053,22 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
         // was not passed; consumers that only key off the resolved
         // sinceBase/sinceTarget see no behavioural change.
         sinceRange: sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.raw : null,
+        // Tick 18: also echo the internal range discriminator so a
+        // consumer can distinguish two-dot (`a..b`) from triple-dot
+        // (`a...b`) -- the latter resolves chain-A via merge-base,
+        // so the JSON consumer that wants to attribute the diff to a
+        // specific resolution path doesn't have to re-parse the raw
+        // string with its own regex. `null` when --since-range was
+        // not passed (mirrors `sinceRange` itself).
+        sinceRangeKind: sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.range : null,
+        // Tick 18: also echo the HEAD-shorthand flag so a consumer
+        // can tell whether the target was operator-typed or resolved
+        // from the trailing-empty form. `null` when --since-range
+        // was not passed -- a downstream consumer's check is then
+        // `sinceRangeTargetWasShorthand === true` rather than
+        // `=== true` defaulting to false on the absent case.
+        sinceRangeTargetWasShorthand:
+          sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.targetWasShorthand : null,
         // Surface the active filter so a downstream tool can verify
         // the diff was scoped (or not). Sorted for deterministic
         // JSON output. Exactly one of `onlyFields` / `excludeFields`
@@ -1103,6 +1119,13 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       headerLines.push(
         `# since-range: ${sinceRangeParsed.raw}  (split into base + target)${shorthandNote}`,
       );
+      // Tick 18: surface the parsed discriminator in the YAML header
+      // too so a YAML-consuming pipeline doesn't have to parse the
+      // raw string to learn which arm fired. Two-dot vs triple-dot
+      // changes the resolution semantics, so making it explicit
+      // matches the JSON `sinceRangeKind` echo and prevents a
+      // header-only consumer from missing the distinction.
+      headerLines.push(`# since-range-kind: ${sinceRangeParsed.range}`);
     }
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);

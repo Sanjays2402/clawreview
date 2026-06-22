@@ -3183,3 +3183,146 @@ describe('clawreview presets diff --since-range triple-dot (tick 17)', () => {
     expect(text.stdout).toContain('HEAD...HEAD');
   });
 });
+
+describe('clawreview presets diff --since-range JSON echoes range discriminator (tick 18)', () => {
+  // The JSON output gains `sinceRangeKind` + `sinceRangeTargetWasShorthand`
+  // so a consumer can attribute the diff to a specific resolution
+  // path without re-parsing the raw range string.
+
+  it('two-dot range echoes sinceRangeKind=two-dot and shorthand=false', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'HEAD..HEAD',
+    });
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceRangeKind).toBe('two-dot');
+    expect(parsed.sinceRangeTargetWasShorthand).toBe(false);
+  });
+
+  it('triple-dot range echoes sinceRangeKind=triple-dot and shorthand=false', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'HEAD...HEAD',
+    });
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceRangeKind).toBe('triple-dot');
+    expect(parsed.sinceRangeTargetWasShorthand).toBe(false);
+  });
+
+  it('HEAD-shorthand range echoes sinceRangeKind=two-dot and shorthand=true', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'HEAD..',
+    });
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceRangeKind).toBe('two-dot');
+    expect(parsed.sinceRangeTargetWasShorthand).toBe(true);
+    // sinceRange echoes the operator-typed string verbatim so a
+    // header consumer can show `HEAD..` alongside the resolved
+    // shorthand flag. (Boolean exists so a consumer doesn't need to
+    // parse the raw string with their own regex.)
+    expect(parsed.sinceRange).toBe('HEAD..');
+  });
+
+  it('absent --since-range echoes both fields as null (back-compat)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const r = await runDiff(dir, ['web', 'web'], { format: 'json' });
+    const parsed = JSON.parse(r.stdout);
+    // No --since-range was passed; both fields are null so a
+    // back-compat consumer that ignores them stays unchanged, AND
+    // a tick-18 consumer can distinguish "not passed" from
+    // "passed with a parsed value".
+    expect(parsed.sinceRange).toBeNull();
+    expect(parsed.sinceRangeKind).toBeNull();
+    expect(parsed.sinceRangeTargetWasShorthand).toBeNull();
+  });
+
+  it('YAML header surfaces since-range-kind alongside since-range', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    // YAML header on the two-dot arm
+    const twoDot = await runDiff(dir, ['web', 'web'], {
+      format: 'yaml',
+      'since-range': 'HEAD..HEAD',
+    });
+    expect(twoDot.stdout).toContain('# since-range-kind: two-dot');
+    // YAML header on the triple-dot arm
+    const tripleDot = await runDiff(dir, ['web', 'web'], {
+      format: 'yaml',
+      'since-range': 'HEAD...HEAD',
+    });
+    expect(tripleDot.stdout).toContain('# since-range-kind: triple-dot');
+  });
+});
