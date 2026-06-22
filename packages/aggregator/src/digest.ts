@@ -88,6 +88,24 @@ export interface FindingDigest {
    */
   topCategories: Array<{ category: FindingCategory; count: number }>;
   /**
+   * Top tags by descending count, then by tag (ascending) on ties.
+   * Capped at `opts.topTags` (default 10, hard ceiling 200). Mirror
+   * of topAgents / topCategories / topFiles -- a dashboard panel
+   * keyed by tag wants the pre-sorted top-N slice without filtering
+   * the sparse `byTag` map itself.
+   *
+   * Includes the synthetic `'(untagged)'` bucket when it has a
+   * non-zero count; consumers that want to hide it can `.filter()`
+   * against the exported `UNTAGGED_BUCKET` constant. We keep it in
+   * by default because "how many findings were untagged?" is a real
+   * dashboard signal (a tag-rule landed and reduced untagged volume
+   * is a normal trend to chart).
+   *
+   * Always sorted; consumers can render directly. The full unsliced
+   * map is still on `byTag` for callers that want it.
+   */
+  topTags: Array<{ tag: string; count: number }>;
+  /**
    * Optional hotspot clusters, computed via `findHotspots`. Off by
    * default (clustering walks the findings array a second time and not
    * every consumer wants the cost). Pass `opts.hotspots = true` to
@@ -120,6 +138,12 @@ export interface FindingDigestOptions {
    */
   topCategories?: number;
   /**
+   * Cap on the rendered top-tags list. Defaults to 10 (matches the
+   * shape of topAgents / topCategories). Hard ceiling 200 -- same
+   * contract as the other top-N caps.
+   */
+  topTags?: number;
+  /**
    * When set, also compute hotspot clusters and attach them under
    * `digest.hotspots`. `true` uses the default `findHotspots` options;
    * an object value forwards those knobs through to the clusterer.
@@ -130,6 +154,7 @@ export interface FindingDigestOptions {
 const DEFAULT_TOP_FILES = 5;
 const DEFAULT_TOP_AGENTS = 10;
 const DEFAULT_TOP_CATEGORIES = 10;
+const DEFAULT_TOP_TAGS = 10;
 const MAX_TOP = 200;
 
 /**
@@ -175,6 +200,7 @@ export function findingDigest(
     1,
     Math.min(MAX_TOP, opts.topCategories ?? DEFAULT_TOP_CATEGORIES),
   );
+  const topTags = Math.max(1, Math.min(MAX_TOP, opts.topTags ?? DEFAULT_TOP_TAGS));
 
   const totalsBySeverity: Record<Severity, number> = { ...EMPTY_SEVERITY_TOTALS };
   const byCategory: Partial<Record<FindingCategory, number>> = {};
@@ -236,6 +262,19 @@ export function findingDigest(
     .slice(0, topCategories)
     .map(([category, count]) => ({ category, count }));
 
+  // Tags share the topFiles / topAgents sort: descending count,
+  // ascending key on ties. The synthetic `(untagged)` bucket sorts
+  // alongside real tags by count -- it can legitimately be the
+  // most-populated bucket on a corpus where most findings ship
+  // without tags, and that's a useful dashboard signal.
+  const sortedTags = Object.entries(byTag).sort((a, b) => {
+    if (b[1] !== a[1]) return b[1] - a[1];
+    return a[0].localeCompare(b[0]);
+  });
+  const topTagsList = sortedTags
+    .slice(0, topTags)
+    .map(([tag, count]) => ({ tag, count }));
+
   const digest: FindingDigest = {
     total: findings.length,
     totalsBySeverity,
@@ -246,6 +285,7 @@ export function findingDigest(
     topFiles: topFilesList,
     topAgents: topAgentsList,
     topCategories: topCategoriesList,
+    topTags: topTagsList,
   };
 
   if (opts.hotspots) {

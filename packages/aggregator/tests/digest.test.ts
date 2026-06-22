@@ -592,3 +592,92 @@ describe('computeDigestDrift byTagDelta (tick 14)', () => {
     expect(drift.hasDrift).toBe(false);
   });
 });
+
+describe('findingDigest topTags slice (tick 15)', () => {
+  it('returns topTags sorted by descending count then by tag name on ties', () => {
+    const findings = [
+      f({ tags: ['security'] }),
+      f({ tags: ['security'] }),
+      f({ tags: ['perf'] }),
+      f({ tags: ['accessibility'] }),
+      f({ tags: ['accessibility'] }),
+    ];
+    const digest = findingDigest(findings, { topTags: 5 });
+    // accessibility and security tied at 2; alphabetical sort puts
+    // accessibility first.
+    expect(digest.topTags[0]).toEqual({ tag: 'accessibility', count: 2 });
+    expect(digest.topTags[1]).toEqual({ tag: 'security', count: 2 });
+    expect(digest.topTags[2]).toEqual({ tag: 'perf', count: 1 });
+  });
+
+  it('caps topTags at the requested limit and defaults to 10', () => {
+    const findings: Finding[] = [];
+    for (let i = 0; i < 15; i += 1) {
+      findings.push(f({ tags: [`tag-${String(i).padStart(2, '0')}`] }));
+    }
+    const explicit = findingDigest(findings, { topTags: 3 });
+    expect(explicit.topTags).toHaveLength(3);
+    expect(explicit.topTags[0]!.tag).toBe('tag-00');
+    // Default cap is 10 when topTags is omitted, matching the other
+    // top-N caps.
+    const defaulted = findingDigest(findings);
+    expect(defaulted.topTags).toHaveLength(10);
+    // Underlying byTag map still carries everything; the cap is just
+    // on the topTags render slice.
+    expect(Object.keys(defaulted.byTag).length).toBe(15);
+  });
+
+  it('clamps topTags into [1, 200] like topFiles / topAgents / topCategories', () => {
+    const findings: Finding[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      findings.push(f({ tags: [`tag-${i}`] }));
+    }
+    const tooLow = findingDigest(findings, { topTags: 0 });
+    expect(tooLow.topTags).toHaveLength(1);
+    const negative = findingDigest(findings, { topTags: -100 });
+    expect(negative.topTags).toHaveLength(1);
+    const huge = findingDigest(findings, { topTags: 10_000 });
+    expect(huge.topTags).toHaveLength(4);
+  });
+
+  it('includes the (untagged) sentinel in topTags ranked by count alongside real tags', () => {
+    // Many untagged findings, fewer real-tag findings -> (untagged)
+    // should outrank `real-tag` and appear FIRST in topTags. This is
+    // the "most of my findings have no tag" dashboard signal the slice
+    // is meant to surface.
+    const findings = [
+      f({ tags: [] }),
+      f({ tags: [] }),
+      f({ tags: [] }),
+      f({ tags: ['real-tag'] }),
+    ];
+    const digest = findingDigest(findings, { topTags: 5 });
+    expect(digest.topTags[0]).toEqual({ tag: '(untagged)', count: 3 });
+    expect(digest.topTags[1]).toEqual({ tag: 'real-tag', count: 1 });
+  });
+
+  it('emits an empty topTags slice when findings is empty', () => {
+    const digest = findingDigest([]);
+    expect(digest.topTags).toEqual([]);
+    expect(digest.byTag).toEqual({});
+  });
+
+  it('multi-tag findings contribute to each tag bucket exactly once for sort ordering', () => {
+    // A single finding with three tags should bump all three tag
+    // counts; the sort within topTags should treat them symmetrically.
+    const findings = [
+      f({ tags: ['a', 'b', 'c'] }),
+      f({ tags: ['a'] }),
+      f({ tags: ['b'] }),
+    ];
+    const digest = findingDigest(findings, { topTags: 5 });
+    // a appears on f0 + f1 = 2; b appears on f0 + f2 = 2; c on f0 = 1.
+    expect(digest.topTags[0]).toEqual({ tag: 'a', count: 2 });
+    expect(digest.topTags[1]).toEqual({ tag: 'b', count: 2 });
+    expect(digest.topTags[2]).toEqual({ tag: 'c', count: 1 });
+    // The slice agrees with the underlying byTag bucket counts.
+    expect(digest.byTag['a']).toBe(2);
+    expect(digest.byTag['b']).toBe(2);
+    expect(digest.byTag['c']).toBe(1);
+  });
+});
