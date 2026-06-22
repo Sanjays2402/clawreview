@@ -361,6 +361,190 @@ describe('reviews and stats routes', () => {
     });
   });
 
+  // Tick 14: GET /api/reviews/:id/digest returns { persisted, fresh, drift }
+  // so a dashboard can answer the "is the review header stale?"
+  // question in one round-trip instead of pulling every finding.
+  describe('GET /api/reviews/:id/digest (tick 14)', () => {
+    it('returns persisted + fresh + drift when persisted matches live findings (no drift)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 14, owner: 'o', repo: 'r', prNumber: 14, headSha: 'h14', baseSha: 'b14' });
+      const findings = [
+        { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['owasp:a01'] },
+        { agent: 'style', category: 'style', severity: 'nit', title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.4, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 14, headSha: 'h14', baseSha: 'b14' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 2,
+          totalCostUsd: 0,
+        },
+        findings,
+        { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.reviewId).toBe(r.id);
+      expect(body.persisted).not.toBeNull();
+      expect(body.persisted.total).toBe(2);
+      expect(body.fresh.total).toBe(2);
+      // Tick 14 byTag bucket lands on both shapes.
+      expect(body.fresh.byTag['owasp:a01']).toBe(1);
+      expect(body.fresh.byTag['(untagged)']).toBe(1);
+      // hasDrift must be false since persisted was built from the same findings.
+      expect(body.drift.hasDrift).toBe(false);
+      expect(body.drift.totalDelta).toBe(0);
+      expect(body.drift.byTagDelta).toEqual({});
+    });
+
+    it('flags drift when persisted is stale relative to live findings', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 14, owner: 'o', repo: 'r', prNumber: 15, headSha: 'h15', baseSha: 'b15' });
+      const persistedFindings = [
+        { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['owasp:a01'] },
+        { agent: 'security', category: 'security', severity: 'medium', title: 'Y', rationale: 'r', file: 'a.ts', startLine: 5, confidence: 0.6, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      // Persisted digest was built from BOTH findings (e.g. the worker
+      // rendered the comment then later an operator dismissed one).
+      const persistedDigest = findingDigest(persistedFindings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 15, headSha: 'h15', baseSha: 'b15' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 2,
+          totalCostUsd: 0,
+        },
+        persistedFindings,
+        { digest: persistedDigest },
+      );
+      // Simulate a bulk-dismiss: the second finding is gone from open.
+      await store.findingAction(`${r.id}:1`, 'dismiss', 'noise');
+      // But /digest computes fresh from r.findings (which still has both
+      // since findingAction marks state but doesn't delete the row),
+      // so to actually exercise drift we mutate the persisted digest
+      // to a different shape. The realistic path: persisted was built
+      // BEFORE a subsequent bulk-reopen / dismiss. The store keeps
+      // both findings in rec.findings, so to surface drift we re-call
+      // complete with a fresh recompute that REPLACES rec.findings.
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 15, headSha: 'h15', baseSha: 'b15' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 1,
+          totalCostUsd: 0,
+        },
+        // Only one finding survives.
+        [persistedFindings[0]!],
+        // DON'T re-pass digest: the stale persisted (2 findings) stays.
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.persisted).not.toBeNull();
+      expect(body.persisted.total).toBe(2);
+      expect(body.fresh.total).toBe(1);
+      expect(body.drift.hasDrift).toBe(true);
+      expect(body.drift.totalDelta).toBe(-1);
+      // medium severity dropped: persisted had 1 medium, fresh has 0 -> -1.
+      expect(body.drift.bySeverityDelta.medium).toBe(-1);
+      // (untagged) bucket dropped (the dismissed finding had no tags).
+      expect(body.drift.byTagDelta['(untagged)']).toBe(-1);
+    });
+
+    it('echoes persisted=null for a legacy review that pre-dates tick 12', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 14, owner: 'o', repo: 'r', prNumber: 16, headSha: 'h16', baseSha: 'b16' });
+      // complete() without a digest ref -- legacy pre-tick-12 shape.
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 16, headSha: 'h16', baseSha: 'b16' },
+          status: 'completed',
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          agentExecutions: [],
+          totalFindings: 1,
+          totalCostUsd: 0,
+        },
+        [
+          { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [] },
+        ],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // persisted is null (legacy review). The dashboard renders a
+      // "no persisted snapshot" hint rather than a fake zero-bucket
+      // drift banner.
+      expect(body.persisted).toBeNull();
+      // fresh is the live recompute; drift is "every fresh bucket is a positive delta"
+      // because the empty-persisted contract treats null as an empty digest.
+      expect(body.fresh.total).toBe(1);
+      expect(body.drift.hasDrift).toBe(true);
+      expect(body.drift.totalDelta).toBe(1);
+    });
+
+    it('returns 404 for an unknown review id', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/reviews/no-such-review/digest' });
+      expect(res.statusCode).toBe(404);
+    });
+
+    it('fires clawreview_review_digest_drift_total{kind} on every accepted call', async () => {
+      const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
+      resetMetricsForTests();
+      const store = getReviewStore();
+      const findings = [
+        { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      // Fresh review (no drift): kind=fresh.
+      const r1 = await store.start({ installationId: 14, owner: 'o', repo: 'r', prNumber: 17, headSha: 'h17', baseSha: 'b17' });
+      await store.complete(
+        r1.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 17, headSha: 'h17', baseSha: 'b17' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      await app.inject({ method: 'GET', url: `/api/reviews/${r1.id}/digest` });
+      // Legacy review (persisted is null -> drift): kind=stale.
+      const r2 = await store.start({ installationId: 14, owner: 'o', repo: 'r', prNumber: 18, headSha: 'h18', baseSha: 'b18' });
+      await store.complete(
+        r2.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 18, headSha: 'h18', baseSha: 'b18' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings,
+      );
+      await app.inject({ method: 'GET', url: `/api/reviews/${r2.id}/digest` });
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      const text = await metrics.registry.metrics();
+      expect(text).toMatch(/clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 1/);
+      expect(text).toMatch(/clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 1/);
+    });
+  });
+
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
     const store = getReviewStore();
     const r = await store.start({ installationId: 3, owner: 'o', repo: 'r', prNumber: 9, headSha: 'h9', baseSha: 'b9' });

@@ -1,6 +1,15 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
-import { aggregate, toSarif, toJUnitXml, toCsv, renderReviewReport } from '@clawreview/aggregator';
+import {
+  aggregate,
+  computeDigestDrift,
+  findingDigest,
+  toSarif,
+  toJUnitXml,
+  toCsv,
+  renderReviewReport,
+} from '@clawreview/aggregator';
+import { getMetrics, observeReviewDigestDrift } from '@clawreview/telemetry';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -42,6 +51,82 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       return { error: 'NotFound' };
     }
     return toReviewDetailDto(rec);
+  });
+
+  /**
+   * GET /api/reviews/:id/digest
+   *
+   * Lightweight drift DTO returning `{ persisted, fresh, drift }` so the
+   * dashboard's "review header counts are stale, refresh comment?"
+   * banner can answer the question with a single round-trip instead of
+   * pulling every finding through /api/reviews/:id and recomputing in
+   * the browser.
+   *
+   * `persisted` echoes the worker-written digest verbatim (null on a
+   * legacy review that pre-dates tick 12). `fresh` is a recompute over
+   * the current `findings` array using the same top-N caps the worker
+   * used (8/8), so a dashboard that already cached the persisted
+   * top-files / top-agents slices can compare identical shapes
+   * directly. `drift` is the tick-13 `computeDigestDrift(persisted,
+   * fresh)` report; when `persisted` is null we synthesise an empty
+   * persisted digest so drift surfaces as "every fresh bucket is a
+   * positive delta" (matches the existing empty-persisted contract
+   * pinned in packages/aggregator/tests/digest.test.ts).
+   *
+   * Fires `clawreview_review_digest_drift_total{kind}` once per accepted
+   * call so Prom can graph the stale-rate across all reviews. The
+   * closed `['fresh', 'stale']` label set guards against typo drift.
+   *
+   * Auth: readonly (same as /api/reviews/:id; this is a derived view).
+   */
+  app.get('/api/reviews/:id/digest', { preHandler: app.requireRole('readonly') }, async (req, reply) => {
+    const store = getReviewStore();
+    const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+    if (!params.success) {
+      reply.code(400);
+      return { error: 'BadInput' };
+    }
+    const rec = await store.get(params.data.id);
+    if (!rec) {
+      reply.code(404);
+      return { error: 'NotFound' };
+    }
+    // Match the worker's tick-12 / tick-13 cap choices so a dashboard
+    // can compare persisted.topAgents / topCategories slices directly
+    // against fresh.topAgents / topCategories without re-slicing. The
+    // dashboard hotspot panel reads the persisted hotspots verbatim;
+    // refreshing them here would mask a tag-rule change between the
+    // worker and the recompute, so the fresh hotspots are intentionally
+    // included for parity.
+    const fresh = findingDigest(rec.findings, {
+      topCategories: 8,
+      topAgents: 8,
+      hotspots: true,
+    });
+    // Tolerate a legacy review (pre-tick-12) that never persisted a
+    // digest. `computeDigestDrift` requires both sides; we synthesise
+    // an empty persisted-shape so the drift surfaces as "every fresh
+    // bucket is a positive delta", matching the empty-persisted
+    // contract the aggregator test suite already pins.
+    const persisted = rec.digest ?? findingDigest([], { hotspots: false });
+    const drift = computeDigestDrift(persisted, fresh);
+    // Fire the drift counter on the way out so an on-call sees the
+    // stale-rate ratio across all /digest reads. The closed kind set
+    // means cardinality is bounded at two regardless of traffic.
+    observeReviewDigestDrift(
+      getMetrics({ service: 'clawreview-server' }),
+      drift,
+    );
+    return {
+      reviewId: rec.id,
+      // Echo `null` (not the synthesised empty) when the review had no
+      // persisted digest, so the dashboard can render a "legacy
+      // review, no persisted snapshot" hint instead of a misleading
+      // "every bucket dropped to zero" banner.
+      persisted: rec.digest ?? null,
+      fresh,
+      drift,
+    };
   });
 
   app.get('/api/reviews/:id/report.md', { preHandler: app.requireRole('readonly') }, async (req, reply) => {

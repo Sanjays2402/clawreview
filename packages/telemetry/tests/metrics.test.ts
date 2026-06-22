@@ -4,7 +4,9 @@ import {
   FINDING_DROP_REASONS,
   OPERATOR_POLL_BYPASS_REASONS,
   OPERATOR_POLL_RESULTS,
+  REVIEW_DIGEST_DRIFT_KINDS,
   WEBHOOK_STATS_WINDOW_MODES,
+  deriveReviewDigestDriftKind,
   deriveWebhookStatsWindowMode,
   getMetrics,
   observeAgentExecutions,
@@ -12,6 +14,7 @@ import {
   observeFindingsDropped,
   observeOperatorPoll,
   observeOperatorPollBypass,
+  observeReviewDigestDrift,
   observeSimilarityMerges,
   observeWebhookDelivery,
   observeWebhookStatsWindowAnchor,
@@ -644,6 +647,89 @@ describe('observeWebhookStatsWindowAnchor', () => {
     const text = await metrics.registry.metrics();
     expect(text).toMatch(
       /clawreview_webhook_stats_window_anchor_total\{[^}]*mode="live"[^}]*\} 10/,
+    );
+  });
+});
+
+describe('deriveReviewDigestDriftKind', () => {
+  it('returns "stale" when hasDrift is true', () => {
+    expect(deriveReviewDigestDriftKind({ hasDrift: true })).toBe('stale');
+  });
+
+  it('returns "fresh" when hasDrift is false', () => {
+    expect(deriveReviewDigestDriftKind({ hasDrift: false })).toBe('fresh');
+  });
+
+  it('returns one of the closed-set kinds (defense against drift)', () => {
+    // The label set is closed; the helper must always return one of
+    // the two literals from REVIEW_DIGEST_DRIFT_KINDS so a future
+    // route layer cannot smuggle a third value through.
+    const drift = deriveReviewDigestDriftKind({ hasDrift: true });
+    expect(REVIEW_DIGEST_DRIFT_KINDS).toContain(drift);
+  });
+
+  it('REVIEW_DIGEST_DRIFT_KINDS is exactly [fresh, stale] (cardinality contract)', () => {
+    expect([...REVIEW_DIGEST_DRIFT_KINDS]).toEqual(['fresh', 'stale']);
+  });
+});
+
+describe('observeReviewDigestDrift', () => {
+  it('emits the stale label on hasDrift=true', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdd-1', defaultMetrics: false });
+    observeReviewDigestDrift(metrics, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 1/,
+    );
+  });
+
+  it('emits the fresh label on hasDrift=false', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdd-2', defaultMetrics: false });
+    observeReviewDigestDrift(metrics, { hasDrift: false });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 1/,
+    );
+  });
+
+  it('mixes both kinds without fragmenting the series', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdd-3', defaultMetrics: false });
+    observeReviewDigestDrift(metrics, { hasDrift: true });
+    observeReviewDigestDrift(metrics, { hasDrift: false });
+    observeReviewDigestDrift(metrics, { hasDrift: true });
+    observeReviewDigestDrift(metrics, { hasDrift: false });
+    observeReviewDigestDrift(metrics, { hasDrift: false });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 3/,
+    );
+  });
+
+  it('shares the bundle cache so two routes increment the same counter', async () => {
+    const m1 = getMetrics({ service: 'clawreview-rdd-4', defaultMetrics: false });
+    const m2 = getMetrics({ service: 'clawreview-rdd-4', defaultMetrics: false });
+    expect(m1.reviewDigestDriftTotal).toBe(m2.reviewDigestDriftTotal);
+    observeReviewDigestDrift(m1, { hasDrift: true });
+    observeReviewDigestDrift(m2, { hasDrift: true });
+    const text = await m1.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 2/,
+    );
+  });
+
+  it('accumulates across many reads (counter, not gauge)', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdd-5', defaultMetrics: false });
+    for (let i = 0; i < 7; i++) observeReviewDigestDrift(metrics, { hasDrift: i % 2 === 0 });
+    const text = await metrics.registry.metrics();
+    // i = 0, 2, 4, 6 -> stale: 4 ; i = 1, 3, 5 -> fresh: 3
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 4/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 3/,
     );
   });
 });

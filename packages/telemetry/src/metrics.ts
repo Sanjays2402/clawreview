@@ -180,10 +180,42 @@ export interface MetricsBundle {
    *
    * The label set is closed today (three reasons) so cardinality stays
    * fixed regardless of repo or installation count. Operators can graph
-   * `rate(clawreview_findings_dropped_total[5m]) by (reason)` to spot a
+   * `rate(clawreview_findings_dropped_total[5m]) by (reason)` by reason to spot a
    * misconfigured rule that started dropping everything.
    */
   findingsDroppedTotal: Counter<string>;
+  /**
+   * Review digest drift outcomes, labeled by `kind`:
+   *
+   *   - `fresh` -- the persisted digest still agreed with a fresh
+   *                recompute (no bulk-dismiss / -reopen since the
+   *                worker wrote the comment).
+   *   - `stale` -- at least one bucket disagreed; the dashboard's
+   *                "review header counts are stale, refresh comment?"
+   *                banner should trigger.
+   *
+   * Fires once per `/api/reviews/:id/digest` recompute on the server.
+   * The closed `['fresh', 'stale']` set guards against a typo silently
+   * fragmenting the series. Pairs with tick 13's `computeDigestDrift`
+   * helper + tick 12's persisted-digest hand-off so an operator can
+   * answer:
+   *
+   *   - "what fraction of dashboard digest reads are stale right now?"
+   *     -> rate(clawreview_review_digest_drift_total{kind="stale"}[5m])
+   *        / rate(clawreview_review_digest_drift_total[5m])
+   *   - "are stale rates climbing after a bulk-dismiss spree?"
+   *     -> increase(...{kind="stale"}[1h])
+   *
+   * Cardinality: exactly two label values (`fresh` | `stale`). The
+   * fixed shape means a runaway dashboard widget hammering the
+   * `/digest` endpoint cannot blow up the series budget.
+   *
+   * Distinct from `findingsDroppedTotal{reason}`: this counter is a
+   * READ-side observability signal (was the persisted snapshot still
+   * accurate?), not a write-side one (how many findings were dropped
+   * during the run?).
+   */
+  reviewDigestDriftTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -352,6 +384,17 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewDigestDriftTotal = new Counter({
+    name: 'clawreview_review_digest_drift_total',
+    help:
+      'Review digest drift outcomes on the server /api/reviews/:id/digest ' +
+      'recompute path, labeled by kind (closed set: fresh | stale). ' +
+      'fresh = persisted digest agreed with a fresh recompute; ' +
+      'stale = at least one bucket disagreed (dashboard should flag).',
+    labelNames: ['kind'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -412,6 +455,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     operatorPollBypassTotal,
     webhookStatsWindowAnchorTotal,
     findingsDroppedTotal,
+    reviewDigestDriftTotal,
     queueDepth,
     queueInflight,
   };
@@ -879,4 +923,59 @@ export function observeWebhookStatsWindowAnchor(
 ): void {
   const mode = deriveWebhookStatsWindowMode(bucketWindowMs);
   metrics.webhookStatsWindowAnchorTotal.inc({ mode });
+}
+
+/**
+ * Closed set of `kind` values the review-digest-drift counter can record:
+ *
+ *   - `fresh` -- the persisted digest still agreed with a fresh recompute.
+ *   - `stale` -- at least one bucket disagreed (drift detected); the
+ *                dashboard should flag the review header as stale.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series across
+ * two label values that both look correct in code review.
+ */
+export const REVIEW_DIGEST_DRIFT_KINDS = ['fresh', 'stale'] as const;
+export type ReviewDigestDriftKind = (typeof REVIEW_DIGEST_DRIFT_KINDS)[number];
+
+/**
+ * Derive the closed-set kind from a `FindingDigestDrift`-shaped report.
+ *
+ * Accepts a structural shape so this helper can stay free of an
+ * `@clawreview/aggregator` dependency in telemetry. Only one bit
+ * matters: `hasDrift` flips `stale` vs `fresh`.
+ *
+ * Pure / exported so a unit test (and the route layer's appliedFilters
+ * echo) can call it without instantiating a metrics bundle.
+ */
+export function deriveReviewDigestDriftKind(
+  drift: { hasDrift: boolean },
+): ReviewDigestDriftKind {
+  return drift.hasDrift ? 'stale' : 'fresh';
+}
+
+/**
+ * Record one `/api/reviews/:id/digest` recompute on the
+ * `clawreview_review_digest_drift_total{kind}` counter.
+ *
+ * Fired once per accepted `/digest` request from the route handler
+ * (or once per CLI `clawreview review drift` invocation that hits a
+ * server, if that surface gains a counter). The kind is derived from
+ * the supplied drift report via `deriveReviewDigestDriftKind` so the
+ * counter cannot drift from the response shape: same predicate, two
+ * consumers.
+ *
+ * Cheap to call: a single counter increment with one short label per
+ * request. Bounded cardinality (two label values, ever).
+ *
+ * The closed `REVIEW_DIGEST_DRIFT_KINDS` set guards against the
+ * route layer accidentally bumping a typo'd label.
+ */
+export function observeReviewDigestDrift(
+  metrics: MetricsBundle,
+  drift: { hasDrift: boolean },
+): void {
+  const kind = deriveReviewDigestDriftKind(drift);
+  metrics.reviewDigestDriftTotal.inc({ kind });
 }
