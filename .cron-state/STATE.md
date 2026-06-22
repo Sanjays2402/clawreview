@@ -426,9 +426,35 @@ Gate results: aggregator 243/243, telemetry 93/93, cli 337/337 (+25 net new from
 - **Dashboard "review header is stale" banner** — carried.
 - **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
 - **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
-- **CLI `presets resolve --since-base <ref>` + `--since-target <ref>`** — natural extension of tick-18's `--since`. Same shape as `presets diff --since-base/--since-target` so a consumer that already uses the diff form gets a familiar resolve form. For "what does this preset look like at ref A vs ref B?" without firing the diff sub-command.
-- **CLI `review drift --watch --on-recover-template slack|webhook`** — mirror of tick-17's --on-drift-template. The Slack pipeline already targets `$SLACK_WEBHOOK_URL`; a recover-equivalent could target `$SLACK_RECOVER_WEBHOOK_URL` or reuse the same var so a unified pipeline carries both edges. Tick-17 also wrapped a "set the env var" parse-time validator; reuse the same pattern.
-- **Server `/api/reviews/:id/digest` `?slim` accept star sugar** — `?slim=*` as an alias for `?slim=true` for symmetry with shell glob conventions. Some dashboards round-trip the slim value through a CLI tool that uses `*` as the "all" sentinel; the server should accept it.
+- ~~CLI `presets resolve --since-base <ref>` + `--since-target <ref>`~~ — DONE tick 19 (c284ed2), shipped as `--since-base <ref>` only (an explicit-name alias for `--since` that matches `presets diff`'s flag terminology). The `--since-target` half was dropped because `presets resolve` takes ONE chain (the diff command's two chains are the only place a chain-A vs chain-B split makes sense); making resolve emit two bodies would have been reimplementing diff without the diff. JSON gains `sinceBase` alongside `since`; YAML/text headers echo the operator-chosen flag name.
+- ~~CLI `review drift --watch --on-recover-template slack|webhook`~~ — DONE tick 19 (561fdbb). Mirror of tick-17's --on-drift-template for the recover edge. Env-var fallback ladder: SLACK_RECOVER_WEBHOOK_URL -> SLACK_WEBHOOK_URL (and same for WEBHOOK_RECOVER_URL / WEBHOOK_URL) so a single-channel operator doesn't have to set two env vars.
+- ~~Server `/api/reviews/:id/digest` `?slim` accept star sugar~~ — DONE tick 19 (688fc5d). `?slim=*` / `?slim=all` -> all (strip every heavy map); `?slim=none` -> none (strip nothing). Standalone-only (`?slim=*,byTag` rejects with a clear "use standalone" hint). Case-insensitive (matches the existing true/false back-compat).
+
+### Tick 19 — 2026-06-22 10:55 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | CLI `presets resolve --since-base <ref>` (alias for --since with terminology parity to `presets diff`; JSON sinceBase echo; YAML/text headers echo flag name; mutex with --since) | c284ed2 | +203/-6 | 5 new (resolve-since-base group: alias resolution + empty reject + mutex + sinceBase echo back-compat + YAML/text header) |
+| 2 | CLI `review drift --watch --on-recover-template slack\|webhook` (mirror of tick-17 --on-drift-template; env-var fallback ladder primary->shared; mutex with --on-recover; ON_RECOVER_TEMPLATES + expandOnRecoverTemplate pure helpers) | 561fdbb | +371/-1 | 15 new (9 expandOnRecoverTemplate + 6 parseWatchConfig --on-recover-template) |
+| 3 | Server `/api/reviews/:id/digest ?slim=*` / `?slim=all` / `?slim=none` keyword aliases (shell-glob + keyword sugar; standalone-only `*` in comma list rejects; case-insensitive; matches existing boolean back-compat) | 688fc5d | +177/-4 | 5 new (reviews-route.test.ts: ?slim=* alias for true + ?slim=all + ?slim=none + ?slim=*,byTag rejects + case-insensitive ALL/NONE/All) |
+| 4 | CLI `presets resolve --output <path>` / `--output -` (file/stdout artifact write; mirrors `presets diff --output`; mkdir -p; relative-to-root resolution; --format text rejects 2; new writePresetResolveOutput helper) | 828875d | +241/-31 | 7 new (json-to-file + yaml-to-file + stdout-sentinel + mkdir-p + text-exits-2 + relative-to-root + composes-with-since-base) |
+| 5 | Aggregator `findingDigest({ minConfidence })` pre-bucket filter + `normaliseDigestMinConfidence` pure helper (drop findings below threshold BEFORE bucketing so every bucket reflects post-filter view; clamps [0,1]; NaN/null/undefined pass-through) | 814cda7 | +207/0 | 12 new (8 minConfidence integration + 4 normaliseDigestMinConfidence pure) |
+
+Gate results: aggregator 255/255 (+12 new = 8 minConfidence + 4 normalise helper), cli 364/364 (+27 net new from tick 18's 337 = 5 since-base + 15 on-recover-template + 7 --output), server 335/335 (+5 new = ?slim aliases), telemetry 93/93, types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 1216 tests verified passing (+46 over tick 18's 1170)**. Touched-package typecheck delta: `@clawreview/cli` clean (0 errors across presets.ts, review.ts, help.ts); `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (digest.ts minConfidence additions clean, 3 line count UNCHANGED from tick 18); `apps/server` typecheck output line count IDENTICAL to tick-18 baseline (215 lines pre-tick-19 vs 215 lines post-tick-19) — verified by `pnpm --filter @clawreview/server exec tsc --noEmit 2>&1 | wc -l`; zero new errors on reviews.ts (?slim alias additions) beyond the pre-existing api-auth.ts / rate-limit.ts / webhooks.ts / server.ts / worker.ts (pino) baseline. Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `814cda7`.
+
+**Tick-19 refill: 3 of 10 backlog items shipped this tick (#8 --since-base alias, #9 --on-recover-template, #10 ?slim aliases) plus 2 fresh items (--output for resolve, minConfidence pre-filter). The seven remaining items (4 dashboard wiring + worker blame + Prometheus exposition + dashboard banner) still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 20 below.**
+
+### Backlog seeded for tick 20 (refill — seven follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination + payloadFields projection** — carried.
+- **Dashboard widget for the five drift / poll counters** — carried.
+- **Dashboard "review header is stale" banner** — carried.
+- **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
+- **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
+- **Worker `findingDigest({ minConfidence })` wiring** — pair tick-19's pre-bucket filter with the worker's `min_confidence` config knob so the persisted digest reflects the post-filter view end-to-end. Today the worker computes digest WITHOUT minConfidence then runs applyMinConfidence separately; folding the filter in means the persisted shape matches the rendered PR comment exactly.
+- **CLI `stats --min-confidence <n>`** — surface the new filter on the stats command so an operator can preview "what would my report look like with a 0.6 floor?" without editing config.
+- **Server `/api/reviews/:id/digest ?minConfidence=<n>` query knob** — pass the threshold through to findingDigest on the fresh recompute so a dashboard can compare "all findings" vs "filtered findings" via two round-trips with the same endpoint.
 
 
 ## TICK LOG
