@@ -452,9 +452,36 @@ Gate results: aggregator 255/255 (+12 new = 8 minConfidence + 4 normalise helper
 - **Dashboard "review header is stale" banner** — carried.
 - **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
 - **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
-- **Worker `findingDigest({ minConfidence })` wiring** — pair tick-19's pre-bucket filter with the worker's `min_confidence` config knob so the persisted digest reflects the post-filter view end-to-end. Today the worker computes digest WITHOUT minConfidence then runs applyMinConfidence separately; folding the filter in means the persisted shape matches the rendered PR comment exactly.
-- **CLI `stats --min-confidence <n>`** — surface the new filter on the stats command so an operator can preview "what would my report look like with a 0.6 floor?" without editing config.
-- **Server `/api/reviews/:id/digest ?minConfidence=<n>` query knob** — pass the threshold through to findingDigest on the fresh recompute so a dashboard can compare "all findings" vs "filtered findings" via two round-trips with the same endpoint.
+- ~~Worker `findingDigest({ minConfidence })` wiring~~ — DONE tick 20 (ebeda13). Worker now passes `cfg.min_confidence` AND `cfg.severity_threshold` to findingDigest so the persisted digest is in lock-step with the post-filter view end-to-end. The two filters are defence-in-depth on the happy path (aggregate() already floored both axes) but make the contract explicit.
+- ~~CLI `stats --min-confidence <n>`~~ — DONE tick 20 (c664a2a). Plus `--severity-threshold <s>`; both surface findingDigest's pre-filter knobs so an operator can preview "what would my report look like with a 0.6 floor / a 'medium' threshold?" without editing config. JSON output gains echoed `minConfidence` / `severityThreshold` fields.
+- ~~Server `/api/reviews/:id/digest ?minConfidence=<n>` query knob~~ — DONE tick 20 (71e3f83). Plus `?severityThreshold=<s>`. Both passed straight through to findingDigest on the fresh recompute. Cached arm IGNORES the filters (persisted digest is the worker's write-time snapshot) but still echoes them as a diagnostic. Drift report at a stricter threshold answers "would the PR header change if we tightened the floor?".
+
+### Tick 20 — 2026-06-22 14:11 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Aggregator `findingDigest({ severityThreshold })` pre-bucket severity filter + `normaliseDigestSeverityThreshold` pure helper (mirror of tick-19 minConfidence; composes AND with minConfidence in one filter pass) | d313162 | +215/-5 | 10 new (7 integration + 3 normaliser) |
+| 2 | Worker `findingDigest({ minConfidence, severityThreshold })` cfg wiring (defence-in-depth no-op on the happy path; makes the persisted digest contract explicit so worker / dashboard / CLI / comment header share one filter contract) | ebeda13 | +76/0 | 1 new (review-store persistence pin) |
+| 3 | CLI `stats --min-confidence <n>` + `--severity-threshold <s>` pre-bucket filters (JSON output gains echoed minConfidence / severityThreshold fields; forgiving on typos via digest's normaliser; composes AND; --fail-on runs AFTER filters) | c664a2a | +213/-2 | 6 new (integration + back-compat + compose + typo + fail-on order) |
+| 4 | Server `/api/reviews/:id/digest ?minConfidence + ?severityThreshold` query knobs (passed through to fresh recompute; cached arm IGNORES but echoes them; drift reflects filter gap; mis-cased echoed verbatim for CI typo detection) | 71e3f83 | +259/0 | 6 new (each filter arm + compose + back-compat + cached-inert + typo-echo) |
+| 5 | CLI `review drift --min-confidence + --severity-threshold` single-shot (recomputes fresh over input findings with filter; warns + ignores on /digest input shape; always recomputes drift when filter applied; JSON echo) | d10b7fd | +195/-9 | 5 new (filter arm + compose + back-compat + warn-on-digest-input + drift-reflects-filter) |
+
+Gate results: aggregator 265/265 (+10 new = 7 severityThreshold integration + 3 normaliser pure), telemetry 93/93, cli 375/375 (+11 net new from 364 = 6 stats + 5 review drift), server 342/342 (+7 net new from 335 = 1 review-store + 6 reviews-route), types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 1232 tests verified passing (+16 over tick 19's 1216)**. Touched-package typecheck delta: `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises` baseline (digest.ts severityThreshold additions clean); `@clawreview/cli` clean (0 errors across stats.ts, review.ts, help.ts -- the test-side process/Buffer baseline noise is unchanged); `apps/server` typecheck output line count IDENTICAL to tick-19 baseline (215 lines pre-tick-20 vs 215 lines post-tick-20) -- verified by `pnpm --filter @clawreview/server exec tsc --noEmit 2>&1 | wc -l`; zero new errors on worker.ts (cfg.min_confidence + cfg.severity_threshold passthrough), reviews.ts (?minConfidence + ?severityThreshold query parser + cached-arm inert echo) beyond the pre-existing FindingDigest Record signature + api-auth.ts / rate-limit.ts / webhooks.ts / server.ts / worker.ts (pino) baseline. Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `d10b7fd`.
+
+**Tick-20 refill: 3 of 10 backlog items shipped this tick (the 3 net-new filter wiring items: worker, CLI stats, server route) plus 2 fresh items (aggregator severityThreshold, CLI review drift filter). The seven carried items (4 dashboard wiring + worker blame + Prometheus exposition + dashboard banner) still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 21 below.**
+
+### Backlog seeded for tick 21 (refill — seven follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination + payloadFields projection** — carried.
+- **Dashboard widget for the five drift / poll counters** — carried.
+- **Dashboard "review header is stale" banner** — carried + extended with the tick-20 ?minConfidence preview filter widget.
+- **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
+- **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
+- **Aggregator `findingDigest` filter telemetry** — emit `clawreview_review_digest_filter_applied_total{minConfidence,severityThreshold}` (boolean labels: 'yes' | 'no') so a dashboard can chart "how often do dashboards request filtered fresh recomputes?" -- the natural follow-up to tick-20's `?minConfidence` / `?severityThreshold` knobs landing.
+- **Server `/api/reviews/:id/digest ?minConfidence` clamped-echo opt** — today the route echoes the raw operator-supplied numeric (so `?minConfidence=1.5` echoes `1.5` even though findingDigest clamps it to 1). A `?normalisedEcho=true` opt could echo the clamped numeric instead, useful for a dashboard that wants to render "showing findings with confidence >= 1 (clamped from 1.5)" as the panel header.
+- **CLI `clawreview review drift --base <reviewId>` (compare two reviews)** — today `review drift` compares persisted vs fresh on ONE review. The natural extension: take two review IDs and compute the digest drift between them ("did the bug fix actually clear the findings?"). Pairs with the tick-20 filter flags so an operator can ask "did the bug fix clear high-confidence high-severity findings?".
+- **CLI `stats --filter-summary` text-mode hint** — today `stats --min-confidence 0.7` silently filters the report; a one-line header `Showing findings with confidence >= 0.7 (filtered 12 of 20)` would make the filter visible in the text render too (the JSON output already echoes the filter).
 
 
 ## TICK LOG
