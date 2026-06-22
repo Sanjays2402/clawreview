@@ -381,6 +381,7 @@ export function parseWatchConfig(flags: {
   'on-drift-once'?: unknown;
   'on-drift-template'?: unknown;
   'on-recover'?: unknown;
+  'on-recover-template'?: unknown;
 }): WatchConfigResult {
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
   if (serverRaw.length === 0) {
@@ -517,6 +518,15 @@ export function parseWatchConfig(flags: {
   // already deduped by the "fire only on the drift->clean
   // transition" contract (back-to-back clean samples don't
   // re-fire).
+  //
+  // Tick 19: --on-recover-template <name> mirrors tick-17's
+  // --on-drift-template. Same closed set (slack / webhook), same
+  // expansion shape (curl POST to an env-var-stored URL), same
+  // mutex contract (a template AND an explicit --on-recover at
+  // the same time rejects). The recover-template env vars fall
+  // back to the drift-template vars when the recover-specific
+  // ones aren't set, so an operator with one Slack channel for
+  // BOTH edges doesn't need to set two env vars to the same URL.
   let onRecover: string | null = null;
   if (flags['on-recover'] !== undefined) {
     if (typeof flags['on-recover'] !== 'string') {
@@ -533,6 +543,36 @@ export function parseWatchConfig(flags: {
       };
     }
     onRecover = trimmed;
+  }
+  // Tick 19: --on-recover-template <name>. Mirrors --on-drift-template
+  // (tick 17) so the operator's mental model carries across both
+  // edges of the drift transition.
+  if (flags['on-recover-template'] !== undefined) {
+    if (onRecover !== null) {
+      return {
+        kind: 'invalid-on-recover',
+        message:
+          '--on-recover-template is mutually exclusive with --on-recover (pick one)',
+      };
+    }
+    if (typeof flags['on-recover-template'] !== 'string') {
+      return {
+        kind: 'invalid-on-recover',
+        message: `--on-recover-template must be a template name string; got ${typeof flags['on-recover-template']}`,
+      };
+    }
+    const name = flags['on-recover-template'].trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid-on-recover',
+        message: '--on-recover-template requires a template name (one of: slack, webhook)',
+      };
+    }
+    const expanded = expandOnRecoverTemplate(name, process.env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid-on-recover', message: expanded.message };
+    }
+    onRecover = expanded.command;
   }
 
   return {
@@ -640,6 +680,101 @@ export function expandOnDriftTemplate(
   // validated the env var is non-empty above; the URL value itself
   // is not shell-escaped (operators are expected to set the env var
   // to a clean URL, same contract as --on-drift's raw command).
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
+}
+
+/**
+ * Tick 19: Closed set of `--on-recover-template` template names.
+ * Same shape as `ON_DRIFT_TEMPLATES` -- the two flags target the
+ * two edges of the drift transition with byte-identical
+ * resolution semantics, so we share the surface area.
+ *
+ * Re-exported as a separate tuple (rather than aliasing
+ * ON_DRIFT_TEMPLATES) so a future divergence (e.g. an "email"
+ * template that only makes sense for recover edges) can land
+ * without disturbing the drift surface.
+ */
+export const ON_RECOVER_TEMPLATES = ['slack', 'webhook'] as const;
+export type OnRecoverTemplate = (typeof ON_RECOVER_TEMPLATES)[number];
+
+/**
+ * Outcome of expanding `--on-recover-template <name>`. Identical
+ * shape to `OnDriftTemplateExpansion`; surfaced under the
+ * `invalid-on-recover` kind by the parser so the error path stays
+ * symmetric with the drift-template path.
+ */
+export type OnRecoverTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Expand a named `--on-recover-template` into the curl command the
+ * watch loop will exec on the drift -> clean recovery edge.
+ *
+ * Env-var fallback ladder:
+ *   - `slack`   -> $SLACK_RECOVER_WEBHOOK_URL, falling back to
+ *                  $SLACK_WEBHOOK_URL when the recover-specific one
+ *                  isn't set. An operator with ONE Slack channel
+ *                  receiving both drift and recover pings doesn't
+ *                  have to duplicate the URL into two env vars.
+ *   - `webhook` -> $WEBHOOK_RECOVER_URL, falling back to
+ *                  $WEBHOOK_URL. Same logic.
+ *
+ * The fallback is intentional: operators who want SEPARATE
+ * channels for the two edges (a "drift" channel that screams
+ * red, a "recover" channel that posts a quieter green message)
+ * set both env vars and the recover-specific one wins. Operators
+ * who only set the drift var get the same URL for both, which
+ * is the most common case in practice (single Slack channel for
+ * a small team).
+ *
+ * Validation:
+ *   - Unknown template name rejects with an enumerated list.
+ *   - Resolved URL must be non-empty after trim (neither env var
+ *     set OR both set to empty/whitespace strings) -> rejects
+ *     with a clear "set $X (or $Y as fallback)" message.
+ *
+ * Pure: takes the `env` map as an argument so tests can drive
+ * every arm without mutating `process.env`.
+ */
+export function expandOnRecoverTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): OnRecoverTemplateExpansion {
+  const lower = name.toLowerCase();
+  // Each template resolves a primary + fallback env var. The
+  // closed set keeps the surface tiny and the fallback ladder
+  // documented at one location.
+  let primaryVar: string;
+  let fallbackVar: string;
+  switch (lower) {
+    case 'slack':
+      primaryVar = 'SLACK_RECOVER_WEBHOOK_URL';
+      fallbackVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      primaryVar = 'WEBHOOK_RECOVER_URL';
+      fallbackVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-recover-template '${name}'; valid: ${ON_RECOVER_TEMPLATES.join(', ')}`,
+      };
+  }
+  const primary = (env[primaryVar] ?? '').trim();
+  const fallback = (env[fallbackVar] ?? '').trim();
+  const url = primary.length > 0 ? primary : fallback;
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-recover-template ${lower} requires \$${primaryVar} ` +
+        `(or \$${fallbackVar} as fallback) -- set one before running the watch loop`,
+    };
+  }
   const command =
     `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
   return { kind: 'ok', command };
@@ -757,6 +892,7 @@ export async function runReviewDriftWatch(
     'on-drift-once': args.flags['on-drift-once'],
     'on-drift-template': args.flags['on-drift-template'],
     'on-recover': args.flags['on-recover'],
+    'on-recover-template': args.flags['on-recover-template'],
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review drift: ${config.message}\n`);

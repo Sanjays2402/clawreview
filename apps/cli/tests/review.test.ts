@@ -1236,4 +1236,238 @@ describe('clawreview review drift --watch --on-recover (tick 18)', () => {
   });
 });
 
+describe('expandOnRecoverTemplate (tick 19)', () => {
+  it('expands slack template to a curl POST against $SLACK_RECOVER_WEBHOOK_URL when set', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const r = expandOnRecoverTemplate('slack', {
+      SLACK_RECOVER_WEBHOOK_URL: 'https://hooks.slack.com/recover',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('https://hooks.slack.com/recover');
+      expect(r.command).toContain('curl');
+      expect(r.command).toContain('-X POST');
+      expect(r.command).toContain('Content-Type: application/json');
+      expect(r.command).toContain('--data-binary @-');
+    }
+  });
+
+  it('falls back to $SLACK_WEBHOOK_URL when the recover-specific var is unset', async () => {
+    // Common case: operator has a single Slack channel for both
+    // drift and recover. They only set SLACK_WEBHOOK_URL; the
+    // recover template still resolves cleanly.
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const r = expandOnRecoverTemplate('slack', {
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/shared',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('https://hooks.slack.com/shared');
+    }
+  });
+
+  it('prefers the recover-specific var over the fallback when both are set', async () => {
+    // Operator with TWO channels: one for drift, one for recover.
+    // Both env vars set; the recover-specific one wins.
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const r = expandOnRecoverTemplate('slack', {
+      SLACK_RECOVER_WEBHOOK_URL: 'https://hooks.slack.com/recover',
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/drift',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('https://hooks.slack.com/recover');
+      expect(r.command).not.toContain('https://hooks.slack.com/drift');
+    }
+  });
+
+  it('webhook template uses $WEBHOOK_RECOVER_URL with $WEBHOOK_URL fallback', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const recoverOnly = expandOnRecoverTemplate('webhook', {
+      WEBHOOK_URL: 'https://example.com/hook',
+    });
+    expect(recoverOnly.kind).toBe('ok');
+    if (recoverOnly.kind === 'ok') {
+      expect(recoverOnly.command).toContain('https://example.com/hook');
+    }
+    const recoverSpecific = expandOnRecoverTemplate('webhook', {
+      WEBHOOK_RECOVER_URL: 'https://example.com/recover',
+      WEBHOOK_URL: 'https://example.com/drift',
+    });
+    if (recoverSpecific.kind === 'ok') {
+      expect(recoverSpecific.command).toContain('https://example.com/recover');
+    }
+  });
+
+  it('rejects unknown template name with the valid list', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const r = expandOnRecoverTemplate('teams', { WEBHOOK_URL: 'https://x' });
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain("'teams'");
+      expect(r.message).toContain('slack');
+      expect(r.message).toContain('webhook');
+    }
+  });
+
+  it('rejects when neither env var is set with both names in the error', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const r = expandOnRecoverTemplate('slack', {});
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain('SLACK_RECOVER_WEBHOOK_URL');
+      expect(r.message).toContain('SLACK_WEBHOOK_URL');
+      expect(r.message).toContain('fallback');
+    }
+  });
+
+  it('case-insensitive: SLACK / Slack / slack all resolve the same template', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    const a = expandOnRecoverTemplate('SLACK', { SLACK_WEBHOOK_URL: 'https://a' });
+    const b = expandOnRecoverTemplate('Slack', { SLACK_WEBHOOK_URL: 'https://a' });
+    const c = expandOnRecoverTemplate('slack', { SLACK_WEBHOOK_URL: 'https://a' });
+    expect(a.kind).toBe('ok');
+    expect(b.kind).toBe('ok');
+    expect(c.kind).toBe('ok');
+    if (a.kind === 'ok' && b.kind === 'ok' && c.kind === 'ok') {
+      expect(a.command).toBe(b.command);
+      expect(b.command).toBe(c.command);
+    }
+  });
+
+  it('treats whitespace-only env vars as unset (falls back / errors as appropriate)', async () => {
+    const { expandOnRecoverTemplate } = await import('../src/commands/review.js');
+    // Whitespace-only recover var -> fall back to drift var.
+    const fallback = expandOnRecoverTemplate('slack', {
+      SLACK_RECOVER_WEBHOOK_URL: '   ',
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/x',
+    });
+    expect(fallback.kind).toBe('ok');
+    if (fallback.kind === 'ok') {
+      expect(fallback.command).toContain('https://hooks.slack.com/x');
+    }
+    // Both whitespace-only -> rejects.
+    const reject = expandOnRecoverTemplate('slack', {
+      SLACK_RECOVER_WEBHOOK_URL: '   ',
+      SLACK_WEBHOOK_URL: '   ',
+    });
+    expect(reject.kind).toBe('invalid');
+  });
+
+  it('ON_RECOVER_TEMPLATES exports the closed two-name set', async () => {
+    const { ON_RECOVER_TEMPLATES } = await import('../src/commands/review.js');
+    expect([...ON_RECOVER_TEMPLATES]).toEqual(['slack', 'webhook']);
+  });
+});
+
+describe('parseWatchConfig --on-recover-template (tick 19)', () => {
+  it('expands --on-recover-template slack into the curl command when env var is set', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prev = process.env.SLACK_WEBHOOK_URL;
+    process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/x';
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-recover-template': 'slack',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.onRecover).toContain('https://hooks.slack.com/x');
+        expect(r.onRecover).toContain('curl');
+      }
+    } finally {
+      if (prev === undefined) delete process.env.SLACK_WEBHOOK_URL;
+      else process.env.SLACK_WEBHOOK_URL = prev;
+    }
+  });
+
+  it('--on-recover-template and --on-recover together rejects (mutex)', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-recover': 'curl https://x',
+      'on-recover-template': 'slack',
+    });
+    expect(r.kind).toBe('invalid-on-recover');
+    if (r.kind === 'invalid-on-recover') {
+      expect(r.message).toContain('mutually exclusive');
+    }
+  });
+
+  it('--on-recover-template with an empty value rejects with a clear message', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-recover-template': '',
+    });
+    expect(r.kind).toBe('invalid-on-recover');
+    if (r.kind === 'invalid-on-recover') {
+      expect(r.message).toContain('requires a template name');
+    }
+  });
+
+  it('--on-recover-template with an unknown name rejects with the valid list', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-recover-template': 'teams',
+    });
+    expect(r.kind).toBe('invalid-on-recover');
+    if (r.kind === 'invalid-on-recover') {
+      expect(r.message).toContain("'teams'");
+      expect(r.message).toContain('slack');
+    }
+  });
+
+  it('--on-recover-template slack with no env var set surfaces at parse-time', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prevA = process.env.SLACK_RECOVER_WEBHOOK_URL;
+    const prevB = process.env.SLACK_WEBHOOK_URL;
+    delete process.env.SLACK_RECOVER_WEBHOOK_URL;
+    delete process.env.SLACK_WEBHOOK_URL;
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-recover-template': 'slack',
+      });
+      expect(r.kind).toBe('invalid-on-recover');
+      if (r.kind === 'invalid-on-recover') {
+        expect(r.message).toContain('SLACK_RECOVER_WEBHOOK_URL');
+        expect(r.message).toContain('SLACK_WEBHOOK_URL');
+      }
+    } finally {
+      if (prevA !== undefined) process.env.SLACK_RECOVER_WEBHOOK_URL = prevA;
+      if (prevB !== undefined) process.env.SLACK_WEBHOOK_URL = prevB;
+    }
+  });
+
+  it('--on-recover-template composes with --on-drift (independent edges)', async () => {
+    // Operator can wire BOTH edges via templates: drift template
+    // fires on drift, recover template fires on recover. The two
+    // env-var ladders are independent.
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prevA = process.env.SLACK_WEBHOOK_URL;
+    const prevB = process.env.WEBHOOK_URL;
+    process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/d';
+    process.env.WEBHOOK_URL = 'https://example.com/r';
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-drift-template': 'slack',
+        'on-recover-template': 'webhook',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.onDrift).toContain('https://hooks.slack.com/d');
+        expect(r.onRecover).toContain('https://example.com/r');
+      }
+    } finally {
+      if (prevA === undefined) delete process.env.SLACK_WEBHOOK_URL;
+      else process.env.SLACK_WEBHOOK_URL = prevA;
+      if (prevB === undefined) delete process.env.WEBHOOK_URL;
+      else process.env.WEBHOOK_URL = prevB;
+    }
+  });
+});
+
 
