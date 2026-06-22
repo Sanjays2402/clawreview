@@ -829,6 +829,151 @@ describe('clawreview presets resolve', () => {
     });
     expect(text.stdout).toContain('since-base:');
   });
+
+  // ---------------------------------------------------------------------------
+  // Tick 19: `--output <path>` writes the rendered body to a file (or
+  // stdout via the `-` sentinel) instead of printing it. Mirrors the
+  // `presets diff --output` contract so a CI pipeline can materialise
+  // the resolved preset body in one command.
+  // ---------------------------------------------------------------------------
+
+  it('--output writes the JSON body to a file and leaves stdout empty (pure-mode contract)', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const dir = await tmpDir();
+    const outPath = join(dir, 'resolved.json');
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      output: outPath,
+    });
+    expect(r.exitCode).toBe(0);
+    // Stdout is empty (the body went to the file).
+    expect(r.stdout).toBe('');
+    // The stderr banner confirms the write.
+    expect(r.stderr).toContain('presets resolve: wrote');
+    expect(r.stderr).toContain(outPath);
+    // File contents are valid JSON with the resolved chain.
+    const bytes = await readFile(outPath, 'utf8');
+    const parsed = JSON.parse(bytes);
+    expect(parsed.chain).toEqual(['strict']);
+    expect(typeof parsed.body).toBe('object');
+  });
+
+  it('--output writes the YAML body with header comments to a file', async () => {
+    const { readFile } = await import('node:fs/promises');
+    const dir = await tmpDir();
+    const outPath = join(dir, 'resolved.yml');
+    const r = await runResolve(dir, ['strict'], {
+      format: 'yaml',
+      output: outPath,
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toBe('');
+    const bytes = await readFile(outPath, 'utf8');
+    // YAML header comments survive the file write.
+    expect(bytes).toContain('# clawreview preset chain: strict');
+    expect(bytes).toContain('# sources: strict=builtin');
+    // Body is a real YAML document (parsable, includes the
+    // expected severity_threshold key the strict preset sets).
+    expect(bytes).toMatch(/severity_threshold:/);
+  });
+
+  it('--output - writes the JSON body to stdout in pure mode (no stderr banner)', async () => {
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      output: '-',
+    });
+    expect(r.exitCode).toBe(0);
+    // Pure-mode stdout: body lands on stdout, NO stderr banner.
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.chain).toEqual(['strict']);
+    expect(r.stderr).toBe('');
+  });
+
+  it('--output mkdir -p creates intermediate directories', async () => {
+    // Mirror the diff --output contract: a path with missing
+    // intermediate directories should land cleanly without the
+    // operator running `mkdir -p` first.
+    const { readFile } = await import('node:fs/promises');
+    const dir = await tmpDir();
+    const outPath = join(dir, 'a', 'b', 'c', 'resolved.json');
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      output: outPath,
+    });
+    expect(r.exitCode).toBe(0);
+    const bytes = await readFile(outPath, 'utf8');
+    expect(JSON.parse(bytes).chain).toEqual(['strict']);
+  });
+
+  it('--output with --format text rejects 2 (text is for terminal, not artifacts)', async () => {
+    const dir = await tmpDir();
+    const outPath = join(dir, 'resolved.txt');
+    const r = await runResolve(dir, ['strict'], {
+      format: 'text',
+      output: outPath,
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--output is incompatible with --format text');
+  });
+
+  it('--output relative path resolves against --root (matches diff command)', async () => {
+    // The path resolution mirrors `presets diff --output`: a
+    // relative path resolves against --root so a CI checkout
+    // doesn't accidentally write to the operator's cwd.
+    const { readFile } = await import('node:fs/promises');
+    const dir = await tmpDir();
+    const r = await runResolve(dir, ['strict'], {
+      format: 'json',
+      output: 'sub/r.json',
+    });
+    expect(r.exitCode).toBe(0);
+    // The file lands at <root>/sub/r.json, not <cwd>/sub/r.json.
+    const bytes = await readFile(join(dir, 'sub', 'r.json'), 'utf8');
+    expect(JSON.parse(bytes).chain).toEqual(['strict']);
+  });
+
+  it('--output composes with --since-base (writes historical body)', async () => {
+    // Tick 19 cross-feature: --output + --since-base resolves the
+    // historical body and writes IT to disk, not the HEAD body.
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const { readFile } = await import('node:fs/promises');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    await writeFile(
+      join(dir, '.clawreview/presets/local-only.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    const outPath = join(dir, 'historical.json');
+    const r = await runResolve(dir, ['local-only'], {
+      format: 'json',
+      'since-base': v1,
+      output: outPath,
+    });
+    expect(r.exitCode).toBe(0);
+    const bytes = await readFile(outPath, 'utf8');
+    const parsed = JSON.parse(bytes);
+    // The historical body (severity_threshold: high) wins; the
+    // HEAD body (severity_threshold: low) doesn't appear.
+    expect(parsed.body.severity_threshold).toBe('high');
+    expect(parsed.sinceBase).toBe(v1);
+  });
 });
 
 // ---------------------------------------------------------------------------

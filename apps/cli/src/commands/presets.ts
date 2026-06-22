@@ -354,35 +354,67 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
 
   const fields = populatedKeys(composed);
 
-  if (format === 'json') {
-    process.stdout.write(
-      `${JSON.stringify(
-        {
-          chain,
-          sources,
-          fields,
-          // Tick 18: echo --since so a consumer can verify the
-          // historical resolution ran. `null` (not omitted) when
-          // --since was absent so a "is this a historical resolve?"
-          // check is `since !== null`.
-          //
-          // Tick 19: --since-base resolves to the same slot. We
-          // echo BOTH the legacy `since` field (set when EITHER
-          // flag is active; tick-18 back-compat for any tooling
-          // that already keys off it) AND a new `sinceBase` field
-          // (set only when --since-base was the path the operator
-          // took, null otherwise). A consumer can pick the field
-          // matching their flag style; a "is this historical?"
-          // check stays `since !== null` regardless of which flag
-          // was passed.
-          since: sinceRef,
-          sinceBase,
-          body: composed,
-        },
-        null,
-        2,
-      )}\n`,
+  // Tick 19: --output <path> writes the rendered body to a file
+  // (or stdout when --output -) instead of printing it directly.
+  // Mirrors `presets diff --output` so a CI pipeline that needs the
+  // resolved-preset body on disk can use one command instead of
+  // running `clawreview presets resolve ... > file`. The literal
+  // `-` is the stdout sentinel (same Symbol the diff command uses);
+  // when set, the body lands on stdout in "pure mode" with no
+  // banner / stderr noise.
+  //
+  // --output with --format text rejects 2 (text is color-tagged
+  // and for terminal display, not artifacts) -- mirrors the diff
+  // command's contract so the operator's mental model carries over.
+  const outputRaw = args.flags.output;
+  const outputTarget =
+    typeof outputRaw === 'string' && outputRaw.length > 0
+      ? outputRaw === '-'
+        ? STDOUT_SENTINEL
+        : resolvePresetDiffOutputPath(outputRaw, root)
+      : null;
+  if (outputTarget !== null && format === 'text') {
+    process.stderr.write(
+      `clawreview presets resolve: --output is incompatible with --format text ` +
+        `(text is color-tagged and intended for terminal display; use --format yaml ` +
+        `or --format json for artifact writes)\n`,
     );
+    process.exitCode = 2;
+    return;
+  }
+
+  if (format === 'json') {
+    const body = `${JSON.stringify(
+      {
+        chain,
+        sources,
+        fields,
+        // Tick 18: echo --since so a consumer can verify the
+        // historical resolution ran. `null` (not omitted) when
+        // --since was absent so a "is this a historical resolve?"
+        // check is `since !== null`.
+        //
+        // Tick 19: --since-base resolves to the same slot. We
+        // echo BOTH the legacy `since` field (set when EITHER
+        // flag is active; tick-18 back-compat for any tooling
+        // that already keys off it) AND a new `sinceBase` field
+        // (set only when --since-base was the path the operator
+        // took, null otherwise). A consumer can pick the field
+        // matching their flag style; a "is this historical?"
+        // check stays `since !== null` regardless of which flag
+        // was passed.
+        since: sinceRef,
+        sinceBase,
+        body: composed,
+      },
+      null,
+      2,
+    )}\n`;
+    if (outputTarget !== null) {
+      await writePresetResolveOutput(outputTarget, body);
+      return;
+    }
+    process.stdout.write(body);
     return;
   }
 
@@ -403,8 +435,13 @@ export async function runPresetsResolve(args: ParsedArgs): Promise<void> {
       headerLines.push(`# ${flagName}: ${sinceRef}  (locals resolved at this git ref)`);
     }
     const header = headerLines.join('\n');
-    const body = YAML.stringify(composed, { lineWidth: 0 });
-    process.stdout.write(`${header}\n${body}`);
+    const yamlBody = YAML.stringify(composed, { lineWidth: 0 });
+    const body = `${header}\n${yamlBody}`;
+    if (outputTarget !== null) {
+      await writePresetResolveOutput(outputTarget, body);
+      return;
+    }
+    process.stdout.write(body);
     return;
   }
 
@@ -1793,6 +1830,34 @@ async function writePresetDiffOutput(
   await writeFile(outputPath, body, 'utf8');
   process.stderr.write(
     `clawreview presets diff: wrote ${body.length} bytes to ${outputPath}\n`,
+  );
+}
+
+/**
+ * Tick 19: --output writer for `presets resolve`. Identical contract
+ * to `writePresetDiffOutput` -- stdout sentinel writes the body in
+ * pure mode (no banner), a real path writes the file and surfaces a
+ * single stderr `wrote N bytes to <path>` confirmation.
+ *
+ * Kept as a separate function (instead of aliasing
+ * writePresetDiffOutput) so the stderr banner identifies the right
+ * sub-command. A consumer grepping logs for `presets resolve: wrote`
+ * shouldn't see `presets diff: wrote` instead.
+ */
+async function writePresetResolveOutput(
+  outputPath: PresetDiffOutputTarget,
+  body: string,
+): Promise<void> {
+  if (outputPath === STDOUT_SENTINEL) {
+    process.stdout.write(body);
+    return;
+  }
+  const { mkdir } = await import('node:fs/promises');
+  const targetDir = dirname(outputPath);
+  await mkdir(targetDir, { recursive: true });
+  await writeFile(outputPath, body, 'utf8');
+  process.stderr.write(
+    `clawreview presets resolve: wrote ${body.length} bytes to ${outputPath}\n`,
   );
 }
 
