@@ -2361,3 +2361,265 @@ describe('clawreview presets diff --since (tick 14)', () => {
     expect(r.stderr).toContain('<a>');
   });
 });
+
+describe('clawreview presets diff --since-base / --since-target (tick 15)', () => {
+  it('echoes sinceBase + sinceTarget in JSON when both refs are active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // v1: web preset at HEAD~2 with severity high.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // v2: severity low.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    const v2 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Working tree (HEAD): same as v2 -- no further mutation.
+    // --since-base v1 --since-target v2 -> chain A at high, chain B at low.
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-base': v1,
+      'since-target': v2,
+    });
+    expect(r.exitCode).toBe(3); // drift between v1 and v2
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceBase).toBe(v1);
+    expect(parsed.sinceTarget).toBe(v2);
+    // The legacy --since echo stays null since we didn't pass it.
+    expect(parsed.since).toBeNull();
+    // Drift surfaces: chain A=high, chain B=low.
+    expect(parsed.changed.severity_threshold).toEqual({ a: 'high', b: 'low' });
+  });
+
+  it('rejects combining --since and --since-base (both target chain A)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      since: 'HEAD',
+      'since-base': 'HEAD',
+      format: 'json',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    expect(r.stderr).toContain('--since');
+    expect(r.stderr).toContain('--since-base');
+  });
+
+  it('--since-target with --since-base for chain A composes (no mutex error)', async () => {
+    // --since covers chain A; --since-target covers chain B. They
+    // target DIFFERENT slots so they must be allowed together.
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Both refs the same -> no drift expected.
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-base': v1,
+      'since-target': v1,
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceBase).toBe(v1);
+    expect(parsed.sinceTarget).toBe(v1);
+    expect(parsed.hasChanges).toBe(false);
+  });
+
+  it('--since-target alone keeps chain A at HEAD (asymmetric mode)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Mutate working tree (HEAD).
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // --since-target v1 keeps chain B at v1 (high); chain A at HEAD (low).
+    // Drift surfaces with chainA=low and chainB=high.
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-target': v1,
+    });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceBase).toBeNull();
+    expect(parsed.sinceTarget).toBe(v1);
+    expect(parsed.since).toBeNull();
+    // Chain A (HEAD): low; chain B (v1): high.
+    expect(parsed.changed.severity_threshold).toEqual({ a: 'low', b: 'high' });
+  });
+
+  it('emits since-base and since-target in YAML header when active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'yaml',
+      'since-base': 'HEAD',
+      'since-target': 'HEAD',
+    });
+    expect(r.exitCode).toBe(0); // both refs the same -> no drift
+    expect(r.stdout).toContain('# since-base: HEAD  (chain a resolved at this git ref)');
+    expect(r.stdout).toContain('# since-target: HEAD  (chain b resolved at this git ref)');
+  });
+
+  it('shows since-base and since-target in the text header when active', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'text',
+      'since-base': 'HEAD',
+      'since-target': 'HEAD',
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('since-base:');
+    expect(r.stdout).toContain('since-target:');
+    expect(r.stdout).toMatch(/HEAD/);
+  });
+
+  it('emits sinceBase=null + sinceTarget=null when neither flag is passed (back-compat)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], { format: 'json' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    // All three since-related fields nullable; consumers using ?? can
+    // detect any historical mode by checking each independently.
+    expect(parsed.since).toBeNull();
+    expect(parsed.sinceBase).toBeNull();
+    expect(parsed.sinceTarget).toBeNull();
+  });
+
+  it('returns a useful error when --since-target references an unknown ref', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    // Chain B is `a` which resolves to local preset only. With
+    // --since-target on a non-git tree, the ref loader returns empty
+    // and chain B can't resolve `a`.
+    const r = await runDiff(dir, ['a', 'a'], {
+      format: 'json',
+      'since-target': 'no-such-ref',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('<b>');
+  });
+
+  it('rejects an empty --since-base value (parser parity with --since)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // Pure-whitespace --since-base degrades to null (treated as
+    // absent). The diff should run cleanly without the historical
+    // resolver firing.
+    const r = await runDiff(dir, ['a', 'b'], { format: 'json', 'since-base': '   ' });
+    expect(r.exitCode).toBe(3);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.sinceBase).toBeNull();
+  });
+});

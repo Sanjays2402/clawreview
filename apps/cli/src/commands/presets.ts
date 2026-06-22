@@ -752,6 +752,23 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   // preset chain since last release?" -- the operator picks a git
   // ref, the CLI checks both bodies and diffs the result.
   //
+  // Tick 15: --since-base <ref> + --since-target <ref> give the
+  // independent symmetric case: chain A at one ref, chain B at
+  // another ref. Useful for backporting comparisons ("what does the
+  // release-2.4 preset look like vs the release-2.6 preset?") where
+  // neither side is HEAD.
+  //
+  // Flag precedence on each side:
+  //   - --since-base wins for chain A; otherwise --since (legacy);
+  //     otherwise HEAD (the working tree).
+  //   - --since-target wins for chain B; otherwise HEAD (no legacy
+  //     fallback because tick-14's --since never had a chain-B
+  //     equivalent).
+  //
+  // Combining --since with --since-base on the same side is an error
+  // (the operator clearly meant one or the other; refuse loudly so a
+  // typo doesn't silently degrade to the wrong resolution).
+  //
   // Built-in presets are version-agnostic (they live in the
   // @clawreview/types package source); only LOCAL presets are
   // resolved at a different ref, mirroring `loadLocalPresets`'s
@@ -764,25 +781,64 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     typeof sinceRefRaw === 'string' && sinceRefRaw.trim().length > 0
       ? sinceRefRaw.trim()
       : null;
+  const sinceBaseRaw = args.flags['since-base'];
+  const sinceBase =
+    typeof sinceBaseRaw === 'string' && sinceBaseRaw.trim().length > 0
+      ? sinceBaseRaw.trim()
+      : null;
+  const sinceTargetRaw = args.flags['since-target'];
+  const sinceTarget =
+    typeof sinceTargetRaw === 'string' && sinceTargetRaw.trim().length > 0
+      ? sinceTargetRaw.trim()
+      : null;
+  // Mutex: --since and --since-base apply to the SAME slot, so
+  // accepting both would let a typo silently pick the wrong ref.
+  // Refuse loudly. (--since with --since-target is fine: --since
+  // covers slot A, --since-target covers slot B, no overlap.)
+  if (sinceRef !== null && sinceBase !== null) {
+    process.stderr.write(
+      `clawreview presets diff: --since and --since-base are mutually exclusive ` +
+        `(both apply to chain a); pick one\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  // Resolved per-side refs. `since` is the legacy chain-A ref kept for
+  // back-compat; `sinceBase` is the explicit chain-A form. The
+  // helpers below treat them identically once we collapse them here.
+  const refForA = sinceBase ?? sinceRef;
+  const refForB = sinceTarget;
 
   const localPresetsHead = await loadLocalPresets(root);
-  let localPresetsRef: Record<string, ConfigPreset> | null = null;
-  if (sinceRef !== null) {
+  let localPresetsForARef: Record<string, ConfigPreset> | null = null;
+  if (refForA !== null) {
     try {
-      localPresetsRef = await loadLocalPresetsAtRef(root, sinceRef);
+      localPresetsForARef = await loadLocalPresetsAtRef(root, refForA);
     } catch (err) {
       process.stderr.write(
-        `clawreview presets diff: --since '${sinceRef}' failed: ${(err as Error).message}\n`,
+        `clawreview presets diff: --since${sinceBase !== null ? '-base' : ''} '${refForA}' failed: ${(err as Error).message}\n`,
       );
       process.exitCode = 2;
       return;
     }
   }
-  // ChainA resolver: uses the ref-side local namespace when --since is
-  // active, otherwise the HEAD namespace. Built-in presets fall back
+  let localPresetsForBRef: Record<string, ConfigPreset> | null = null;
+  if (refForB !== null) {
+    try {
+      localPresetsForBRef = await loadLocalPresetsAtRef(root, refForB);
+    } catch (err) {
+      process.stderr.write(
+        `clawreview presets diff: --since-target '${refForB}' failed: ${(err as Error).message}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+  }
+  // Per-side resolver: ref-side namespace when the corresponding
+  // --since-* was active, otherwise HEAD. Built-in presets fall back
   // through getPreset regardless.
-  const localPresetsForA = localPresetsRef ?? localPresetsHead;
-  const localPresetsForB = localPresetsHead;
+  const localPresetsForA = localPresetsForARef ?? localPresetsHead;
+  const localPresetsForB = localPresetsForBRef ?? localPresetsHead;
 
   // Resolve each chain. Unknown names / cycles surface here.
   let bodyA: ConfigPreset;
@@ -894,7 +950,17 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
         // (rather than omitted) when --since was absent so a consumer's
         // "is this a historical diff?" check is a single
         // `since !== null` comparison.
+        //
+        // Tick 15: also echo the new chain-A / chain-B refs from
+        // --since-base / --since-target. `since` keeps echoing the
+        // legacy --since flag for back-compat with downstream tooling
+        // that already keys off it; `sinceBase` is the explicit
+        // chain-A form (null when only --since was passed) and
+        // `sinceTarget` is the chain-B form (null when chain B
+        // resolves against HEAD).
         since: sinceRef,
+        sinceBase,
+        sinceTarget,
         // Surface the active filter so a downstream tool can verify
         // the diff was scoped (or not). Sorted for deterministic
         // JSON output. Exactly one of `onlyFields` / `excludeFields`
@@ -931,6 +997,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     ];
     if (sinceRef !== null) {
       headerLines.push(`# since: ${sinceRef}  (chain a resolved at this git ref)`);
+    }
+    if (sinceBase !== null) {
+      headerLines.push(`# since-base: ${sinceBase}  (chain a resolved at this git ref)`);
+    }
+    if (sinceTarget !== null) {
+      headerLines.push(`# since-target: ${sinceTarget}  (chain b resolved at this git ref)`);
     }
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
@@ -969,6 +1041,16 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     if (sinceRef !== null) {
       process.stdout.write(
         `${kleur.bold('since')}:   ${sinceRef} ${kleur.gray('(chain a resolved at this git ref)')}\n`,
+      );
+    }
+    if (sinceBase !== null) {
+      process.stdout.write(
+        `${kleur.bold('since-base')}:   ${sinceBase} ${kleur.gray('(chain a resolved at this git ref)')}\n`,
+      );
+    }
+    if (sinceTarget !== null) {
+      process.stdout.write(
+        `${kleur.bold('since-target')}: ${sinceTarget} ${kleur.gray('(chain b resolved at this git ref)')}\n`,
       );
     }
     if (onlyFields !== null) {
