@@ -7,6 +7,7 @@ import { runExplain } from './commands/explain.js';
 import { runAuthors } from './commands/authors.js';
 import { runLintConfig } from './commands/lint-config.js';
 import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from './commands/presets.js';
+import { runReviewDrift } from './commands/review.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -59,6 +60,21 @@ export async function runCli(argv: string[]): Promise<void> {
     case 'stats':
       await runStats(args);
       return;
+    case 'review':
+      // Sub-commands: today only `review drift`. The dispatcher matches
+      // the presets pattern so adding `review show <id>` or other
+      // review-scoped operations later is a one-line addition.
+      {
+        const sub = args.positional[0] ?? '';
+        if (sub === 'drift') {
+          await runReviewDrift(args);
+          return;
+        }
+        console.error(`Unknown review sub-command: ${sub || '(none)'}\n`);
+        console.log(renderHelp());
+        process.exitCode = 1;
+        return;
+      }
     case 'baseline':
       await runBaseline(args);
       return;

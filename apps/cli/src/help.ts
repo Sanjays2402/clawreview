@@ -11,6 +11,7 @@ Usage:
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
+  clawreview review drift [--input <path>] [--format text|json]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
@@ -78,5 +79,7 @@ Examples:
   git diff main...HEAD | clawreview diff-stats --diff -
   clawreview run --format json > report.json && clawreview explain 9d3c4f --input report.json
   clawreview run --format json | clawreview authors --top 5
+  curl -s https://clawreview/api/reviews/abc123/digest | clawreview review drift
+  curl -s https://clawreview/api/reviews/abc123 | clawreview review drift --format json | jq '.drift.hasDrift'
 `;
 }
