@@ -361,6 +361,7 @@ export function parseWatchConfig(flags: {
   format?: unknown;
   'on-drift'?: unknown;
   'on-drift-once'?: unknown;
+  'on-drift-template'?: unknown;
 }): WatchConfigResult {
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
   if (serverRaw.length === 0) {
@@ -433,6 +434,50 @@ export function parseWatchConfig(flags: {
     }
     onDrift = trimmed;
   }
+  // Tick 17: --on-drift-template <name> expands a named template into
+  // a fully-formed curl command targeting an environment-variable
+  // webhook URL, so the common case ("ping Slack on drift") doesn't
+  // require the operator to wrap their own pipeline.
+  //
+  // Mutex with --on-drift: a template AND an explicit command at the
+  // same time is almost always a typo (the operator probably switched
+  // to the template syntax but forgot to remove the old --on-drift
+  // value). Refuse loudly.
+  //
+  // The expansion happens HERE (not at hook-execution time) so the
+  // resolved command is visible in the watch loop's logs and so the
+  // existing --on-drift hook code path consumes the expanded string
+  // unchanged. If the named template's required env var is unset,
+  // we surface a clear error at parse-time -- a silent expansion
+  // to `$EMPTY_VAR` would mean the curl line silently misfires at
+  // runtime with no notification, which defeats the whole point.
+  if (flags['on-drift-template'] !== undefined) {
+    if (onDrift !== null) {
+      return {
+        kind: 'invalid-on-drift',
+        message:
+          '--on-drift-template is mutually exclusive with --on-drift (pick one)',
+      };
+    }
+    if (typeof flags['on-drift-template'] !== 'string') {
+      return {
+        kind: 'invalid-on-drift',
+        message: `--on-drift-template must be a template name string; got ${typeof flags['on-drift-template']}`,
+      };
+    }
+    const name = flags['on-drift-template'].trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid-on-drift',
+        message: '--on-drift-template requires a template name (one of: slack, webhook)',
+      };
+    }
+    const expanded = expandOnDriftTemplate(name, process.env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid-on-drift', message: expanded.message };
+    }
+    onDrift = expanded.command;
+  }
   // --on-drift-once: boolean flag. When set, the hook fires only
   // on the FIRST transition into drift (not on every subsequent
   // drift sample). Useful for "ping me when this finally drifts"
@@ -440,6 +485,104 @@ export function parseWatchConfig(flags: {
   const onDriftOnce = flags['on-drift-once'] === true || flags['on-drift-once'] === 'true';
 
   return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, onDrift, onDriftOnce };
+}
+
+/**
+ * Closed set of `--on-drift-template` template names. Each template
+ * expands to a curl-based pipeline targeting a webhook URL stored in
+ * an environment variable; the templates are intentionally minimal
+ * (a single curl line, no jq filtering, no fan-out) so an operator
+ * who wants more elaborate plumbing can fall back to --on-drift with
+ * a raw command string.
+ *
+ *   - `slack`    -> POST the drift JSON to $SLACK_WEBHOOK_URL.
+ *                   Slack's incoming-webhook endpoint accepts an
+ *                   arbitrary JSON body and renders the `text` field;
+ *                   the template forwards the drift report verbatim
+ *                   so the operator gets the raw data without an
+ *                   intermediate jq pass.
+ *   - `webhook`  -> POST the drift JSON to $WEBHOOK_URL. Generic
+ *                   alias for any service that accepts a POST + JSON
+ *                   body (Discord webhooks, custom alerting,
+ *                   Microsoft Teams, etc.).
+ *
+ * Exported alongside `expandOnDriftTemplate` so a test can iterate
+ * the canonical set without hard-coding the literals.
+ */
+export const ON_DRIFT_TEMPLATES = ['slack', 'webhook'] as const;
+export type OnDriftTemplate = (typeof ON_DRIFT_TEMPLATES)[number];
+
+/**
+ * Outcome of expanding `--on-drift-template <name>`. Either a
+ * resolved curl command string or a typed error sentinel that the
+ * parser surfaces under the existing `invalid-on-drift` kind.
+ */
+export type OnDriftTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Expand a named `--on-drift-template` into the curl command the
+ * watch loop will exec on each drift sample.
+ *
+ * Validation:
+ *   - Unknown template name -> 'invalid' with an enumerated list of
+ *     valid names so the operator can fix the typo without guessing.
+ *   - Required env var unset (or empty after trim) -> 'invalid' with
+ *     a clear "set $X" message. We refuse rather than expanding to
+ *     `$EMPTY_VAR` because a silently-misfiring curl would defeat
+ *     the whole point of the template (the operator added it to be
+ *     notified; surfacing the missing var at parse-time gives them
+ *     a chance to fix it before the watch loop drifts unnoticed).
+ *
+ * Pure: takes the `env` map as an argument so tests can drive every
+ * arm without mutating `process.env`. Default callers pass
+ * `process.env`.
+ *
+ * The expansion uses `--data-binary @-` so the drift JSON (which the
+ * watch loop already pipes on stdin to --on-drift) is forwarded
+ * byte-for-byte to the webhook. `-H 'Content-Type: application/json'`
+ * is set so a Slack / Discord / generic webhook recognises the body
+ * shape. We do NOT include `--fail` (which would exit non-zero on
+ * a 4xx response) because the watch loop's failure-tolerance for
+ * --on-drift already surfaces hook errors on stderr.
+ */
+export function expandOnDriftTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): OnDriftTemplateExpansion {
+  const lower = name.toLowerCase();
+  // Resolve the env var name from the template. Each template knows
+  // exactly one env var; the closed set keeps the surface tiny.
+  let envVar: string;
+  switch (lower) {
+    case 'slack':
+      envVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      envVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-drift-template '${name}'; valid: ${ON_DRIFT_TEMPLATES.join(', ')}`,
+      };
+  }
+  const url = (env[envVar] ?? '').trim();
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-drift-template ${lower} requires \$${envVar} (set it before running the watch loop)`,
+    };
+  }
+  // Build the curl line. Single-quoted URL is safe because we
+  // validated the env var is non-empty above; the URL value itself
+  // is not shell-escaped (operators are expected to set the env var
+  // to a clean URL, same contract as --on-drift's raw command).
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
 }
 
 /**
@@ -552,6 +695,7 @@ export async function runReviewDriftWatch(
     format: args.flags.format,
     'on-drift': args.flags['on-drift'],
     'on-drift-once': args.flags['on-drift-once'],
+    'on-drift-template': args.flags['on-drift-template'],
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review drift: ${config.message}\n`);

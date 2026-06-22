@@ -833,3 +833,179 @@ describe('clawreview review drift --watch metrics (tick 17)', () => {
   });
 });
 
+describe('expandOnDriftTemplate (tick 17)', () => {
+  it('expands slack to a curl command targeting SLACK_WEBHOOK_URL', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    const r = expandOnDriftTemplate('slack', { SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T/B/X' });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('curl');
+      expect(r.command).toContain('POST');
+      expect(r.command).toContain('https://hooks.slack.com/services/T/B/X');
+      expect(r.command).toContain("Content-Type: application/json");
+      // --data-binary @- forwards stdin verbatim, matching the
+      // watch loop's existing pipe contract.
+      expect(r.command).toContain('--data-binary @-');
+    }
+  });
+
+  it('expands webhook to a curl command targeting WEBHOOK_URL', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    const r = expandOnDriftTemplate('webhook', { WEBHOOK_URL: 'https://example.com/hook' });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('https://example.com/hook');
+    }
+  });
+
+  it('case-insensitive matching for the template name (Slack vs slack)', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    const a = expandOnDriftTemplate('SLACK', { SLACK_WEBHOOK_URL: 'https://a' });
+    const b = expandOnDriftTemplate('Slack', { SLACK_WEBHOOK_URL: 'https://a' });
+    expect(a.kind).toBe('ok');
+    expect(b.kind).toBe('ok');
+    if (a.kind === 'ok' && b.kind === 'ok') {
+      expect(a.command).toBe(b.command);
+    }
+  });
+
+  it('rejects an unknown template with an enumerated valid list', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    const r = expandOnDriftTemplate('teams', { TEAMS_WEBHOOK_URL: 'https://x' });
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain("'teams'");
+      // Lists the canonical valid names so the operator can pick.
+      expect(r.message).toContain('slack');
+      expect(r.message).toContain('webhook');
+    }
+  });
+
+  it('rejects when slack template is selected but SLACK_WEBHOOK_URL is unset', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    // Empty env: parse-time error so the watch loop never silently
+    // misfires curl with $EMPTY_VAR.
+    const r = expandOnDriftTemplate('slack', {});
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain('SLACK_WEBHOOK_URL');
+    }
+  });
+
+  it('rejects when SLACK_WEBHOOK_URL is set but whitespace-only', async () => {
+    const { expandOnDriftTemplate } = await import('../src/commands/review.js');
+    // Operators sometimes export an empty string via shell typos;
+    // we should treat that identically to unset.
+    const r = expandOnDriftTemplate('slack', { SLACK_WEBHOOK_URL: '   ' });
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain('SLACK_WEBHOOK_URL');
+    }
+  });
+
+  it('ON_DRIFT_TEMPLATES exports the closed two-name set', async () => {
+    const { ON_DRIFT_TEMPLATES } = await import('../src/commands/review.js');
+    expect([...ON_DRIFT_TEMPLATES]).toEqual(['slack', 'webhook']);
+  });
+});
+
+describe('parseWatchConfig --on-drift-template (tick 17)', () => {
+  it('expands --on-drift-template slack into the curl command when SLACK_WEBHOOK_URL is set', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prev = process.env.SLACK_WEBHOOK_URL;
+    process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/x';
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-drift-template': 'slack',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.onDrift).toContain('https://hooks.slack.com/x');
+        expect(r.onDrift).toContain('curl');
+      }
+    } finally {
+      if (prev === undefined) delete process.env.SLACK_WEBHOOK_URL;
+      else process.env.SLACK_WEBHOOK_URL = prev;
+    }
+  });
+
+  it('--on-drift-template and --on-drift together rejects (mutex)', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-drift': 'curl https://x',
+      'on-drift-template': 'slack',
+    });
+    expect(r.kind).toBe('invalid-on-drift');
+    if (r.kind === 'invalid-on-drift') {
+      expect(r.message).toContain('mutually exclusive');
+    }
+  });
+
+  it('--on-drift-template with an empty value rejects with a clear message', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-drift-template': '',
+    });
+    expect(r.kind).toBe('invalid-on-drift');
+    if (r.kind === 'invalid-on-drift') {
+      expect(r.message).toContain('requires a template name');
+    }
+  });
+
+  it('--on-drift-template with an unknown name rejects with the valid list', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://t',
+      'on-drift-template': 'teams',
+    });
+    expect(r.kind).toBe('invalid-on-drift');
+    if (r.kind === 'invalid-on-drift') {
+      expect(r.message).toContain("'teams'");
+      expect(r.message).toContain('slack');
+    }
+  });
+
+  it('--on-drift-template slack with missing env var surfaces at parse-time', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prev = process.env.SLACK_WEBHOOK_URL;
+    delete process.env.SLACK_WEBHOOK_URL;
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-drift-template': 'slack',
+      });
+      expect(r.kind).toBe('invalid-on-drift');
+      if (r.kind === 'invalid-on-drift') {
+        expect(r.message).toContain('SLACK_WEBHOOK_URL');
+      }
+    } finally {
+      if (prev !== undefined) process.env.SLACK_WEBHOOK_URL = prev;
+    }
+  });
+
+  it('--on-drift-template composes with --on-drift-once', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const prev = process.env.WEBHOOK_URL;
+    process.env.WEBHOOK_URL = 'https://example.com/hook';
+    try {
+      const r = parseWatchConfig({
+        server: 'https://t',
+        'on-drift-template': 'webhook',
+        'on-drift-once': true,
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.onDrift).toContain('https://example.com/hook');
+        expect(r.onDriftOnce).toBe(true);
+      }
+    } finally {
+      if (prev === undefined) delete process.env.WEBHOOK_URL;
+      else process.env.WEBHOOK_URL = prev;
+    }
+  });
+});
+
+
