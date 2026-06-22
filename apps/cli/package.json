@@ -17,6 +17,7 @@
     "@clawreview/aggregator": "workspace:*",
     "@clawreview/diff": "workspace:*",
     "@clawreview/llm": "workspace:*",
+    "@clawreview/telemetry": "workspace:*",
     "@clawreview/types": "workspace:*",
     "envalid": "^8.0.0",
     "kleur": "^4.1.5",

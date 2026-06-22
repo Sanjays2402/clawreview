@@ -258,6 +258,44 @@ export interface MetricsBundle {
    * `stale`). Bounded for the same reason as `reviewDigestDriftTotal`.
    */
   reviewDigestPersistedDriftTotal: Counter<string>;
+  /**
+   * `clawreview_review_drift_watch_polls_total{result}` -- per-poll
+   * outcome counter for the CLI `review drift --watch` loop.
+   *
+   * Fires once per HTTP fetch attempt against /api/reviews/:id/digest
+   * inside the watch loop, so an operator instrumenting their watch
+   * pipeline (e.g. piping it into Prometheus / a sidecar metric
+   * scraper) can answer:
+   *
+   *   - "how many polls have I made?"  (sum across all results)
+   *   - "how often is the digest stale?"  (`result="drift"` rate)
+   *   - "how often is my server flaking?"  (`result="error"` rate)
+   *
+   * Pairs with the READ-side `reviewDigestDriftTotal` (which observes
+   * the server's view of each /digest read) -- if the two diverge,
+   * the CLI is seeing different drift than the server is firing,
+   * which usually indicates one of them is mis-configured.
+   *
+   * Closed `result` set:
+   *   - `ok`     -- HTTP fetch succeeded, drift.hasDrift was false.
+   *                 The persisted digest still agreed with the fresh
+   *                 recompute.
+   *   - `drift`  -- HTTP fetch succeeded, drift.hasDrift was true.
+   *                 The watch banner reported drift; an --on-drift
+   *                 hook (if configured) fired.
+   *   - `error`  -- HTTP fetch failed OR the body could not be
+   *                 parsed. The watch loop aborts the iteration and
+   *                 exits 2; this counter captures the cause.
+   *
+   * The counter is exposed via a CLI registry seam: the watch loop
+   * accepts an injected metrics bundle (defaulting to no-op when
+   * absent) so unit tests can assert the fire pattern without
+   * spinning up a real Prometheus registry, and production users
+   * who want the data can wire a real bundle through.
+   *
+   * Cardinality: exactly three label values. Bounded.
+   */
+  reviewDriftWatchPollsTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -453,6 +491,21 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewDriftWatchPollsTotal = new Counter({
+    name: 'clawreview_review_drift_watch_polls_total',
+    help:
+      'Per-poll outcome for the CLI review drift --watch loop, labeled ' +
+      'by result (closed set: ok | drift | error). ok = HTTP fetch ' +
+      "succeeded and drift.hasDrift was false; drift = HTTP fetch " +
+      'succeeded and drift.hasDrift was true (banner reported drift, ' +
+      '--on-drift hook fired if configured); error = HTTP fetch failed ' +
+      'or body could not be parsed. Fires once per fetch attempt. Pair ' +
+      'with the server-side clawreview_review_digest_drift_total to ' +
+      'detect divergence between the CLI and server views of drift.',
+    labelNames: ['result'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -515,6 +568,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     findingsDroppedTotal,
     reviewDigestDriftTotal,
     reviewDigestPersistedDriftTotal,
+    reviewDriftWatchPollsTotal,
     queueDepth,
     queueInflight,
   };
@@ -1170,4 +1224,70 @@ export function observeReviewDigestPersistedDrift(
 ): void {
   const kind = deriveReviewDigestPersistedDriftKind(priorDigest, drift);
   metrics.reviewDigestPersistedDriftTotal.inc({ kind });
+}
+
+/**
+ * Closed set of `result` values the CLI watch-loop poll counter
+ * (`reviewDriftWatchPollsTotal`) can record:
+ *
+ *   - `ok`     -- HTTP fetch succeeded, drift.hasDrift was false.
+ *   - `drift`  -- HTTP fetch succeeded, drift.hasDrift was true.
+ *   - `error`  -- HTTP fetch failed OR body could not be parsed; the
+ *                 watch loop exits 2 after firing this one bump.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series across
+ * label values that both look correct in code review.
+ */
+export const REVIEW_DRIFT_WATCH_RESULTS = ['ok', 'drift', 'error'] as const;
+export type ReviewDriftWatchResult = (typeof REVIEW_DRIFT_WATCH_RESULTS)[number];
+
+/**
+ * Derive the closed-set `result` label from a poll outcome.
+ *
+ * Two inputs:
+ *   - `fetchOk`  -- did the HTTP fetch + JSON parse succeed?
+ *   - `drift`    -- the parsed drift report, or `null` when the fetch
+ *                   failed (in which case the predicate ignores it
+ *                   and returns 'error').
+ *
+ * Truth table:
+ *   - fetchOk=false, drift=any                 -> 'error'
+ *   - fetchOk=true,  drift=null                -> 'error'  (parse failure)
+ *   - fetchOk=true,  drift.hasDrift=false      -> 'ok'
+ *   - fetchOk=true,  drift.hasDrift=true       -> 'drift'
+ *
+ * Pure / exported so the test surface can pin every arm without
+ * driving the watch loop.
+ */
+export function deriveReviewDriftWatchResult(
+  fetchOk: boolean,
+  drift: { hasDrift: boolean } | null,
+): ReviewDriftWatchResult {
+  if (!fetchOk || drift === null) return 'error';
+  return drift.hasDrift ? 'drift' : 'ok';
+}
+
+/**
+ * Record one watch-loop poll on the `clawreview_review_drift_watch_polls_total`
+ * counter.
+ *
+ * Called from the CLI `review drift --watch` loop on every fetch
+ * attempt (success or failure). The metrics bundle is injected so a
+ * CLI consumer that doesn't want to depend on Prometheus can skip the
+ * counter entirely (the watch loop simply doesn't fire it); a
+ * production deploy wires a real bundle and the counter shows up on
+ * /metrics scrapes for whichever sidecar is exporting the CLI's
+ * counters.
+ *
+ * Cheap to call: a single counter increment with one short label
+ * value. Bounded cardinality (three label values, ever).
+ */
+export function observeReviewDriftWatchPoll(
+  metrics: MetricsBundle,
+  fetchOk: boolean,
+  drift: { hasDrift: boolean } | null,
+): void {
+  const result = deriveReviewDriftWatchResult(fetchOk, drift);
+  metrics.reviewDriftWatchPollsTotal.inc({ result });
 }

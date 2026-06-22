@@ -41,6 +41,9 @@ importers:
       '@clawreview/llm':
         specifier: workspace:*
         version: link:../../packages/llm
+      '@clawreview/telemetry':
+        specifier: workspace:*
+        version: link:../../packages/telemetry
       '@clawreview/types':
         specifier: workspace:*
         version: link:../../packages/types

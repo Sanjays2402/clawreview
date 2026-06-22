@@ -668,3 +668,168 @@ describe('clawreview review drift --watch --on-drift (tick 16)', () => {
     }
   });
 });
+
+describe('clawreview review drift --watch metrics (tick 17)', () => {
+  /**
+   * Spin up a real metrics bundle from @clawreview/telemetry (it's a
+   * lightweight Prometheus client; the registry is per-bundle and we
+   * pass defaultMetrics=false to keep the scrape body small). Each
+   * test gets a fresh bundle via resetMetricsForTests so the counter
+   * starts at zero.
+   *
+   * The watch loop's `injected.metrics` seam accepts any MetricsBundle
+   * -- we pass the real one and scrape the registry text to assert
+   * the closed-set {ok, drift, error} labels actually fired.
+   */
+  async function runWatchWithMetrics(
+    reviewId: string,
+    flags: Record<string, string | boolean>,
+    bodies: Array<string | { ok: boolean; status: number; body: string }>,
+  ): Promise<{ exitCode: number; metricsText: string }> {
+    const { runReviewDriftWatch } = await import('../src/commands/review.js');
+    const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
+    resetMetricsForTests();
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    // Silence stdout/stderr -- they're not under test in this group.
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(((_: unknown) => true) as never);
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(((_: unknown) => true) as never);
+    let bodyIdx = 0;
+    const fetcher = async (_url: string) => {
+      const entry = bodies[bodyIdx] ?? bodies[bodies.length - 1]!;
+      bodyIdx += 1;
+      if (typeof entry === 'string') return { ok: true, status: 200, text: async () => entry };
+      return { ok: entry.ok, status: entry.status, text: async () => entry.body };
+    };
+    const sleeper = async () => undefined;
+    process.exitCode = 0;
+    try {
+      await runReviewDriftWatch(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: { 'no-color': true, watch: reviewId, ...flags },
+        },
+        reviewId,
+        { fetcher, sleeper, metrics },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    const metricsText = await metrics.registry.metrics();
+    return { exitCode, metricsText };
+  }
+
+  function makeCleanBody() {
+    const findings = [{
+      agent: 'security', category: 'security', severity: 'high', title: 'X',
+      rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [],
+    }];
+    const digest = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+    return JSON.stringify({ findings, digest });
+  }
+
+  function makeDriftedBody() {
+    const persistedFindings = [
+      { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [] },
+      { agent: 'security', category: 'security', severity: 'medium', title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.8, tags: [] },
+    ];
+    const liveFindings = [persistedFindings[0]!];
+    const digest = findingDigest(persistedFindings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+    return JSON.stringify({ findings: liveFindings, digest });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('fires the ok label on a clean poll (drift.hasDrift=false)', async () => {
+    const r = await runWatchWithMetrics('rv1', { 'max-polls': '1', server: 'https://t' }, [makeCleanBody()]);
+    expect(r.exitCode).toBe(0);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="ok"[^}]*\}\s*1/);
+  });
+
+  it('fires the drift label on a polled drift sample', async () => {
+    const r = await runWatchWithMetrics('rv2', { 'max-polls': '1', server: 'https://t' }, [makeDriftedBody()]);
+    // Drifted last sample -> exit 3 (single-shot contract carries up).
+    expect(r.exitCode).toBe(3);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="drift"[^}]*\}\s*1/);
+  });
+
+  it('fires the error label on an HTTP non-2xx response', async () => {
+    const r = await runWatchWithMetrics(
+      'rv3',
+      { 'max-polls': '5', server: 'https://t' },
+      [{ ok: false, status: 503, body: '{"error":"down"}' }],
+    );
+    // HTTP error path exits 2 immediately after the counter fires.
+    expect(r.exitCode).toBe(2);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="error"[^}]*\}\s*1/);
+  });
+
+  it('fires the error label on a JSON parse failure', async () => {
+    const r = await runWatchWithMetrics(
+      'rv4',
+      { 'max-polls': '5', server: 'https://t' },
+      ['this is not JSON {'],
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="error"[^}]*\}\s*1/);
+  });
+
+  it('fires the error label on a body missing both fresh and findings', async () => {
+    const r = await runWatchWithMetrics(
+      'rv5',
+      { 'max-polls': '5', server: 'https://t' },
+      ['{}'],
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="error"[^}]*\}\s*1/);
+  });
+
+  it('counts each poll separately across a mixed multi-poll watch', async () => {
+    // Two clean samples followed by a drifted sample. We expect 2 ok
+    // + 1 drift on the counter; no spillover to error.
+    const r = await runWatchWithMetrics(
+      'rv6',
+      { 'max-polls': '3', server: 'https://t' },
+      [makeCleanBody(), makeCleanBody(), makeDriftedBody()],
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="ok"[^}]*\}\s*2/);
+    expect(r.metricsText).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="drift"[^}]*\}\s*1/);
+  });
+
+  it('omits the counter entirely when metrics is not injected (default surface)', async () => {
+    // The metric is opt-in; without an injected bundle the loop must
+    // run cleanly without throwing. We assert via the exit code alone
+    // because there's no bundle to scrape.
+    const { runReviewDriftWatch } = await import('../src/commands/review.js');
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(((_: unknown) => true) as never);
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(((_: unknown) => true) as never);
+    process.exitCode = 0;
+    try {
+      await runReviewDriftWatch(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: { 'no-color': true, watch: 'rv7', server: 'https://t', 'max-polls': '1' },
+        },
+        'rv7',
+        {
+          fetcher: async () => ({ ok: true, status: 200, text: async () => makeCleanBody() }),
+          sleeper: async () => undefined,
+        },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(exitCode).toBe(0);
+  });
+});
+

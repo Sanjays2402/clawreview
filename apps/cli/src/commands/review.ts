@@ -7,6 +7,10 @@ import {
   type FindingDigest,
   type FindingDigestDrift,
 } from '@clawreview/aggregator';
+import {
+  observeReviewDriftWatchPoll,
+  type MetricsBundle,
+} from '@clawreview/telemetry';
 import type { Finding } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
@@ -518,13 +522,28 @@ const defaultWatchOnDriftExecer: WatchOnDriftExecer = async (cmd, payload) => {
  *   - json (JSONL): one JSON object per poll, separated by `\n`. The
  *     object shape is { reviewId, poll, persisted, fresh, drift }.
  *
+ * Telemetry (tick 17): when `injected.metrics` is supplied, every
+ * poll attempt fires `clawreview_review_drift_watch_polls_total{result}`
+ * (closed set: ok | drift | error). The bundle is OPTIONAL so an
+ * operator who doesn't want to depend on the telemetry counter
+ * surface can omit it (the loop simply skips the fire); a production
+ * deploy wires a real bundle and the counter shows up on /metrics
+ * scrapes for whichever sidecar exports the CLI's metrics. The tests
+ * inject a no-op bundle wrapper to assert the fire pattern without
+ * spinning up a real Prometheus registry.
+ *
  * Exported for unit-test driving; the public CLI uses the default
- * fetcher / sleeper.
+ * fetcher / sleeper / metrics (none).
  */
 export async function runReviewDriftWatch(
   args: ParsedArgs,
   reviewId: string,
-  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper; onDriftExecer?: WatchOnDriftExecer },
+  injected?: {
+    fetcher?: WatchFetcher;
+    sleeper?: WatchSleeper;
+    onDriftExecer?: WatchOnDriftExecer;
+    metrics?: MetricsBundle;
+  },
 ): Promise<void> {
   const config = parseWatchConfig({
     server: args.flags.server,
@@ -545,6 +564,7 @@ export async function runReviewDriftWatch(
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
   const sleeper = injected?.sleeper ?? defaultWatchSleeper;
   const onDriftExecer = injected?.onDriftExecer ?? defaultWatchOnDriftExecer;
+  const metrics = injected?.metrics;
   const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(reviewId)}/digest`;
 
   // SIGINT handling: flip a flag, finish the current iteration, exit
@@ -573,6 +593,11 @@ export async function runReviewDriftWatch(
       try {
         const res = await fetcher(url);
         if (!res.ok) {
+          // Tick 17: counter fire on HTTP non-2xx -- counts as 'error'
+          // because the watch loop exits 2 after this branch. We fire
+          // BEFORE writing to stderr so a test that asserts the
+          // metric pattern sees it regardless of stderr ordering.
+          if (metrics) observeReviewDriftWatchPoll(metrics, false, null);
           process.stderr.write(
             `clawreview review drift --watch: poll ${pollCount} got HTTP ${res.status}; aborting\n`,
           );
@@ -582,6 +607,8 @@ export async function runReviewDriftWatch(
         const text = await res.text();
         body = JSON.parse(text) as DriftReport;
       } catch (err) {
+        // Tick 17: counter fire on fetch / parse failure -- 'error'.
+        if (metrics) observeReviewDriftWatchPoll(metrics, false, null);
         process.stderr.write(
           `clawreview review drift --watch: poll ${pollCount} failed: ${(err as Error).message}\n`,
         );
@@ -605,6 +632,8 @@ export async function runReviewDriftWatch(
         });
         persisted = body.digest ?? null;
       } else {
+        // Tick 17: counter fire on shape rejection -- 'error'.
+        if (metrics) observeReviewDriftWatchPoll(metrics, false, null);
         process.stderr.write(
           `clawreview review drift --watch: poll ${pollCount} body lacks both 'fresh' and 'findings'\n`,
         );
@@ -615,6 +644,12 @@ export async function runReviewDriftWatch(
         persisted ?? findingDigest([], { hotspots: false });
       const drift = body.drift ?? computeDigestDrift(persistedForDrift, fresh);
       lastHasDrift = drift.hasDrift;
+      // Tick 17: fire the per-poll counter on the success path. The
+      // result label is derived from drift.hasDrift via the closed
+      // {ok, drift} set; the error label is fired on the failure
+      // branches above. We fire BEFORE writing the banner so a
+      // test asserting the metric pattern sees it before stdout.
+      if (metrics) observeReviewDriftWatchPoll(metrics, true, drift);
 
       if (config.format === 'json') {
         // JSONL: one object per poll, newline-delimited so a

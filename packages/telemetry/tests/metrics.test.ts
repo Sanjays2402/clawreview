@@ -910,3 +910,91 @@ describe('deriveReviewDigestPersistedDriftLogLevel (tick 16)', () => {
     ).toBe('warn');
   });
 });
+
+describe('deriveReviewDriftWatchResult (tick 17)', () => {
+  it('returns ok when fetchOk=true and drift.hasDrift=false', async () => {
+    const { deriveReviewDriftWatchResult } = await import('../src/metrics.js');
+    expect(deriveReviewDriftWatchResult(true, { hasDrift: false })).toBe('ok');
+  });
+
+  it('returns drift when fetchOk=true and drift.hasDrift=true', async () => {
+    const { deriveReviewDriftWatchResult } = await import('../src/metrics.js');
+    expect(deriveReviewDriftWatchResult(true, { hasDrift: true })).toBe('drift');
+  });
+
+  it('returns error when fetchOk=false regardless of drift shape', async () => {
+    const { deriveReviewDriftWatchResult } = await import('../src/metrics.js');
+    // A failed fetch should always count as error, even if the loop
+    // somehow carried a stale drift report from a prior iteration.
+    expect(deriveReviewDriftWatchResult(false, { hasDrift: true })).toBe('error');
+    expect(deriveReviewDriftWatchResult(false, { hasDrift: false })).toBe('error');
+    expect(deriveReviewDriftWatchResult(false, null)).toBe('error');
+  });
+
+  it('returns error when fetchOk=true but drift is null (parse failure)', async () => {
+    // The watch loop sets drift=null on a JSON parse failure even
+    // when the HTTP fetch itself succeeded; the predicate must
+    // surface that as 'error' for the counter.
+    const { deriveReviewDriftWatchResult } = await import('../src/metrics.js');
+    expect(deriveReviewDriftWatchResult(true, null)).toBe('error');
+  });
+
+  it('REVIEW_DRIFT_WATCH_RESULTS exports the closed three-value set', async () => {
+    const { REVIEW_DRIFT_WATCH_RESULTS } = await import('../src/metrics.js');
+    // Frozen tuple so a typo at a call site won't compile against
+    // the union type. We assert the exact membership so a future
+    // accidental widening (a fourth value) is caught here.
+    expect([...REVIEW_DRIFT_WATCH_RESULTS]).toEqual(['ok', 'drift', 'error']);
+  });
+});
+
+describe('observeReviewDriftWatchPoll (tick 17)', () => {
+  it('bumps the counter under the ok label when fetchOk=true + no drift', async () => {
+    resetMetricsForTests();
+    const { observeReviewDriftWatchPoll } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: false });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="ok"[^}]*\}\s*2/);
+  });
+
+  it('bumps the counter under the drift label when fetchOk=true + drift', async () => {
+    resetMetricsForTests();
+    const { observeReviewDriftWatchPoll } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="drift"[^}]*\}\s*1/);
+  });
+
+  it('bumps the counter under the error label when fetchOk=false', async () => {
+    resetMetricsForTests();
+    const { observeReviewDriftWatchPoll } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDriftWatchPoll(metrics, false, null);
+    observeReviewDriftWatchPoll(metrics, false, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="error"[^}]*\}\s*2/);
+  });
+
+  it('counts every poll separately across the three result buckets', async () => {
+    // A mixed watch session: 3 ok, 2 drift, 1 error. Every bucket
+    // should carry its own count; the buckets should not interfere
+    // (no spillover from one label to another).
+    resetMetricsForTests();
+    const { observeReviewDriftWatchPoll } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: false });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: true });
+    observeReviewDriftWatchPoll(metrics, true, { hasDrift: true });
+    observeReviewDriftWatchPoll(metrics, false, null);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="ok"[^}]*\}\s*3/);
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="drift"[^}]*\}\s*2/);
+    expect(text).toMatch(/clawreview_review_drift_watch_polls_total\{[^}]*result="error"[^}]*\}\s*1/);
+  });
+});
+
