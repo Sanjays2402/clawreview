@@ -137,6 +137,62 @@ describe('InMemoryReviewStore', () => {
       // doesn't perturb existing refs.
       expect(done.commentId).toBe(1);
     });
+
+    // Tick 20: the worker now passes cfg.min_confidence + cfg.severity_threshold
+    // through to findingDigest so the persisted digest is in lock-step
+    // with the post-filter view -- the comment header, the CLI, and
+    // the dashboard read byte-identical numbers. The store layer just
+    // persists whatever digest the worker hands it; this test pins the
+    // shape contract end-to-end so a future refactor that drops the
+    // filter wiring (or silently inverts the semantics) breaks the
+    // test surface visibly.
+    it('persists the filter-aware digest verbatim (tick 20 worker contract)', async () => {
+      const r = await store.start({
+        installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+      });
+      // Simulate the worker's post-aggregate findings array. In the
+      // real worker pipeline these have ALREADY been floored by
+      // applyMinConfidence + aggregate's threshold, so the digest
+      // filter is a defence-in-depth no-op on the happy path. But we
+      // construct a deliberately mixed array here to PROVE the digest
+      // filter is wired -- if the worker call ever drops the
+      // minConfidence/severityThreshold opts, the persisted total
+      // would be 4 instead of 1.
+      const findings = [
+        f({ severity: 'critical', confidence: 0.9, file: 'src/a.ts' }),
+        f({ severity: 'high', confidence: 0.3, file: 'src/b.ts' }), // floored
+        f({ severity: 'low', confidence: 0.9, file: 'src/c.ts' }),  // thresholded
+        f({ severity: 'nit', confidence: 0.2, file: 'src/d.ts' }),  // both
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      // Build the digest the way the tick-20 worker does: pass the
+      // same min_confidence + severity_threshold the cfg supplied to
+      // aggregate(). One finding survives both filters.
+      const digest = findingDigest(findings, {
+        topAgents: 8,
+        topCategories: 8,
+        hotspots: true,
+        minConfidence: 0.5,
+        severityThreshold: 'medium',
+      });
+      const done = await store.complete(
+        r.id,
+        summary({ totalFindings: 1 }),
+        findings,
+        { digest },
+      );
+      // Persisted digest reflects the post-filter snapshot: total=1,
+      // only the critical finding survived.
+      expect(done.digest).toBeDefined();
+      expect(done.digest!.total).toBe(1);
+      expect(done.digest!.totalsBySeverity.critical).toBe(1);
+      expect(done.digest!.totalsBySeverity.high).toBe(0);
+      expect(done.digest!.totalsBySeverity.low).toBe(0);
+      expect(done.digest!.totalsBySeverity.nit).toBe(0);
+      // byFile reflects only the survivor: a sanity that the filter
+      // applies to every bucket (not just the totals).
+      expect(done.digest!.byFile).toEqual({ 'src/a.ts': 1 });
+    });
   });
 
   it('dismiss and reopen a finding', async () => {

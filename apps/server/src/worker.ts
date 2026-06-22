@@ -331,10 +331,30 @@ export async function startWorker(logger: Logger): Promise<void> {
     // from the dashboard surface, and the cost is one extra pass
     // over `findings` per review (a few microseconds even for the
     // largest reviews; aggregator/tests/digest.test.ts pins this).
+    // Tick 20: pass the same `min_confidence` AND `severity_threshold`
+    // filters the aggregator pipeline used into the digest. This keeps
+    // the persisted digest in lock-step with what the PR comment header
+    // ACTUALLY shows: aggregated.findings has already had the
+    // min_confidence floor + severity threshold applied (by
+    // `aggregate({ minConfidence, threshold })` and the standalone
+    // `applyMinConfidence` pass above), so the digest filter is a
+    // defence-in-depth no-op on the happy path. BUT it makes the
+    // contract explicit: callers reading rec.digest from the review-
+    // store know with certainty that no sub-threshold or low-confidence
+    // findings leaked into the persisted counts -- the worker, the CLI,
+    // the dashboard, and the comment header all share one filter
+    // contract via findingDigest.
+    //
+    // The two filters compose: a tenant with cfg.min_confidence: 0.6
+    // AND cfg.severity_threshold: 'medium' gets a digest that drops
+    // every low-confidence finding AND every nit/low finding, matching
+    // the aggregate() pipeline's surviving set exactly.
     const reviewDigest = findingDigest(aggregated.findings, {
       topCategories: 8,
       topAgents: 8,
       hotspots: true,
+      minConfidence: cfg.min_confidence,
+      severityThreshold: cfg.severity_threshold,
     });
 
     // Tick 15: WRITE-side persisted-drift counter. Compare the digest we
