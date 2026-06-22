@@ -324,12 +324,30 @@ export const WATCH_MIN_INTERVAL_MS = 250;
  * to assert on individually).
  */
 export type WatchConfigResult =
-  | { kind: 'ok'; serverUrl: string; intervalMs: number; maxPolls: number; format: 'text' | 'json'; onDrift: string | null; onDriftOnce: boolean }
+  | {
+      kind: 'ok';
+      serverUrl: string;
+      intervalMs: number;
+      maxPolls: number;
+      format: 'text' | 'json';
+      onDrift: string | null;
+      onDriftOnce: boolean;
+      /**
+       * Tick 18: --on-recover <cmd> hook. Fires when the watch loop
+       * transitions FROM a drift sample TO a clean (no-drift) sample.
+       * Complement of --on-drift; the two hooks compose so an
+       * operator can pair a "ping me when this drifts" with a
+       * matching "ping me when it recovers" without writing custom
+       * stateful glue.
+       */
+      onRecover: string | null;
+    }
   | { kind: 'missing-server'; message: string }
   | { kind: 'invalid-interval'; message: string }
   | { kind: 'invalid-max-polls'; message: string }
   | { kind: 'invalid-format'; message: string }
-  | { kind: 'invalid-on-drift'; message: string };
+  | { kind: 'invalid-on-drift'; message: string }
+  | { kind: 'invalid-on-recover'; message: string };
 
 /**
  * Pure / exported parser for watch-mode config. Centralised so the
@@ -362,6 +380,7 @@ export function parseWatchConfig(flags: {
   'on-drift'?: unknown;
   'on-drift-once'?: unknown;
   'on-drift-template'?: unknown;
+  'on-recover'?: unknown;
 }): WatchConfigResult {
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
   if (serverRaw.length === 0) {
@@ -484,7 +503,48 @@ export function parseWatchConfig(flags: {
   // rather than "ping me every 5s while it stays drifty".
   const onDriftOnce = flags['on-drift-once'] === true || flags['on-drift-once'] === 'true';
 
-  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, onDrift, onDriftOnce };
+  // Tick 18: --on-recover <cmd> hook. Fires on the transition from
+  // a drift sample to a clean sample (recover edge). Complement
+  // of --on-drift; the two compose so an operator can wire
+  // "page me on drift" and "clear the page on recovery" with two
+  // independent hooks.
+  //
+  // Validation mirrors --on-drift: a non-string value rejects, an
+  // empty trimmed string rejects (typo guard). The hook receives
+  // the same JSONL payload --on-drift uses, so a single jq /
+  // webhook pipeline can consume both. We DO NOT add a sibling
+  // --on-recover-once flag in this slice -- the recover edge is
+  // already deduped by the "fire only on the drift->clean
+  // transition" contract (back-to-back clean samples don't
+  // re-fire).
+  let onRecover: string | null = null;
+  if (flags['on-recover'] !== undefined) {
+    if (typeof flags['on-recover'] !== 'string') {
+      return {
+        kind: 'invalid-on-recover',
+        message: `--on-recover must be a command string; got ${typeof flags['on-recover']}`,
+      };
+    }
+    const trimmed = flags['on-recover'].trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid-on-recover',
+        message: `--on-recover requires a non-empty command (e.g. --on-recover 'curl -X POST https://...')`,
+      };
+    }
+    onRecover = trimmed;
+  }
+
+  return {
+    kind: 'ok',
+    serverUrl,
+    intervalMs,
+    maxPolls,
+    format,
+    onDrift,
+    onDriftOnce,
+    onRecover,
+  };
 }
 
 /**
@@ -696,6 +756,7 @@ export async function runReviewDriftWatch(
     'on-drift': args.flags['on-drift'],
     'on-drift-once': args.flags['on-drift-once'],
     'on-drift-template': args.flags['on-drift-template'],
+    'on-recover': args.flags['on-recover'],
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review drift: ${config.message}\n`);
@@ -730,6 +791,12 @@ export async function runReviewDriftWatch(
   // it so an "alert me when this finally drifts" workflow doesn't
   // get spammed on every poll while it stays drifty.
   let onDriftFiredOnce = false;
+  // Tick 18: --on-recover bookkeeping. Tracks whether the PREVIOUS
+  // sample was drifty so we can detect the drift->clean transition.
+  // We deliberately don't fire on the first clean sample if there
+  // was no preceding drift sample (i.e. the watch loop started
+  // clean) -- recover semantics require a drift to recover FROM.
+  let prevHadDrift = false;
   try {
     while (!stopped) {
       pollCount += 1;
@@ -847,6 +914,32 @@ export async function runReviewDriftWatch(
           }
         }
       }
+
+      // Tick 18: --on-recover hook. Fires on the drift->clean edge
+      // (i.e. this sample is clean AND the prior sample was drifty).
+      // The hook reuses the same exec / payload shape as --on-drift so
+      // a unified webhook consumer can branch on `drift.hasDrift`.
+      // Recover failures surface on stderr but don't abort -- same
+      // failure-tolerance contract as --on-drift.
+      if (config.onRecover !== null && !drift.hasDrift && prevHadDrift) {
+        const payload = JSON.stringify({
+          reviewId,
+          poll: pollCount,
+          persisted,
+          fresh,
+          drift,
+        });
+        const hookResult = await onDriftExecer(config.onRecover, payload);
+        if (hookResult.exitCode !== 0) {
+          process.stderr.write(
+            `clawreview review drift --watch: on-recover hook exited ${hookResult.exitCode ?? 'null'}` +
+              `${hookResult.stderr ? `: ${hookResult.stderr.trim()}` : ''}\n`,
+          );
+        }
+      }
+      // Update the edge-tracker AFTER both hooks ran so a within-poll
+      // restart can't accidentally skip the transition.
+      prevHadDrift = drift.hasDrift;
 
       // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
       // interval between the only sample and the exit.

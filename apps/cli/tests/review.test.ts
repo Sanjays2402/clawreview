@@ -1008,4 +1008,232 @@ describe('parseWatchConfig --on-drift-template (tick 17)', () => {
   });
 });
 
+describe('clawreview review drift --watch --on-recover (tick 18)', () => {
+  /**
+   * Like `runWatchWithHook` but the injected exec stub serves BOTH
+   * --on-drift and --on-recover so a single test can assert on the
+   * recover-edge contract: the hook fires on the FIRST clean sample
+   * after a drift sample, not on subsequent clean samples.
+   *
+   * Each entry in `bodies` is fed sequentially to the fake fetcher;
+   * the test asserts on the order of `cmd` (the hook command) so
+   * --on-drift and --on-recover can be distinguished even though
+   * both arms route through the same execer.
+   */
+  async function runWatchWithRecoverHook(
+    reviewId: string,
+    flags: Record<string, string | boolean>,
+    bodies: Array<string>,
+    hookOutcome: { exitCode: number | null; stderr: string } = { exitCode: 0, stderr: '' },
+  ): Promise<RunResult & { hookCalls: Array<{ cmd: string; payload: string }> }> {
+    const { runReviewDriftWatch } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const hookCalls: Array<{ cmd: string; payload: string }> = [];
+    let bodyIdx = 0;
+    const fetcher = async (_url: string) => {
+      const entry = bodies[bodyIdx] ?? bodies[bodies.length - 1]!;
+      bodyIdx += 1;
+      return { ok: true, status: 200, text: async () => entry };
+    };
+    const sleeper = async () => undefined;
+    const onDriftExecer = async (cmd: string, payload: string) => {
+      hookCalls.push({ cmd, payload });
+      return hookOutcome;
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewDriftWatch(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: { 'no-color': true, watch: reviewId, ...flags },
+        },
+        reviewId,
+        { fetcher, sleeper, onDriftExecer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, hookCalls };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeDriftedBody() {
+    const dummy = findingDigest([{
+      agent: 'security', category: 'security', severity: 'high', title: 'X',
+      rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [],
+    } as never], { topAgents: 8, topCategories: 8, hotspots: true });
+    return JSON.stringify({
+      reviewId: 'abc', persisted: dummy, fresh: dummy,
+      drift: { totalDelta: 1, bySeverityDelta: { critical: 0, high: 1, medium: 0, low: 0, nit: 0 },
+        byAgentDelta: { security: 1 }, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {}, hasDrift: true },
+    });
+  }
+
+  function makeCleanBody() {
+    const dummy = findingDigest([], { hotspots: false });
+    return JSON.stringify({
+      reviewId: 'abc', persisted: dummy, fresh: dummy,
+      drift: { totalDelta: 0, bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 },
+        byAgentDelta: {}, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {}, hasDrift: false },
+    });
+  }
+
+  it('fires --on-recover on the drift->clean transition', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    // Sequence: drift, clean -- one recover edge at poll 2.
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+      'on-recover': 'echo cleared',
+    }, [drift, clean]);
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(1);
+    expect(r.hookCalls[0]!.cmd).toBe('echo cleared');
+    // The fire happens on poll 2 (the FIRST clean sample after drift).
+    const parsed = JSON.parse(r.hookCalls[0]!.payload);
+    expect(parsed.poll).toBe(2);
+    expect(parsed.drift.hasDrift).toBe(false);
+  });
+
+  it('does NOT fire --on-recover on the first clean sample if there was no prior drift', async () => {
+    const clean = makeCleanBody();
+    // Sequence: clean, clean -- no drift at any point, so recover
+    // semantics never apply.
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+      'on-recover': 'echo cleared',
+    }, [clean, clean]);
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('does NOT re-fire --on-recover on subsequent clean samples (one fire per drift->clean edge)', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    // Sequence: drift, clean, clean -- one recover edge at poll 2.
+    // Poll 3 is also clean but the edge already fired; no re-fire.
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '3',
+      format: 'json',
+      'on-recover': 'echo cleared',
+    }, [drift, clean, clean]);
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(1);
+    const parsed = JSON.parse(r.hookCalls[0]!.payload);
+    expect(parsed.poll).toBe(2);
+  });
+
+  it('re-fires --on-recover on each drift->clean transition (flapping)', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    // Sequence: drift, clean, drift, clean -- TWO recover edges
+    // (poll 2 and poll 4). Both should fire because each is an
+    // independent drift->clean transition.
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '4',
+      format: 'json',
+      'on-recover': 'echo cleared',
+    }, [drift, clean, drift, clean]);
+    expect(r.exitCode).toBe(0); // final sample is clean
+    expect(r.hookCalls).toHaveLength(2);
+    expect(JSON.parse(r.hookCalls[0]!.payload).poll).toBe(2);
+    expect(JSON.parse(r.hookCalls[1]!.payload).poll).toBe(4);
+  });
+
+  it('--on-drift + --on-recover compose: both hooks fire on their respective edges', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    // Sequence: clean, drift, clean -- one --on-drift fire at
+    // poll 2, one --on-recover fire at poll 3.
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '3',
+      format: 'json',
+      'on-drift': 'echo drifted',
+      'on-recover': 'echo cleared',
+    }, [clean, drift, clean]);
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(2);
+    // Order is: drift hook at poll 2, recover hook at poll 3.
+    expect(r.hookCalls[0]!.cmd).toBe('echo drifted');
+    expect(JSON.parse(r.hookCalls[0]!.payload).poll).toBe(2);
+    expect(r.hookCalls[1]!.cmd).toBe('echo cleared');
+    expect(JSON.parse(r.hookCalls[1]!.payload).poll).toBe(3);
+  });
+
+  it('surfaces --on-recover hook failure on stderr but keeps polling', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    const r = await runWatchWithRecoverHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+      'on-recover': 'false',
+    }, [drift, clean], { exitCode: 1, stderr: 'boom' });
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(1);
+    // Stderr surfaces the failure inline so an operator sees it.
+    expect(r.stderr).toContain('on-recover hook exited 1');
+    expect(r.stderr).toContain('boom');
+  });
+
+  it('rejects an empty --on-recover (typo guard)', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://test.local',
+      'on-recover': '   ',
+    });
+    expect(r.kind).toBe('invalid-on-recover');
+  });
+
+  it('parseWatchConfig accepts a non-empty --on-recover and exposes it on `ok`', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://test.local',
+      'on-recover': 'curl -X POST https://alerts/cleared',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.onRecover).toBe('curl -X POST https://alerts/cleared');
+      // Defaults stay intact.
+      expect(r.onDrift).toBeNull();
+    }
+  });
+
+  it('parseWatchConfig default onRecover is null when --on-recover absent', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({ server: 'https://test.local' });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.onRecover).toBeNull();
+    }
+  });
+});
+
 
