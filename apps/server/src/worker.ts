@@ -23,7 +23,7 @@ import {
 } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeReviewDigestPersistedDrift, observeSimilarityMerges } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeReviewDigestPersistedDrift, observeSimilarityMerges, deriveReviewDigestPersistedDriftKind, deriveReviewDigestPersistedDriftLogLevel } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -366,17 +366,32 @@ export async function startWorker(logger: Logger): Promise<void> {
     const priorDriftBaseline = priorDigest ?? findingDigest([], { hotspots: false });
     const persistedDrift = computeDigestDrift(priorDriftBaseline, reviewDigest);
     observeReviewDigestPersistedDrift(metrics, priorDigest, persistedDrift);
-    if (persistedDrift.hasDrift && priorDigest !== null) {
-      // Log structured for postmortem visibility. Only when a real
-      // prior existed AND counts changed -- a fresh first-run
-      // shouldn't pollute the log with "drift detected" noise.
-      log.info(
-        {
-          totalDelta: persistedDrift.totalDelta,
-          severityDelta: persistedDrift.bySeverityDelta,
-        },
-        'review digest changed between runs',
-      );
+    // Tick 16: pick the structured log level via the pure
+    // `deriveReviewDigestPersistedDriftLogLevel` predicate instead of
+    // hard-coding `log.info`. The `stale` kind now elevates to `warn`
+    // so an on-call's existing log-level alerts (e.g. a CloudWatch
+    // filter on `level >= 40`) picks up the event without needing the
+    // Prometheus pipeline. `unchanged` stays at `info` (useful for
+    // completion audits but not alert-worthy), and `fresh` emits no
+    // log line at all (first-run / legacy review: the counter already
+    // captures the volume; logging here would flood with no signal).
+    const persistedKind = deriveReviewDigestPersistedDriftKind(priorDigest, persistedDrift);
+    const logLevel = deriveReviewDigestPersistedDriftLogLevel(persistedKind);
+    if (logLevel !== 'none') {
+      const fields = {
+        kind: persistedKind,
+        totalDelta: persistedDrift.totalDelta,
+        severityDelta: persistedDrift.bySeverityDelta,
+        hasDrift: persistedDrift.hasDrift,
+      };
+      const message = persistedKind === 'stale'
+        ? 'review digest changed between runs'
+        : 'review digest unchanged between runs';
+      if (logLevel === 'warn') {
+        log.warn(fields, message);
+      } else {
+        log.info(fields, message);
+      }
     }
 
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {

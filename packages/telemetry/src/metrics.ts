@@ -1096,6 +1096,53 @@ export function deriveReviewDigestPersistedDriftKind(
 }
 
 /**
+ * Pure predicate: which structured log level should the worker emit
+ * for a write-side persisted-drift outcome?
+ *
+ * Pairs with `observeReviewDigestPersistedDrift` (the Prometheus
+ * counter): the counter answers "how often does each kind fire?",
+ * this predicate answers "should the worker also surface it in
+ * structured logs, and at what level?".
+ *
+ * Today the worker hot path picks the level inline (`log.info` on
+ * every drift). Extracting the choice here gives:
+ *   - one test surface for the level contract (this file);
+ *   - the ability to elevate `stale` to `warn` without re-deriving
+ *     the kind inside the worker;
+ *   - a path for future audits (e.g. a CI hook that scrapes the
+ *     worker logs and counts warn-level drift events without
+ *     re-walking the metrics endpoint).
+ *
+ * Level semantics:
+ *   - `stale`     -> `warn`  -- the re-run produced different bucket
+ *                               counts than a real prior digest. An
+ *                               on-call's existing log-level alerts
+ *                               should fire here. Per the roadmap:
+ *                               "fires today via log.info; elevate
+ *                               to warn so existing alerting picks
+ *                               it up without the Prometheus pipe."
+ *   - `unchanged` -> `info`  -- steady-state; useful for completion
+ *                               audits but not alert-worthy.
+ *   - `fresh`     -> `none`  -- first run / legacy review (no prior
+ *                               digest existed). Logging on every
+ *                               first-run would flood logs without
+ *                               adding signal; the counter already
+ *                               captures the volume.
+ *
+ * Pure / exported so the test suite pins the contract; the worker
+ * imports and dispatches off the returned literal.
+ */
+export type ReviewDigestPersistedDriftLogLevel = 'warn' | 'info' | 'none';
+
+export function deriveReviewDigestPersistedDriftLogLevel(
+  kind: ReviewDigestPersistedDriftKind,
+): ReviewDigestPersistedDriftLogLevel {
+  if (kind === 'stale') return 'warn';
+  if (kind === 'unchanged') return 'info';
+  return 'none';
+}
+
+/**
  * Record one worker completion on the
  * `clawreview_review_digest_persisted_drift_total{kind}` counter.
  *

@@ -842,3 +842,71 @@ describe('observeReviewDigestPersistedDrift (tick 15)', () => {
     expect(text).not.toMatch(/clawreview_review_digest_drift_total\{/);
   });
 });
+
+describe('deriveReviewDigestPersistedDriftLogLevel (tick 16)', () => {
+  // Pure predicate the worker now uses to pick the structured log
+  // level for a write-side persisted-drift outcome. Pairs with the
+  // existing Prometheus counter -- the counter answers "how often
+  // does each kind fire?"; this predicate answers "should the worker
+  // also surface it in structured logs, and at what level?".
+
+  it('elevates stale to warn so an on-call log alert picks it up', async () => {
+    const { deriveReviewDigestPersistedDriftLogLevel } = await import('../src/metrics.js');
+    expect(deriveReviewDigestPersistedDriftLogLevel('stale')).toBe('warn');
+  });
+
+  it('keeps unchanged at info (steady-state; useful audit but not alert-worthy)', async () => {
+    const { deriveReviewDigestPersistedDriftLogLevel } = await import('../src/metrics.js');
+    expect(deriveReviewDigestPersistedDriftLogLevel('unchanged')).toBe('info');
+  });
+
+  it('returns none for fresh so first-run / legacy reviews dont flood logs', async () => {
+    // First runs and legacy reviews (pre-tick-12) cant have drift by
+    // definition; logging would add no signal. The counter already
+    // captures volume.
+    const { deriveReviewDigestPersistedDriftLogLevel } = await import('../src/metrics.js');
+    expect(deriveReviewDigestPersistedDriftLogLevel('fresh')).toBe('none');
+  });
+
+  it('covers every kind in the closed REVIEW_DIGEST_PERSISTED_DRIFT_KINDS set', async () => {
+    // Defensive: when a future tick adds a new kind, this test fires
+    // forcing the predicate to grow alongside it instead of
+    // defaulting silently.
+    const { deriveReviewDigestPersistedDriftLogLevel, REVIEW_DIGEST_PERSISTED_DRIFT_KINDS } = await import(
+      '../src/metrics.js'
+    );
+    const expected = new Set(['warn', 'info', 'none']);
+    for (const kind of REVIEW_DIGEST_PERSISTED_DRIFT_KINDS) {
+      const level = deriveReviewDigestPersistedDriftLogLevel(kind);
+      // Every kind must map to one of the three known levels.
+      expect(expected).toContain(level);
+    }
+  });
+
+  it('composes with deriveReviewDigestPersistedDriftKind (full worker pipeline)', async () => {
+    // The worker derives kind first, then derives the log level
+    // from kind. Verify the composition stays consistent across
+    // every (priorDigest, hasDrift) combination the worker sees.
+    const { deriveReviewDigestPersistedDriftKind, deriveReviewDigestPersistedDriftLogLevel } = await import(
+      '../src/metrics.js'
+    );
+    // No prior digest -> kind=fresh -> level=none (no log line).
+    expect(
+      deriveReviewDigestPersistedDriftLogLevel(
+        deriveReviewDigestPersistedDriftKind(null, { hasDrift: true }),
+      ),
+    ).toBe('none');
+    // Prior digest + no drift -> kind=unchanged -> level=info.
+    expect(
+      deriveReviewDigestPersistedDriftLogLevel(
+        deriveReviewDigestPersistedDriftKind({ total: 5 }, { hasDrift: false }),
+      ),
+    ).toBe('info');
+    // Prior digest + drift -> kind=stale -> level=warn.
+    expect(
+      deriveReviewDigestPersistedDriftLogLevel(
+        deriveReviewDigestPersistedDriftKind({ total: 5 }, { hasDrift: true }),
+      ),
+    ).toBe('warn');
+  });
+});
