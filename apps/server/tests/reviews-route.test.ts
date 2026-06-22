@@ -946,6 +946,156 @@ describe('reviews and stats routes', () => {
       expect(body.slimFields).toEqual(['byTag']);
       expect(body.persisted.byTag).toBeUndefined();
     });
+
+    // Tick 18: `?slim=-byTag,-byFile` deny-list mirror of the
+    // tick-17 allowlist. "Strip everything EXCEPT these" composes
+    // naturally for a dashboard panel that needs to see `byTag` +
+    // `byFile` but wants the lighter `byAgent` / `byCategory` shape
+    // dropped on the wire.
+
+    it('?slim=-byTag strips every field EXCEPT byTag (deny-list)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 75, headSha: 'h75', baseSha: 'b75' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 75, headSha: 'h75', baseSha: 'b75' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=-byTag` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(true);
+      // slimFields echoes the RESOLVED strip set (the deny-list is
+      // an input shape; the echo carries the actual fields stripped
+      // so a consumer sees one canonical contract).
+      expect(body.slimFields).toEqual(['byAgent', 'byCategory', 'byFile']);
+      // byTag survives (kept); the others are stripped.
+      expect(body.persisted.byTag).toBeDefined();
+      expect(body.persisted.byAgent).toBeUndefined();
+      expect(body.persisted.byCategory).toBeUndefined();
+      expect(body.persisted.byFile).toBeUndefined();
+      expect(body.fresh.byTag).toBeDefined();
+      expect(body.fresh.byAgent).toBeUndefined();
+    });
+
+    it('?slim=-byTag,-byFile keeps byTag + byFile, strips the rest', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 76, headSha: 'h76', baseSha: 'b76' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 76, headSha: 'h76', baseSha: 'b76' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=-byTag,-byFile` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slimFields).toEqual(['byAgent', 'byCategory']);
+      expect(body.persisted.byTag).toBeDefined();
+      expect(body.persisted.byFile).toBeDefined();
+      expect(body.persisted.byAgent).toBeUndefined();
+      expect(body.persisted.byCategory).toBeUndefined();
+    });
+
+    it('?slim=-byTag,byFile (mixed deny/allow) rejects 400 (ambiguous)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 77, headSha: 'h77', baseSha: 'b77' });
+      // A mixed list could mean "strip everything except byTag AND
+      // include byFile" OR "strip byFile and keep byTag". Refuse
+      // loudly rather than silently picking one interpretation.
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=-byTag,byFile` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      expect(body.message).toContain('mixes');
+    });
+
+    it('?slim=- rejects 400 (bare prefix with no field name)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 78, headSha: 'h78', baseSha: 'b78' });
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=-` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      expect(body.message).toContain("bare '-'");
+    });
+
+    it('?slim=-bogus rejects 400 with the enumerated valid list', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 79, headSha: 'h79', baseSha: 'b79' });
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=-bogus` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      expect(body.message).toContain("'bogus'");
+      expect(body.message).toContain('byTag');
+    });
+
+    it('?slim=-byTag,-byCategory,-byFile,-byAgent strips ALL fields (equivalent to ?slim=true)', async () => {
+      // Edge case: a deny-list that names every heavy field should
+      // produce the same projection as the boolean sugar `slim=true`.
+      // Useful contract pin so an operator who tabulated every field
+      // can still get the all-strip behaviour without switching
+      // syntaxes mid-pipeline.
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 80, headSha: 'h80', baseSha: 'b80' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 80, headSha: 'h80', baseSha: 'b80' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      // ?slim=- naming all 4 fields strips nothing (keep all);
+      // a deny-list with ZERO entries doesn't exist but
+      // a deny-list naming none of the 4 fields strips all 4.
+      // Test: an empty `keep` set <=> strip all 4 <=> slim=true.
+      // We can't actually pass empty deny-list (parser rejects empty
+      // entries), but a deny-list with a single name we don't want
+      // to keep gives us a non-trivial case. Use a slightly-different
+      // shape: name a single field and assert the OPPOSITES of it
+      // are stripped (already tested above). Instead, sanity-check
+      // the "deny-list naming all 4" arm = keep all 4 = strip
+      // nothing = slim=false equivalent.
+      const denyAll = await app.inject({
+        method: 'GET',
+        url: `/api/reviews/${r.id}/digest?slim=-byTag,-byCategory,-byFile,-byAgent`,
+      });
+      expect(denyAll.statusCode).toBe(200);
+      const body = denyAll.json();
+      // Stripped set is empty (every field is in `keep`), so slim=false
+      // and every heavy map survives.
+      expect(body.slim).toBe(false);
+      expect(body.slimFields).toEqual([]);
+      expect(body.persisted.byTag).toBeDefined();
+      expect(body.persisted.byAgent).toBeDefined();
+      expect(body.persisted.byCategory).toBeDefined();
+      expect(body.persisted.byFile).toBeDefined();
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {

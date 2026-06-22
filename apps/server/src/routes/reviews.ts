@@ -607,11 +607,20 @@ export type SlimDirective =
  *   - 'true', '1'                                          -> 'all'
  *   - 'false', '0'                                         -> 'none'
  *   - comma-separated subset of SLIM_FIELDS                -> 'fields'
+ *                                                            (tick 17 allowlist)
+ *   - comma-separated `-<field>` entries                   -> 'fields'
+ *                                                            (tick 18 deny-list: strip
+ *                                                            every field EXCEPT the
+ *                                                            named ones)
  *
  * The boolean sugar (`true`/`1`/`false`/`0`) stays the recommended
  * shape for "strip everything" / "strip nothing" so existing
  * dashboards / curl pipelines keep working unchanged. The fields-list
- * shape is the new tick-17 surface for partial stripping.
+ * shape is the new tick-17 surface for partial stripping; the
+ * minus-prefix variant (tick 18) is the deny-list complement so a
+ * caller can say "strip everything EXCEPT these heavy maps I still
+ * need" -- mirrors `presets diff --only-fields` (allowlist) vs
+ * `--exclude-fields` (deny-list) on the CLI surface.
  *
  * Validation rules on the fields-list arm:
  *   - case-insensitive matching against SLIM_FIELDS (we accept
@@ -625,6 +634,17 @@ export type SlimDirective =
  *     it's almost always a forgotten name and silently widening
  *     the projection would mask the typo.
  *   - whitespace around names is trimmed.
+ *
+ * Validation rules on the minus-prefix deny-list arm (tick 18):
+ *   - ALL entries must carry the `-` prefix; a mixed list
+ *     (`-byTag,byFile`) rejects because the resolution is
+ *     ambiguous -- does the operator mean "everything except byTag,
+ *     and ALSO include byFile" or "strip byFile and KEEP byTag"?
+ *     Refuse loudly so a typo doesn't silently widen / narrow the
+ *     projection.
+ *   - Bare `-` (with no field name after the prefix) rejects.
+ *   - Otherwise the resolved Set is `SLIM_FIELDS \ <named>` --
+ *     i.e. strip every heavy map that wasn't named after the prefix.
  *
  * Pure (no mutation, no side effects).
  */
@@ -648,11 +668,53 @@ export function parseSlimDirective(raw: string | undefined): SlimDirective {
       message: `?slim has an empty entry (likely a stray comma); got '${trimmed}'`,
     };
   }
+  // Tick 18: detect minus-prefix entries. If ANY entry carries the
+  // prefix, we're in deny-list mode; if NONE do, we're in the legacy
+  // allowlist arm; a mix rejects (the resolution would be ambiguous).
+  const hasMinusPrefix = parts.some((p) => p.startsWith('-'));
+  const allMinusPrefix = parts.every((p) => p.startsWith('-'));
+  if (hasMinusPrefix && !allMinusPrefix) {
+    return {
+      kind: 'invalid',
+      message:
+        `?slim mixes deny-list (-<field>) and allowlist (<field>) entries; ` +
+        `use one form or the other (got '${trimmed}')`,
+    };
+  }
   // Case-insensitive field lookup. Build an index of canonical names
   // so the resolved Set always carries the camelCase form regardless
   // of how the URL was capitalised.
   const canonicalByLower = new Map<string, SlimField>();
   for (const f of SLIM_FIELDS) canonicalByLower.set(f.toLowerCase(), f);
+  if (allMinusPrefix) {
+    // Deny-list arm: collect named fields (strip the prefix first),
+    // then resolve the strip set as SLIM_FIELDS minus those.
+    const keep = new Set<SlimField>();
+    for (const part of parts) {
+      const after = part.slice(1).trim();
+      if (after.length === 0) {
+        return {
+          kind: 'invalid',
+          message:
+            `?slim has a bare '-' (missing field name after the prefix); got '${trimmed}'`,
+        };
+      }
+      const canonical = canonicalByLower.get(after.toLowerCase());
+      if (!canonical) {
+        return {
+          kind: 'invalid',
+          message: `?slim has unknown field '${after}'; valid: ${SLIM_FIELDS.join(', ')}`,
+        };
+      }
+      keep.add(canonical);
+    }
+    const fields = new Set<SlimField>();
+    for (const f of SLIM_FIELDS) {
+      if (!keep.has(f)) fields.add(f);
+    }
+    return { kind: 'fields', fields };
+  }
+  // Allowlist arm (tick 17).
   const fields = new Set<SlimField>();
   for (const part of parts) {
     const canonical = canonicalByLower.get(part.toLowerCase());
