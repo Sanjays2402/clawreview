@@ -446,6 +446,9 @@ describe('clawreview review drift --watch (tick 15)', () => {
       expect(ok.intervalMs).toBe(WATCH_DEFAULT_INTERVAL_MS);
       expect(ok.maxPolls).toBe(0);
       expect(ok.format).toBe('text');
+      // Tick 16: new defaults for the on-drift hook fields.
+      expect(ok.onDrift).toBeNull();
+      expect(ok.onDriftOnce).toBe(false);
     }
 
     // Missing server.
@@ -458,5 +461,210 @@ describe('clawreview review drift --watch (tick 15)', () => {
     expect(parseWatchConfig({ server: 'x', 'max-polls': '-1' }).kind).toBe('invalid-max-polls');
     expect(parseWatchConfig({ server: 'x', 'max-polls': '1.5' }).kind).toBe('invalid-max-polls');
     expect(parseWatchConfig({ server: 'x', format: 'sarif' }).kind).toBe('invalid-format');
+  });
+});
+
+describe('clawreview review drift --watch --on-drift (tick 16)', () => {
+  /**
+   * Like `runWatch` but also injects an on-drift hook executor stub
+   * that records (cmd, payload) pairs so a test can assert on the
+   * hook's invocation pattern without spawning a real subprocess.
+   */
+  async function runWatchWithHook(
+    reviewId: string,
+    flags: Record<string, string | boolean>,
+    bodies: Array<string | { ok: boolean; status: number; body: string }>,
+    hookOutcome: { exitCode: number | null; stderr: string } = { exitCode: 0, stderr: '' },
+  ): Promise<RunResult & { fetchCalls: string[]; hookCalls: Array<{ cmd: string; payload: string }> }> {
+    const { runReviewDriftWatch } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetchCalls: string[] = [];
+    const hookCalls: Array<{ cmd: string; payload: string }> = [];
+    let bodyIdx = 0;
+    const fetcher = async (url: string) => {
+      fetchCalls.push(url);
+      const entry = bodies[bodyIdx] ?? bodies[bodies.length - 1]!;
+      bodyIdx += 1;
+      if (typeof entry === 'string') {
+        return { ok: true, status: 200, text: async () => entry };
+      }
+      return { ok: entry.ok, status: entry.status, text: async () => entry.body };
+    };
+    const sleeper = async () => undefined;
+    const onDriftExecer = async (cmd: string, payload: string) => {
+      hookCalls.push({ cmd, payload });
+      return hookOutcome;
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewDriftWatch(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: { 'no-color': true, watch: reviewId, ...flags },
+        },
+        reviewId,
+        { fetcher, sleeper, onDriftExecer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, fetchCalls, hookCalls };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeDriftedBody() {
+    const dummy = findingDigest([{
+      agent: 'security', category: 'security', severity: 'high', title: 'X',
+      rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [],
+    } as never], { topAgents: 8, topCategories: 8, hotspots: true });
+    return JSON.stringify({
+      reviewId: 'abc', persisted: dummy, fresh: dummy,
+      drift: { totalDelta: 1, bySeverityDelta: { critical: 0, high: 1, medium: 0, low: 0, nit: 0 },
+        byAgentDelta: { security: 1 }, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {}, hasDrift: true },
+    });
+  }
+
+  function makeCleanBody() {
+    const dummy = findingDigest([], { hotspots: false });
+    return JSON.stringify({
+      reviewId: 'abc', persisted: dummy, fresh: dummy,
+      drift: { totalDelta: 0, bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 },
+        byAgentDelta: {}, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {}, hasDrift: false },
+    });
+  }
+
+  it('fires the hook on every drift sample by default', async () => {
+    const drift = makeDriftedBody();
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '3',
+      format: 'json',
+      'on-drift': 'echo hi',
+    }, [drift, drift, drift]);
+    expect(r.exitCode).toBe(3);
+    expect(r.hookCalls).toHaveLength(3);
+    expect(r.hookCalls[0]!.cmd).toBe('echo hi');
+    // Payload is the same JSONL shape the --format json output emits.
+    const parsed = JSON.parse(r.hookCalls[0]!.payload);
+    expect(parsed.reviewId).toBe('abc');
+    expect(parsed.poll).toBe(1);
+    expect(parsed.drift.hasDrift).toBe(true);
+  });
+
+  it('does NOT fire the hook on no-drift samples', async () => {
+    const clean = makeCleanBody();
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+      'on-drift': 'curl -X POST https://alerts',
+    }, [clean, clean]);
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('--on-drift-once fires only on the first drift sample', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    // Sequence: drift, drift, clean, drift -- only the first drift
+    // should fire the hook even though three samples drifted.
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '4',
+      format: 'json',
+      'on-drift': 'echo alert',
+      'on-drift-once': true,
+    }, [drift, drift, clean, drift]);
+    expect(r.exitCode).toBe(3); // final sample drifted
+    expect(r.hookCalls).toHaveLength(1);
+    expect(r.hookCalls[0]!.cmd).toBe('echo alert');
+    // The first fire is on poll 1 (the first drift sample).
+    const parsed = JSON.parse(r.hookCalls[0]!.payload);
+    expect(parsed.poll).toBe(1);
+  });
+
+  it('--on-drift-once still fires once even if the first sample is clean', async () => {
+    const drift = makeDriftedBody();
+    const clean = makeCleanBody();
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '3',
+      format: 'json',
+      'on-drift': 'echo first-drift',
+      'on-drift-once': true,
+    }, [clean, drift, drift]);
+    expect(r.exitCode).toBe(3);
+    expect(r.hookCalls).toHaveLength(1);
+    // The fire is on poll 2 (the FIRST drift sample, not poll 1 which was clean).
+    const parsed = JSON.parse(r.hookCalls[0]!.payload);
+    expect(parsed.poll).toBe(2);
+  });
+
+  it('surfaces hook failure on stderr but keeps polling', async () => {
+    const drift = makeDriftedBody();
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+      'on-drift': 'false',
+    }, [drift, drift], { exitCode: 1, stderr: 'boom' });
+    // Watch loop still completes both polls -- hook failures don't
+    // abort the loop (the polls themselves are still useful).
+    expect(r.exitCode).toBe(3);
+    expect(r.hookCalls).toHaveLength(2);
+    // Stderr surfaces both failures inline so an operator sees them
+    // rather than discovering hours later that no alerts went out.
+    expect(r.stderr).toContain('on-drift hook exited 1');
+    expect(r.stderr).toContain('boom');
+  });
+
+  it('rejects an empty --on-drift (typo guard)', async () => {
+    const r = await runWatchWithHook('abc', {
+      server: 'https://test.local',
+      'on-drift': '   ',
+    }, []);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--on-drift');
+    // Never tried to fetch -- failed in config parse.
+    expect(r.fetchCalls).toEqual([]);
+  });
+
+  it('parseWatchConfig surfaces invalid-on-drift sentinel for whitespace', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({ server: 'https://test.local', 'on-drift': '   ' });
+    expect(r.kind).toBe('invalid-on-drift');
+  });
+
+  it('parseWatchConfig accepts a non-empty --on-drift and sets onDriftOnce default false', async () => {
+    const { parseWatchConfig } = await import('../src/commands/review.js');
+    const r = parseWatchConfig({
+      server: 'https://test.local',
+      'on-drift': 'curl https://x',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.onDrift).toBe('curl https://x');
+      expect(r.onDriftOnce).toBe(false);
+    }
   });
 });

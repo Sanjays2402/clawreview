@@ -320,11 +320,12 @@ export const WATCH_MIN_INTERVAL_MS = 250;
  * to assert on individually).
  */
 export type WatchConfigResult =
-  | { kind: 'ok'; serverUrl: string; intervalMs: number; maxPolls: number; format: 'text' | 'json' }
+  | { kind: 'ok'; serverUrl: string; intervalMs: number; maxPolls: number; format: 'text' | 'json'; onDrift: string | null; onDriftOnce: boolean }
   | { kind: 'missing-server'; message: string }
   | { kind: 'invalid-interval'; message: string }
   | { kind: 'invalid-max-polls'; message: string }
-  | { kind: 'invalid-format'; message: string };
+  | { kind: 'invalid-format'; message: string }
+  | { kind: 'invalid-on-drift'; message: string };
 
 /**
  * Pure / exported parser for watch-mode config. Centralised so the
@@ -335,12 +336,16 @@ export type WatchConfigResult =
  *   - max-polls: 0 (unlimited; matches the CI ergonomics "the loop
  *     stops when SIGINT or fatal error fires, not on a magic count")
  *   - format: 'text'
+ *   - on-drift: null (no hook fired)
+ *   - on-drift-once: false (hook fires on EVERY drift sample)
  *
  * Validation:
  *   - serverUrl is required; missing/empty -> 'missing-server' sentinel
  *   - intervalMs: must be a finite number >= WATCH_MIN_INTERVAL_MS
  *   - maxPolls: must be a non-negative integer (0 means unlimited)
  *   - format: 'text' | 'json'; anything else -> 'invalid-format'
+ *   - onDrift: optional non-empty command string; pure whitespace
+ *     rejects (a stray --on-drift= is almost certainly a typo)
  *
  * Server URL is normalised: trailing slashes stripped so callers can
  * compose `${serverUrl}/api/reviews/${id}/digest` without worrying.
@@ -350,6 +355,8 @@ export function parseWatchConfig(flags: {
   interval?: unknown;
   'max-polls'?: unknown;
   format?: unknown;
+  'on-drift'?: unknown;
+  'on-drift-once'?: unknown;
 }): WatchConfigResult {
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
   if (serverRaw.length === 0) {
@@ -400,7 +407,35 @@ export function parseWatchConfig(flags: {
     format = raw;
   }
 
-  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format };
+  // Tick 16: --on-drift <cmd> hook. When a poll surfaces drift,
+  // exec <cmd> with the drift report on stdin. A non-string value
+  // or a pure-whitespace string is treated as absent. An explicit
+  // empty string ('--on-drift=') is rejected as a typo so the
+  // operator gets immediate feedback.
+  let onDrift: string | null = null;
+  if (flags['on-drift'] !== undefined) {
+    if (typeof flags['on-drift'] !== 'string') {
+      return {
+        kind: 'invalid-on-drift',
+        message: `--on-drift must be a command string; got ${typeof flags['on-drift']}`,
+      };
+    }
+    const trimmed = flags['on-drift'].trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid-on-drift',
+        message: `--on-drift requires a non-empty command (e.g. --on-drift 'curl -X POST https://...')`,
+      };
+    }
+    onDrift = trimmed;
+  }
+  // --on-drift-once: boolean flag. When set, the hook fires only
+  // on the FIRST transition into drift (not on every subsequent
+  // drift sample). Useful for "ping me when this finally drifts"
+  // rather than "ping me every 5s while it stays drifty".
+  const onDriftOnce = flags['on-drift-once'] === true || flags['on-drift-once'] === 'true';
+
+  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, onDrift, onDriftOnce };
 }
 
 /**
@@ -428,6 +463,46 @@ const defaultWatchSleeper: WatchSleeper = (ms) =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Internal seam for the `--on-drift <cmd>` hook executor. Default
+ * shells out via `node:child_process` exec, piping the drift report
+ * JSON to stdin. Tests inject a stub that records invocations so the
+ * suite doesn't spawn real subprocesses.
+ *
+ * The executor returns the exit code (or null on signal exit) and
+ * any stderr text -- the caller logs both at debug visibility so a
+ * silent hook failure shows up in the watch banner.
+ */
+export type WatchOnDriftExecer = (
+  cmd: string,
+  payload: string,
+) => Promise<{ exitCode: number | null; stderr: string }>;
+
+const defaultWatchOnDriftExecer: WatchOnDriftExecer = async (cmd, payload) => {
+  // exec runs the cmd in a shell so an operator can pass a pipeline
+  // ('jq .totalDelta | curl -X POST ...'). Pipe the payload to stdin
+  // for the hook to read.
+  const { exec } = await import('node:child_process');
+  return new Promise((resolve) => {
+    const child = exec(cmd, (err, _stdout, stderr) => {
+      if (err) {
+        // exec's err.code carries the exit status; fall back to null
+        // for signal exits where code is undefined.
+        const exitCode = typeof (err as NodeJS.ErrnoException).code === 'number'
+          ? Number((err as NodeJS.ErrnoException).code)
+          : null;
+        resolve({ exitCode, stderr: stderr ? String(stderr) : String(err.message) });
+        return;
+      }
+      resolve({ exitCode: 0, stderr: stderr ? String(stderr) : '' });
+    });
+    // Pipe the drift JSON into the child's stdin then close so the
+    // hook sees EOF and can exit.
+    child.stdin?.write(payload);
+    child.stdin?.end();
+  });
+};
+
+/**
  * Watch-mode drift command. Polls `/api/reviews/<id>/digest` on a
  * configurable interval and re-renders the drift banner per sample.
  *
@@ -449,13 +524,15 @@ const defaultWatchSleeper: WatchSleeper = (ms) =>
 export async function runReviewDriftWatch(
   args: ParsedArgs,
   reviewId: string,
-  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper },
+  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper; onDriftExecer?: WatchOnDriftExecer },
 ): Promise<void> {
   const config = parseWatchConfig({
     server: args.flags.server,
     interval: args.flags.interval,
     'max-polls': args.flags['max-polls'],
     format: args.flags.format,
+    'on-drift': args.flags['on-drift'],
+    'on-drift-once': args.flags['on-drift-once'],
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review drift: ${config.message}\n`);
@@ -467,6 +544,7 @@ export async function runReviewDriftWatch(
 
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
   const sleeper = injected?.sleeper ?? defaultWatchSleeper;
+  const onDriftExecer = injected?.onDriftExecer ?? defaultWatchOnDriftExecer;
   const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(reviewId)}/digest`;
 
   // SIGINT handling: flip a flag, finish the current iteration, exit
@@ -483,6 +561,11 @@ export async function runReviewDriftWatch(
   // the latest snapshot (single-shot's contract carried up to watch).
   let lastHasDrift = false;
   let pollCount = 0;
+  // Tick 16: --on-drift bookkeeping. `firedOnce` flips true the first
+  // time the hook fires; --on-drift-once gates subsequent fires off
+  // it so an "alert me when this finally drifts" workflow doesn't
+  // get spammed on every poll while it stays drifty.
+  let onDriftFiredOnce = false;
   try {
     while (!stopped) {
       pollCount += 1;
@@ -552,6 +635,38 @@ export async function runReviewDriftWatch(
           `${kleur.gray(`--- poll ${pollCount} at ${new Date().toISOString()} ---`)}\n`,
         );
         renderDriftText(reviewId, persisted, fresh, drift);
+      }
+
+      // Tick 16: --on-drift hook. Fires on drift samples; suppressed
+      // when --on-drift-once is set AND the hook has already fired
+      // once during this watch session. The hook receives the same
+      // JSONL shape as `--format json` on stdin so a single jq /
+      // curl / Slack-webhook pipeline can consume both the watch
+      // output and the hook payload identically.
+      if (config.onDrift !== null && drift.hasDrift) {
+        const shouldFire = !config.onDriftOnce || !onDriftFiredOnce;
+        if (shouldFire) {
+          const payload = JSON.stringify({
+            reviewId,
+            poll: pollCount,
+            persisted,
+            fresh,
+            drift,
+          });
+          const hookResult = await onDriftExecer(config.onDrift, payload);
+          onDriftFiredOnce = true;
+          if (hookResult.exitCode !== 0) {
+            // Surface a hook failure to stderr so an operator sees
+            // it inline rather than discovering hours later that no
+            // alerts went out. We don't abort the watch loop on a
+            // hook failure -- the polls are still useful even if
+            // the side-channel notification didn't land.
+            process.stderr.write(
+              `clawreview review drift --watch: on-drift hook exited ${hookResult.exitCode ?? 'null'}` +
+                `${hookResult.stderr ? `: ${hookResult.stderr.trim()}` : ''}\n`,
+            );
+          }
+        }
       }
 
       // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
