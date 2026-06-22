@@ -2646,6 +2646,8 @@ describe('parseSinceRange (tick 16)', () => {
     expect(r.base).toBe('main');
     expect(r.target).toBe('HEAD');
     expect(r.raw).toBe('main..HEAD');
+    // Tick 17: range discriminator pinned on the two-dot arm.
+    expect(r.range).toBe('two-dot');
   });
 
   it('trims whitespace around both refs and the whole range', async () => {
@@ -2657,6 +2659,7 @@ describe('parseSinceRange (tick 16)', () => {
     expect(r.target).toBe('v1.3.0');
     // raw echoes the trimmed range so the JSON/YAML/text header is clean.
     expect(r.raw).toBe('v1.2.3 .. v1.3.0');
+    expect(r.range).toBe('two-dot');
   });
 
   it('rejects an empty base ref with a hint', async () => {
@@ -2677,12 +2680,44 @@ describe('parseSinceRange (tick 16)', () => {
     expect(r.message).toContain('--since-base');
   });
 
-  it('rejects triple-dot syntax explicitly', async () => {
+  it('parses triple-dot syntax as a symmetric-diff range (tick 17)', async () => {
     const { parseSinceRange } = await import('../src/commands/presets.js');
-    const r = parseSinceRange('main...HEAD');
+    const r = parseSinceRange('main...feature');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('main');
+    expect(r.target).toBe('feature');
+    // Range discriminator: triple-dot signals the caller should
+    // resolve base via git merge-base before loading the chain.
+    expect(r.range).toBe('triple-dot');
+  });
+
+  it('triple-dot trims whitespace around both refs (tick 17)', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('  main ... feature/x  ');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('main');
+    expect(r.target).toBe('feature/x');
+    expect(r.range).toBe('triple-dot');
+  });
+
+  it('triple-dot rejects an empty base ref with the same hint (tick 17)', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('...feature');
     expect(r.kind).toBe('invalid');
     if (r.kind !== 'invalid') return;
-    expect(r.message).toContain('triple-dot');
+    expect(r.message).toContain('base ref');
+    expect(r.message).toContain('--since-target');
+  });
+
+  it('triple-dot rejects an empty target ref (tick 17)', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main...');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('target ref');
+    expect(r.message).toContain('--since-base');
   });
 
   it('rejects multiple `..` separators', async () => {
@@ -2857,5 +2892,162 @@ describe('clawreview presets diff --since-range (tick 16)', () => {
     expect(text.exitCode).toBe(0);
     expect(text.stdout).toContain('since-range:');
     expect(text.stdout).toContain('HEAD..HEAD');
+  });
+});
+
+describe('clawreview presets diff --since-range triple-dot (tick 17)', () => {
+  // Triple-dot symmetric-diff: chain A resolves to git merge-base of
+  // <a> and <b>, chain B stays at <b>. Useful for "what changed on
+  // this branch since it diverged from main?" comparisons where the
+  // operator wants to ignore main-side changes that happened after
+  // the branch split.
+
+  it('resolves triple-dot range using git merge-base for chain A', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // C0 (base on main): severity_threshold high.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    const c0 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Branch off into `feature` from c0.
+    await exec('git', ['checkout', '-q', '-b', 'feature'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: medium\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'feature change'], { cwd: dir });
+    // Return to main and make ANOTHER commit (so merge-base is c0,
+    // NOT current main). This is the whole point of triple-dot: we
+    // want to compare against the divergence point, not current main.
+    await exec('git', ['checkout', '-q', 'main'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: critical\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'main moves on'], { cwd: dir });
+    // Two-dot main..feature would compare current-main (critical) vs
+    // feature (medium). Triple-dot main...feature resolves chain A to
+    // merge-base = c0 (high), so the diff shows feature's actual
+    // change (high -> medium), NOT main's unrelated drift.
+    const tripleDot = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main...feature',
+    });
+    expect(tripleDot.exitCode).toBe(3);
+    const parsedTripleDot = JSON.parse(tripleDot.stdout);
+    // Chain-A side = high (from c0, the divergence point).
+    // Chain-B side = medium (from feature).
+    expect(parsedTripleDot.changed.severity_threshold).toEqual({ a: 'high', b: 'medium' });
+    expect(parsedTripleDot.sinceRange).toBe('main...feature');
+    // Compare against two-dot main..feature: it should show a
+    // DIFFERENT delta because chain A is current-main (critical).
+    const twoDot = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main..feature',
+    });
+    expect(twoDot.exitCode).toBe(3);
+    const parsedTwoDot = JSON.parse(twoDot.stdout);
+    expect(parsedTwoDot.changed.severity_threshold).toEqual({ a: 'critical', b: 'medium' });
+    // The two-dot and triple-dot deltas must NOT be byte-equal here
+    // -- that's the test that proves the resolver actually used
+    // merge-base for chain A on triple-dot.
+    expect(parsedTripleDot.changed.severity_threshold)
+      .not.toEqual(parsedTwoDot.changed.severity_threshold);
+    // Equivalence: triple-dot main...feature should match the explicit
+    // --since-base <c0> --since-target feature form byte-for-byte
+    // (the merge-base of main and feature IS c0, by construction).
+    const explicit = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-base': c0,
+      'since-target': 'feature',
+    });
+    const parsedExplicit = JSON.parse(explicit.stdout);
+    expect(parsedTripleDot.changed).toEqual(parsedExplicit.changed);
+  });
+
+  it('errors cleanly when refs have no common ancestor (disjoint histories)', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    // Create an orphan branch (no history shared with main).
+    await exec('git', ['checkout', '-q', '--orphan', 'orphan'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'orphan c0'], { cwd: dir });
+    // main and orphan share no commits -> merge-base fails -> we
+    // should get a clean error rather than silently falling back.
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main...orphan',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--since-range');
+    expect(r.stderr).toContain('merge-base');
+    expect(r.stderr).toContain('main');
+    expect(r.stderr).toContain('orphan');
+  });
+
+  it('echoes triple-dot sinceRange in JSON / YAML / text headers verbatim', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'c0'], { cwd: dir });
+    // YAML header: the operator should see the EXACT range string they typed.
+    const yaml = await runDiff(dir, ['web', 'web'], {
+      format: 'yaml',
+      'since-range': 'HEAD...HEAD',
+    });
+    expect(yaml.exitCode).toBe(0); // same ref both sides; no drift
+    expect(yaml.stdout).toContain('# since-range: HEAD...HEAD');
+    // Text header: same string in a different format.
+    const text = await runDiff(dir, ['web', 'web'], {
+      format: 'text',
+      'since-range': 'HEAD...HEAD',
+    });
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain('since-range:');
+    expect(text.stdout).toContain('HEAD...HEAD');
   });
 });

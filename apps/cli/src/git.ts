@@ -82,3 +82,41 @@ export async function gitBlameFile(
     return '';
   }
 }
+
+/**
+ * Run `git merge-base <a> <b>` and return the resolved sha.
+ *
+ * Used by `clawreview presets diff --since-range <a>...<b>` (tick 17)
+ * to resolve the LEFT side of the symmetric-difference form: when
+ * the operator wants "what changed on `b` since it diverged from
+ * `a`?", we anchor chain A at the merge-base instead of at `a`
+ * directly. Otherwise a long-lived feature branch comparison would
+ * pick up changes that landed on `main` after the branch split,
+ * which is the wrong frame for "changes on the branch".
+ *
+ * Returns `null` (rather than throwing) when:
+ *   - either ref doesn't exist in the repo;
+ *   - the two refs have no common ancestor (disjoint histories);
+ *   - git is not installed / not on PATH.
+ *
+ * The caller decides what to do on null -- the presets diff command
+ * surfaces it as a clean error message naming both refs so the
+ * operator can correct the input.
+ */
+export async function gitMergeBase(
+  a: string,
+  b: string,
+  cwd: string,
+): Promise<string | null> {
+  try {
+    const { stdout } = await exec(
+      'git',
+      ['merge-base', a, b],
+      { cwd, maxBuffer: 1024 * 1024 },
+    );
+    const sha = stdout.trim();
+    return sha.length > 0 ? sha : null;
+  } catch {
+    return null;
+  }
+}

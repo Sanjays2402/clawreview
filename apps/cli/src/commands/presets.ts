@@ -14,6 +14,7 @@ import {
 
 import type { ParsedArgs } from '../args.js';
 import { loadLocalPresets, loadLocalPresetsAtRef } from '../config.js';
+import { gitMergeBase } from '../git.js';
 
 /**
  * `clawreview presets list [--root <dir>] [--format text|json]`
@@ -854,11 +855,43 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     process.exitCode = 2;
     return;
   }
+  // Tick 17: triple-dot range form (`a...b`) resolves chain A to the
+  // merge-base of `a` and `b`. Done HERE so the downstream code that
+  // computes refForA / refForB sees the already-resolved sha. Falls
+  // through to the standard refForA pipeline below.
+  //
+  // We carry the merge-base outcome in `sinceRangeResolvedBase` (null
+  // when the range is two-dot or absent; the resolved sha when the
+  // range is triple-dot AND `git merge-base` succeeded). A merge-base
+  // failure aborts with a clear "no common ancestor" error so the
+  // operator can fix the input -- silently falling back to `a` would
+  // change the answer in a confusing way.
+  let sinceRangeResolvedBase: string | null = null;
+  if (sinceRangeParsed.kind === 'ok' && sinceRangeParsed.range === 'triple-dot') {
+    const mergeBase = await gitMergeBase(sinceRangeParsed.base, sinceRangeParsed.target, root);
+    if (mergeBase === null) {
+      process.stderr.write(
+        `clawreview presets diff: --since-range '${sinceRangeParsed.raw}' could not resolve ` +
+          `merge-base of '${sinceRangeParsed.base}' and '${sinceRangeParsed.target}' ` +
+          `(refs missing or disjoint histories)\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    sinceRangeResolvedBase = mergeBase;
+  }
   // Resolved per-side refs. `since` is the legacy chain-A ref kept for
   // back-compat; `sinceBase` is the explicit chain-A form. The range
-  // form contributes both sides at once when present. The helpers
-  // below treat them identically once we collapse them here.
-  const refForA = sinceBase ?? (sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.base : null) ?? sinceRef;
+  // form contributes both sides at once when present (with chain A
+  // resolved to merge-base on the triple-dot variant via
+  // sinceRangeResolvedBase). The helpers below treat them identically
+  // once we collapse them here.
+  const refForA =
+    sinceBase ??
+    (sinceRangeParsed.kind === 'ok'
+      ? (sinceRangeResolvedBase ?? sinceRangeParsed.base)
+      : null) ??
+    sinceRef;
   const refForB = sinceTarget ?? (sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.target : null);
 
   const localPresetsHead = await loadLocalPresets(root);
@@ -1189,15 +1222,22 @@ function parseChain(raw: string): string[] | null {
 }
 
 /**
- * Result of parsing the `--since-range <a>..<b>` flag.
+ * Result of parsing the `--since-range <a>..<b>` flag (or its
+ * triple-dot symmetric-diff variant added in tick 17).
  *
- * Three states the caller can branch on without inspecting strings:
- *   - `'absent'` -- flag was not passed at all; no error.
- *   - `'ok'`     -- flag parsed cleanly; `base` + `target` are
- *                   trimmed and non-empty; `raw` echoes the original
- *                   for downstream JSON/YAML/text headers.
- *   - `'invalid'` -- flag was passed but malformed; `message` carries
- *                   a human-readable reason for the stderr line.
+ * Four states the caller can branch on without inspecting strings:
+ *   - `'absent'`     -- flag was not passed at all; no error.
+ *   - `'ok'`         -- two-dot form parsed cleanly; `base` + `target`
+ *                       are trimmed and non-empty; `raw` echoes the
+ *                       original for downstream JSON/YAML/text headers.
+ *                       `kind = 'two-dot'`.
+ *   - `'ok'`         -- triple-dot form parsed cleanly; `base` carries
+ *                       the LEFT ref (the caller resolves it to
+ *                       `git merge-base base target` before loading
+ *                       the chain), `target` is the right ref unchanged.
+ *                       `kind = 'triple-dot'`.
+ *   - `'invalid'`    -- flag was passed but malformed; `message` carries
+ *                       a human-readable reason for the stderr line.
  *
  * Exported (alongside `parseSinceRange`) so the diff command and the
  * test suite share one parser. The CLI rejects the flag at the
@@ -1206,22 +1246,32 @@ function parseChain(raw: string): string[] | null {
  */
 export type SinceRangeParse =
   | { kind: 'absent' }
-  | { kind: 'ok'; raw: string; base: string; target: string }
+  | { kind: 'ok'; raw: string; base: string; target: string; range: 'two-dot' | 'triple-dot' }
   | { kind: 'invalid'; message: string };
 
 /**
- * Parse the `--since-range <a>..<b>` flag value.
+ * Parse the `--since-range <a>..<b>` or `--since-range <a>...<b>` flag.
  *
- * Splits on the literal `..` separator (matches `git log a..b`
- * syntax). Both sides must be non-empty after trimming -- a stray
- * range like `..main` or `main..` is rejected because it's almost
- * always a typo (the operator probably meant `--since-base main`
- * or `--since-target main` instead).
+ * Two-dot syntax (`a..b`): simple two-ref split. Matches `git log a..b`
+ * and resolves directly to chain-A=`a`, chain-B=`b`.
  *
- * Multiple `..` separators (e.g. `a..b..c`) are rejected for the
- * same reason: ambiguous, refuse loudly. The triple-dot syntax
- * `a...b` (git's symmetric difference) is NOT supported -- this
- * range is a simple two-ref split, not a merge-base resolution.
+ * Triple-dot syntax (`a...b`): symmetric-difference form. Matches
+ * `git diff a...b` (changes on `b` since they diverged from `a`).
+ * The caller resolves chain-A to `git merge-base a b` and keeps
+ * chain-B at `b`. Useful for "what changed on this branch
+ * independently of the other branch?" comparisons -- the LEFT side
+ * is automatically pinned to the divergence point so a long-lived
+ * feature branch can be diffed against `main` without picking up
+ * unrelated `main` changes that happened after the branch split.
+ *
+ * Both sides must be non-empty after trimming -- a stray range like
+ * `..main` or `main..` is rejected because it's almost always a typo
+ * (the operator probably meant `--since-base main` or
+ * `--since-target main` instead).
+ *
+ * Multiple separators with the same kind are detected via the split
+ * arity check; a mixed `a..b...c` is rejected for the same reason:
+ * ambiguous, refuse loudly.
  *
  * Pure / exported so the test suite can pin every error path
  * without driving the CLI binary.
@@ -1231,14 +1281,33 @@ export function parseSinceRange(raw: unknown): SinceRangeParse {
     return { kind: 'absent' };
   }
   const trimmed = raw.trim();
-  // Reject `a...b` explicitly so the operator doesn't get a confusing
-  // empty-segment error from the simple split. Git's `...` is
-  // symmetric difference which doesn't map onto our two-ref model.
+  // Tick 17: triple-dot syntax. We split on `...` first so a string
+  // like `a...b` matches the symmetric-diff arm cleanly rather than
+  // confusing the simple split-on-`..` (which would see three parts:
+  // 'a', '', 'b').
   if (trimmed.includes('...')) {
-    return {
-      kind: 'invalid',
-      message: `triple-dot syntax 'a...b' is not supported (use 'a..b' for the simple two-ref range)`,
-    };
+    const parts = trimmed.split('...');
+    if (parts.length !== 2) {
+      return {
+        kind: 'invalid',
+        message: `expected exactly one '...' separator (e.g. 'main...feature'); got ${parts.length - 1}`,
+      };
+    }
+    const baseRaw = parts[0]!.trim();
+    const targetRaw = parts[1]!.trim();
+    if (baseRaw.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `base ref (before '...') is empty; use --since-target instead if you only need a chain-b ref`,
+      };
+    }
+    if (targetRaw.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `target ref (after '...') is empty; use --since-base instead if you only need a chain-a ref`,
+      };
+    }
+    return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw, range: 'triple-dot' };
   }
   const parts = trimmed.split('..');
   if (parts.length !== 2) {
@@ -1261,7 +1330,7 @@ export function parseSinceRange(raw: unknown): SinceRangeParse {
       message: `target ref (after '..') is empty; use --since-base instead if you only need a chain-a ref`,
     };
   }
-  return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw };
+  return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw, range: 'two-dot' };
 }
 
 /**
