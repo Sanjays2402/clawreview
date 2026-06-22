@@ -637,4 +637,151 @@ describe('runStats', () => {
       expect(parsed.topCategories).toHaveLength(2);
     });
   });
+
+  // Tick 20: --min-confidence + --severity-threshold pre-bucket
+  // filters. Both flags surface findingDigest()'s tick-19 / tick-20
+  // pre-filter knobs so an operator can preview "what would my report
+  // look like with a 0.6 floor / a 'medium' threshold?" without
+  // editing config / re-running review.
+  describe('--min-confidence and --severity-threshold (tick 20)', () => {
+    // A small mixed report: 3 findings spanning confidence + severity
+    // so the filter arms can be checked independently.
+    const FILTER_REPORT = {
+      aggregated: {
+        findings: [
+          { agent: 'A', category: 'security', severity: 'critical', title: 'C',
+            rationale: '', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'B', category: 'style', severity: 'medium', title: 'M',
+            rationale: '', file: 'b.ts', startLine: 2, confidence: 0.3, tags: [] },
+          { agent: 'C', category: 'style', severity: 'nit', title: 'N',
+            rationale: '', file: 'c.ts', startLine: 3, confidence: 0.4, tags: [] },
+        ],
+      },
+      summary: { agentExecutions: [], totalCostUsd: 0 },
+    };
+
+    it('--min-confidence floors the per-bucket totals BEFORE counting', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'min-confidence': '0.5', 'no-color': true },
+      });
+      const parsed = JSON.parse(out());
+      // Only the 0.9 critical finding survives the 0.5 floor.
+      expect(parsed.totals.critical).toBe(1);
+      expect(parsed.totals.medium).toBe(0);
+      expect(parsed.totals.nit).toBe(0);
+      // Echoed filter is the resolved (clamped) numeric.
+      expect(parsed.minConfidence).toBe(0.5);
+      expect(parsed.severityThreshold).toBeNull();
+    });
+
+    it('--severity-threshold drops less-severe findings BEFORE counting', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          format: 'json',
+          'severity-threshold': 'medium',
+          'no-color': true,
+        },
+      });
+      const parsed = JSON.parse(out());
+      // critical + medium pass; nit dropped.
+      expect(parsed.totals.critical).toBe(1);
+      expect(parsed.totals.medium).toBe(1);
+      expect(parsed.totals.nit).toBe(0);
+      expect(parsed.severityThreshold).toBe('medium');
+    });
+
+    it('--min-confidence + --severity-threshold compose (AND semantics)', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          format: 'json',
+          'min-confidence': '0.5',
+          'severity-threshold': 'medium',
+          'no-color': true,
+        },
+      });
+      const parsed = JSON.parse(out());
+      // Only critical (0.9 conf + critical sev) clears BOTH floors.
+      expect(parsed.totals.critical).toBe(1);
+      expect(parsed.totals.medium).toBe(0); // failed confidence
+      expect(parsed.totals.nit).toBe(0); // failed both
+      // Both filters echoed.
+      expect(parsed.minConfidence).toBe(0.5);
+      expect(parsed.severityThreshold).toBe('medium');
+    });
+
+    it('unknown / mis-cased --severity-threshold is treated as no filter (forgiving)', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          format: 'json',
+          'severity-threshold': 'Critical', // wrong case
+          'no-color': true,
+        },
+      });
+      const parsed = JSON.parse(out());
+      // All three findings counted (filter normalised to null inside digest).
+      expect(parsed.totals.critical).toBe(1);
+      expect(parsed.totals.medium).toBe(1);
+      expect(parsed.totals.nit).toBe(1);
+      // Echo carries the raw operator-supplied value so a CI gate
+      // can detect the typo even though the filter silently no-op'd.
+      expect(parsed.severityThreshold).toBe('Critical');
+    });
+
+    it('echoes null for both filters when neither flag is supplied (back-compat)', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, format: 'json', 'no-color': true },
+      });
+      const parsed = JSON.parse(out());
+      expect(parsed.minConfidence).toBeNull();
+      expect(parsed.severityThreshold).toBeNull();
+      // And the totals reflect every finding (no filter).
+      expect(parsed.totals.critical).toBe(1);
+      expect(parsed.totals.medium).toBe(1);
+      expect(parsed.totals.nit).toBe(1);
+    });
+
+    it('composes with --fail-on (filter runs first, gate runs on filtered totals)', async () => {
+      // Drop nit/low + the 0.3 medium via the floor; only critical
+      // remains. --fail-on high then sees 1 finding at-or-above high
+      // and exits 1. Verifies the filter order: filter -> gate.
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'min-confidence': '0.7',
+          'fail-on': 'high',
+          'no-color': true,
+        },
+      });
+      // Critical survived the floor; gate fires (exit 1).
+      expect(process.exitCode).toBe(1);
+      expect(err()).toContain('1 finding(s) at or above');
+    });
+  });
 });

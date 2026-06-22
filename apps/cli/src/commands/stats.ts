@@ -137,6 +137,41 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   const topAgents = parseTopFlag(args.flags['top-agents'], DEFAULT_TOP_AGENTS);
   const topCategories = parseTopFlag(args.flags['top-categories'], DEFAULT_TOP_CATEGORIES);
 
+  // Tick 20: --min-confidence <n> and --severity-threshold <s> mirror
+  // the worker's cfg.min_confidence + cfg.severity_threshold knobs:
+  // both are pre-bucket filters applied by findingDigest BEFORE any
+  // counting. Use case: an operator wants to preview "what would my
+  // report look like with a 0.6 confidence floor and a 'medium'
+  // severity floor?" without editing config / re-running review.
+  //
+  // The clamping policy is the digest's own: --min-confidence outside
+  // [0, 1] clamps to the boundary; --severity-threshold with an
+  // unknown / mis-cased value is treated as "no filter" (forgiving
+  // back-compat). Both pass through findingDigest's normaliser so the
+  // CLI never re-implements the parse contract.
+  //
+  // The flags compose: passing BOTH applies AND semantics (a finding
+  // must clear BOTH floors to be counted). Composes with --by /
+  // --top-* too -- the filter runs first, then the digest computes
+  // every bucket / slice over the surviving findings.
+  //
+  // --fail-on still applies AFTER the filters since it keys on the
+  // computed totals; so an operator can run
+  //   clawreview stats --min-confidence 0.7 --fail-on high
+  // to gate ONLY on high-confidence high/critical findings.
+  const minConfidenceRaw = args.flags['min-confidence'];
+  const minConfidence =
+    minConfidenceRaw === undefined ? undefined : Number(String(minConfidenceRaw));
+  // Pass the raw string through to the digest helper; the digest's
+  // own normaliser handles the case-insensitive / unknown-string
+  // arms. This keeps the CLI thin: one source of truth for the
+  // filter contract, no risk of the CLI's validation drifting from
+  // the digest's.
+  const severityThreshold =
+    args.flags['severity-threshold'] === undefined
+      ? undefined
+      : String(args.flags['severity-threshold']);
+
   let raw: string;
   if (inputPath) {
     raw = await readFile(inputPath, 'utf8');
@@ -163,7 +198,19 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // @clawreview/aggregator); the worker and PR comment header use it
   // too, so this CLI shows exactly the same numbers without inlining
   // its own loops.
-  const digest = findingDigest(findings, { topFiles, topAgents, topCategories });
+  //
+  // Tick 20: pass --min-confidence and --severity-threshold through
+  // verbatim. The digest helper handles all normalisation /
+  // clamping; we cast severityThreshold to the expected union since
+  // we deliberately forward the raw string (the digest's normaliser
+  // returns null for unknown values, so a typo is forgiving).
+  const digest = findingDigest(findings, {
+    topFiles,
+    topAgents,
+    topCategories,
+    minConfidence,
+    severityThreshold: severityThreshold as Severity | undefined,
+  });
   const totals = computeTotals(findings, parsed.aggregated?.totals, digest);
 
   if (format === 'json') {
@@ -179,6 +226,14 @@ export async function runStats(args: ParsedArgs): Promise<void> {
           topCategories: digest.topCategories,
           totalCostUsd: parsed.summary?.totalCostUsd,
           groupBy,
+          // Tick 20: echo the resolved filters so a JSON consumer
+          // (CI dashboard, downstream jq pipeline) can verify the
+          // filter actually applied. `null` whenever the operator
+          // didn't pass the flag (no filter); the resolved value
+          // (clamped / normalised) whenever they did. We use null
+          // rather than omitting so the shape stays uniform.
+          minConfidence: minConfidence === undefined ? null : minConfidence,
+          severityThreshold: severityThreshold === undefined ? null : severityThreshold,
         },
         null,
         2,

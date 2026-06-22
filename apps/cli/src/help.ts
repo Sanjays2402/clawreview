@@ -10,7 +10,7 @@ Usage:
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text] [--since <git-ref> | --since-base <git-ref>] [--output <path>|-]
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>|<a>...<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
-  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift [--input <path>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
   clawreview baseline save [--input <path>] [--output <path>]
@@ -39,6 +39,12 @@ Flags:
   --top-files <n>    stats: cap on the top-files block / topFiles JSON array (default 5, max 200).
   --top-agents <n>   stats: cap on the --by agent block / topAgents JSON array (default 10, max 200).
   --top-categories <n> stats: cap on the --by category block / topCategories JSON array (default 10, max 200).
+  --min-confidence <n>  stats: drop findings below this confidence (0..1) BEFORE counting. Mirror of
+                        the worker's cfg.min_confidence -- preview what a floor would change.
+  --severity-threshold <sev>
+                        stats: drop findings less severe than <sev> BEFORE counting (critical|high|
+                        medium|low|nit). Mirror of cfg.severity_threshold -- composes with
+                        --min-confidence (AND semantics).
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
@@ -77,6 +83,9 @@ Examples:
   clawreview run --format json | clawreview stats --by category --top-categories 5
   clawreview run --format json | clawreview stats --by file --top-files 10
   clawreview run --format json | clawreview stats --format json --by category | jq '.byCategory'
+  clawreview run --format json | clawreview stats --min-confidence 0.7        # preview a high-confidence-only report
+  clawreview run --format json | clawreview stats --severity-threshold medium # drop nit/low BEFORE counting
+  clawreview run --format json | clawreview stats --min-confidence 0.6 --severity-threshold high --fail-on high
   clawreview run --format json > report.json && clawreview baseline save --input report.json
   clawreview run --format json | clawreview baseline diff --fail-on-new
   clawreview diff-stats --base main --head HEAD
