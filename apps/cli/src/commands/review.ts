@@ -35,7 +35,8 @@ interface DriftReport {
 }
 
 /**
- * `clawreview review drift [--input <path> | --review <file>] [--format text|json]`
+ * `clawreview review drift [--input <path>] [--format text|json]`
+ * `clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>]`
  *
  * Compute and print the drift between a review's persisted digest and
  * a fresh recompute over its current findings.
@@ -46,8 +47,9 @@ interface DriftReport {
  *
  *     curl -s https://clawreview/api/reviews/abc123 | clawreview review drift
  *     clawreview review drift --input review-abc123.json --format json
+ *     clawreview review drift --watch abc123 --server https://clawreview
  *
- * Two input shapes are accepted:
+ * Two input shapes are accepted in single-shot mode:
  *
  *   1. `/api/reviews/:id` body         (carries `findings` and `digest`).
  *      The CLI recomputes `findingDigest(findings)` and diffs against
@@ -56,29 +58,72 @@ interface DriftReport {
  *      `fresh` directly). The CLI just consumes the already-computed
  *      `drift` if present, otherwise re-derives via `computeDigestDrift`.
  *
- * Output formats:
+ * Tick 15: `--watch <reviewId>` poll mode hits the server's
+ * `/api/reviews/<id>/digest` endpoint on a configurable interval and
+ * re-renders the drift banner on every poll. Designed for on-calls
+ * watching a bulk-dismiss roll out in real time. Polling stops when:
+ *
+ *   - SIGINT (Ctrl-C) -- prints "watch stopped" and exits 0 regardless
+ *     of the last drift state. Use case: the operator saw what they
+ *     needed.
+ *   - `--max-polls <n>` reached. Use case: a CI gate that polls
+ *     N times then exits with the LAST drift's exit code (0 / 3).
+ *   - A fatal error (network / server / parse). Exit 2; the operator
+ *     can re-run.
+ *
+ * The poll mode re-uses the single-shot rendering paths so the watch
+ * loop's output is byte-identical to what `clawreview review drift
+ * --input -` would print for the same body. This keeps the visual
+ * surface uniform: an operator who knows the single-shot output
+ * knows the watch output too.
+ *
+ * Output formats (both modes):
  *
  *   - `text` (default) -- compact banner: hasDrift, totalDelta,
- *     per-bucket changes. Color-tagged when stdout is a TTY.
+ *     per-bucket changes. Color-tagged when stdout is a TTY. Watch
+ *     mode adds a `--- poll N at <ISO> ---` separator between samples.
  *   - `json` -- the same shape as the server's `/digest` DTO so a
  *     downstream tool can re-consume the artifact identically whether
- *     it came from the server or the CLI.
+ *     it came from the server or the CLI. Watch mode emits one JSON
+ *     object per poll, newline-delimited (JSONL).
  *
  * Exit codes:
  *
- *   0 -- no drift (or `--input` body genuinely had no findings).
- *   3 -- drift detected. Mirrors `clawreview presets diff` exit-3
- *        convention so a CI gate can `clawreview review drift ...`
- *        and treat non-zero as "stale; re-run worker".
- *   1 -- empty input.
- *   2 -- invalid JSON / unknown shape.
+ *   0 -- no drift on the FINAL sample (single-shot or watch). Also
+ *        emitted when --max-polls hit and the last sample had no drift.
+ *   3 -- drift detected on the FINAL sample. Mirrors `presets diff`
+ *        exit-3 so a CI gate can `clawreview review drift --watch ...
+ *        --max-polls 10` and treat non-zero as "stale at deadline".
+ *   1 -- empty input (single-shot only).
+ *   2 -- invalid JSON / unknown shape / network failure / config error.
  *
- * Read order:
+ * Read order (single-shot):
  *
  *   1. `--input <path>` if present.
  *   2. Otherwise stdin (drains until EOF, same convention as `explain`).
+ *
+ * Read source (watch):
+ *
+ *   1. `--watch <reviewId>` MUST be paired with `--server <url>`.
+ *   2. Polls `<server>/api/reviews/<reviewId>/digest` every
+ *      `--interval <ms>` (default 5000ms, min 250ms).
+ *   3. Stops after `--max-polls <n>` (default unlimited; 0 also means
+ *      unlimited so a CI pipeline doesn't fall into a no-op loop).
  */
 export async function runReviewDrift(args: ParsedArgs): Promise<void> {
+  const watchReviewId = typeof args.flags.watch === 'string' ? args.flags.watch.trim() : '';
+  if (watchReviewId.length > 0) {
+    return runReviewDriftWatch(args, watchReviewId);
+  }
+  return runReviewDriftSingle(args);
+}
+
+/**
+ * Single-shot drift command -- reads one body, renders, exits.
+ * This is the original tick-14 behaviour, factored out so the new
+ * watch mode can share rendering helpers without duplication.
+ */
+async function runReviewDriftSingle(args: ParsedArgs): Promise<void> {
   const inputPath = args.flags.input ? String(args.flags.input) : '';
   const format = String(args.flags.format ?? 'text') as 'text' | 'json';
   if (format !== 'text' && format !== 'json') {
@@ -252,4 +297,281 @@ async function readStdin(): Promise<string> {
     data += String(chunk);
   }
   return data;
+}
+
+/**
+ * Default poll interval (ms) for `--watch`. Five seconds is the same
+ * cadence dashboards typically poll at; chosen so a single operator
+ * watching a roll out matches the load profile of a normal dashboard
+ * tab.
+ */
+export const WATCH_DEFAULT_INTERVAL_MS = 5000;
+/**
+ * Minimum --interval value. Anything tighter would hammer the server
+ * with operator-poll traffic without giving the worker time to
+ * actually re-process between samples; we'd rather refuse than
+ * silently amplify load.
+ */
+export const WATCH_MIN_INTERVAL_MS = 250;
+
+/**
+ * Validation outcome from `parseWatchConfig`. Either a fully-resolved
+ * config or one of two error sentinels (separate for the test surface
+ * to assert on individually).
+ */
+export type WatchConfigResult =
+  | { kind: 'ok'; serverUrl: string; intervalMs: number; maxPolls: number; format: 'text' | 'json' }
+  | { kind: 'missing-server'; message: string }
+  | { kind: 'invalid-interval'; message: string }
+  | { kind: 'invalid-max-polls'; message: string }
+  | { kind: 'invalid-format'; message: string };
+
+/**
+ * Pure / exported parser for watch-mode config. Centralised so the
+ * shapes (defaults, error sentinels, units) have one test surface.
+ *
+ * Defaults:
+ *   - interval: WATCH_DEFAULT_INTERVAL_MS (5000ms)
+ *   - max-polls: 0 (unlimited; matches the CI ergonomics "the loop
+ *     stops when SIGINT or fatal error fires, not on a magic count")
+ *   - format: 'text'
+ *
+ * Validation:
+ *   - serverUrl is required; missing/empty -> 'missing-server' sentinel
+ *   - intervalMs: must be a finite number >= WATCH_MIN_INTERVAL_MS
+ *   - maxPolls: must be a non-negative integer (0 means unlimited)
+ *   - format: 'text' | 'json'; anything else -> 'invalid-format'
+ *
+ * Server URL is normalised: trailing slashes stripped so callers can
+ * compose `${serverUrl}/api/reviews/${id}/digest` without worrying.
+ */
+export function parseWatchConfig(flags: {
+  server?: unknown;
+  interval?: unknown;
+  'max-polls'?: unknown;
+  format?: unknown;
+}): WatchConfigResult {
+  const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
+  if (serverRaw.length === 0) {
+    return {
+      kind: 'missing-server',
+      message:
+        '--watch requires --server <url> (the CLI polls <server>/api/reviews/<id>/digest)',
+    };
+  }
+  // Normalise: drop trailing slashes so `${server}/api/...` stays clean.
+  const serverUrl = serverRaw.replace(/\/+$/, '');
+
+  let intervalMs = WATCH_DEFAULT_INTERVAL_MS;
+  if (flags.interval !== undefined) {
+    const raw = String(flags.interval).trim();
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < WATCH_MIN_INTERVAL_MS) {
+      return {
+        kind: 'invalid-interval',
+        message: `--interval must be a number >= ${WATCH_MIN_INTERVAL_MS} (ms); got '${raw}'`,
+      };
+    }
+    intervalMs = Math.floor(parsed);
+  }
+
+  let maxPolls = 0;
+  if (flags['max-polls'] !== undefined) {
+    const raw = String(flags['max-polls']).trim();
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return {
+        kind: 'invalid-max-polls',
+        message: `--max-polls must be a non-negative integer (0 = unlimited); got '${raw}'`,
+      };
+    }
+    maxPolls = parsed;
+  }
+
+  let format: 'text' | 'json' = 'text';
+  if (flags.format !== undefined) {
+    const raw = String(flags.format).trim().toLowerCase();
+    if (raw !== 'text' && raw !== 'json') {
+      return {
+        kind: 'invalid-format',
+        message: `--format must be text or json (got '${flags.format}')`,
+      };
+    }
+    format = raw;
+  }
+
+  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format };
+}
+
+/**
+ * Internal seam for the watch loop's HTTP fetch. The default
+ * implementation uses the global `fetch`; tests inject a stub that
+ * returns canned bodies so the suite doesn't need to boot a real
+ * server for every assertion.
+ */
+export type WatchFetcher = (url: string) => Promise<{
+  ok: boolean;
+  status: number;
+  text(): Promise<string>;
+}>;
+
+const defaultWatchFetcher: WatchFetcher = (url) =>
+  fetch(url).then((r) => ({ ok: r.ok, status: r.status, text: () => r.text() }));
+
+/**
+ * Internal seam for the watch loop's sleep. Tests substitute a
+ * synchronous resolver so the loop runs instantly.
+ */
+export type WatchSleeper = (ms: number) => Promise<void>;
+
+const defaultWatchSleeper: WatchSleeper = (ms) =>
+  new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Watch-mode drift command. Polls `/api/reviews/<id>/digest` on a
+ * configurable interval and re-renders the drift banner per sample.
+ *
+ * Stops when:
+ *   - SIGINT (Ctrl-C) -- exit 0
+ *   - --max-polls reached -- exit 0/3 based on the LAST sample's drift
+ *   - Fatal error (network / server / parse) -- exit 2
+ *
+ * Output:
+ *   - text: same banner as single-shot, with a `--- poll N ---` header
+ *     between samples so an operator scrolling back can attribute
+ *     each banner.
+ *   - json (JSONL): one JSON object per poll, separated by `\n`. The
+ *     object shape is { reviewId, poll, persisted, fresh, drift }.
+ *
+ * Exported for unit-test driving; the public CLI uses the default
+ * fetcher / sleeper.
+ */
+export async function runReviewDriftWatch(
+  args: ParsedArgs,
+  reviewId: string,
+  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper },
+): Promise<void> {
+  const config = parseWatchConfig({
+    server: args.flags.server,
+    interval: args.flags.interval,
+    'max-polls': args.flags['max-polls'],
+    format: args.flags.format,
+  });
+  if (config.kind !== 'ok') {
+    process.stderr.write(`clawreview review drift: ${config.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+
+  const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+  const sleeper = injected?.sleeper ?? defaultWatchSleeper;
+  const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(reviewId)}/digest`;
+
+  // SIGINT handling: flip a flag, finish the current iteration, exit
+  // 0. We DON'T abort an in-flight HTTP request because the next
+  // iteration's poll would have raced anyway -- the cleanup path
+  // stays small.
+  let stopped = false;
+  const onSigint = (): void => {
+    stopped = true;
+  };
+  process.once('SIGINT', onSigint);
+
+  // Track the FINAL sample's drift state so the exit code reflects
+  // the latest snapshot (single-shot's contract carried up to watch).
+  let lastHasDrift = false;
+  let pollCount = 0;
+  try {
+    while (!stopped) {
+      pollCount += 1;
+      let body: DriftReport;
+      try {
+        const res = await fetcher(url);
+        if (!res.ok) {
+          process.stderr.write(
+            `clawreview review drift --watch: poll ${pollCount} got HTTP ${res.status}; aborting\n`,
+          );
+          process.exitCode = 2;
+          return;
+        }
+        const text = await res.text();
+        body = JSON.parse(text) as DriftReport;
+      } catch (err) {
+        process.stderr.write(
+          `clawreview review drift --watch: poll ${pollCount} failed: ${(err as Error).message}\n`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+
+      // Resolve persisted/fresh/drift using the same logic the
+      // single-shot path uses; both /digest and /reviews/:id bodies
+      // are accepted so an alternate server endpoint can be polled.
+      let persisted: FindingDigest | null;
+      let fresh: FindingDigest;
+      if (body.fresh) {
+        fresh = body.fresh;
+        persisted = body.persisted ?? null;
+      } else if (Array.isArray(body.findings)) {
+        fresh = findingDigest(body.findings, {
+          topCategories: 8,
+          topAgents: 8,
+          hotspots: true,
+        });
+        persisted = body.digest ?? null;
+      } else {
+        process.stderr.write(
+          `clawreview review drift --watch: poll ${pollCount} body lacks both 'fresh' and 'findings'\n`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+      const persistedForDrift =
+        persisted ?? findingDigest([], { hotspots: false });
+      const drift = body.drift ?? computeDigestDrift(persistedForDrift, fresh);
+      lastHasDrift = drift.hasDrift;
+
+      if (config.format === 'json') {
+        // JSONL: one object per poll, newline-delimited so a
+        // downstream consumer can pipe through `jq -c .`.
+        process.stdout.write(
+          `${JSON.stringify({
+            reviewId,
+            poll: pollCount,
+            persisted,
+            fresh,
+            drift,
+          })}\n`,
+        );
+      } else {
+        // Text: prefix each sample with a `--- poll N ---` header so
+        // an operator scrolling back can attribute the banner.
+        process.stdout.write(
+          `${kleur.gray(`--- poll ${pollCount} at ${new Date().toISOString()} ---`)}\n`,
+        );
+        renderDriftText(reviewId, persisted, fresh, drift);
+      }
+
+      // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
+      // interval between the only sample and the exit.
+      if (config.maxPolls > 0 && pollCount >= config.maxPolls) {
+        break;
+      }
+      if (stopped) break;
+      await sleeper(config.intervalMs);
+    }
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+  }
+
+  if (stopped) {
+    process.stdout.write(`${kleur.gray('watch stopped')}\n`);
+    // Stopped by SIGINT -- exit 0 regardless of last drift state.
+    process.exitCode = 0;
+    return;
+  }
+  // Stopped by --max-polls -- exit reflects last sample.
+  process.exitCode = lastHasDrift ? 3 : 0;
 }
