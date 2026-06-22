@@ -116,4 +116,31 @@ describe('worker + queue Prometheus surface', () => {
     expect(body).toMatch(/clawreview_agent_invocations_total\{[^}]*agent="style"[^}]*outcome="error"[^}]*\} 1/);
     expect(body).toMatch(/clawreview_agent_findings_total\{[^}]*agent="security"[^}]*\} 2/);
   });
+
+  it('exposes the write-side persisted-drift counter on /metrics (tick 15)', async () => {
+    // The worker's hot path fires observeReviewDigestPersistedDrift on
+    // every completion. We can't easily boot the real worker in the test
+    // suite, but we can drive the same helper the worker uses and verify
+    // the counter type and labels surface through /metrics so an operator
+    // can scrape it without staging a real review run first.
+    const { observeReviewDigestPersistedDrift } = await import('@clawreview/telemetry');
+    const metrics = getMetrics({ service: 'clawreview-server' });
+    // 1 fresh + 1 unchanged + 1 stale -- exercises all three closed-set labels.
+    observeReviewDigestPersistedDrift(metrics, null, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { total: 5 }, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { total: 5 }, { hasDrift: true });
+    const res = await app.inject({ method: 'GET', url: '/metrics' });
+    expect(res.statusCode).toBe(200);
+    const body = res.body;
+    expect(body).toContain('# TYPE clawreview_review_digest_persisted_drift_total counter');
+    expect(body).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="fresh"[^}]*\} 1/,
+    );
+    expect(body).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="unchanged"[^}]*\} 1/,
+    );
+    expect(body).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="stale"[^}]*\} 1/,
+    );
+  });
 });

@@ -216,6 +216,48 @@ export interface MetricsBundle {
    * during the run?).
    */
   reviewDigestDriftTotal: Counter<string>;
+  /**
+   * `clawreview_review_digest_persisted_drift_total{kind}` -- WRITE-side
+   * counterpart to `reviewDigestDriftTotal`. Fires once per worker
+   * completion (re-run, rerun-from-dashboard, scheduled re-process)
+   * when the worker compares the digest it just built against the
+   * previously-persisted digest for the same review.
+   *
+   * Where the read-side counter answers "was the snapshot the
+   * dashboard cached still accurate?", this counter answers "did the
+   * re-run produce different bucket counts than the prior run?".
+   * Together they form a complete observability picture:
+   *
+   *   - drift on READ but not on WRITE
+   *       -> dashboards are caching stale data; reads outpace writes
+   *   - drift on WRITE but not on READ
+   *       -> worker re-runs flip counts, but operators rerun rarely
+   *          enough that dashboards don't notice
+   *   - drift on BOTH                                 (the common case)
+   *   - drift on NEITHER                              (steady state)
+   *
+   * Closed `kind` set:
+   *   - `fresh`         -- no prior persisted digest existed (first
+   *                        run; legacy review pre-tick-12); no
+   *                        comparison was possible. Counted so the
+   *                        rate vs `stale` is meaningful for the
+   *                        denominator.
+   *   - `unchanged`     -- prior persisted digest existed AND the
+   *                        re-run produced byte-identical bucket
+   *                        counts. Steady-state path.
+   *   - `stale`         -- prior persisted digest existed AND the
+   *                        re-run produced at least one bucket delta.
+   *                        The dashboard's "review header changed
+   *                        since last run" surface would fire here.
+   *
+   * Three buckets (vs the read-side's two) because the worker has the
+   * "no prior digest" case which the route layer can't see (it's
+   * tolerated as legacy and synthesised to an empty digest there).
+   *
+   * Cardinality: exactly three label values (`fresh` | `unchanged` |
+   * `stale`). Bounded for the same reason as `reviewDigestDriftTotal`.
+   */
+  reviewDigestPersistedDriftTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -395,6 +437,22 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewDigestPersistedDriftTotal = new Counter({
+    name: 'clawreview_review_digest_persisted_drift_total',
+    help:
+      'Write-side review digest drift outcomes on the worker completion ' +
+      'path, labeled by kind (closed set: fresh | unchanged | stale). ' +
+      'fresh = no prior persisted digest (first run / legacy review); ' +
+      'unchanged = the re-run produced byte-identical bucket counts; ' +
+      'stale = at least one bucket changed between the prior and the ' +
+      're-run. Pairs with clawreview_review_digest_drift_total (the ' +
+      'read-side equivalent) to give a complete observability picture: ' +
+      'reads = "did the dashboard see stale data?", writes = "did the ' +
+      're-run change anything?".',
+    labelNames: ['kind'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -456,6 +514,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     webhookStatsWindowAnchorTotal,
     findingsDroppedTotal,
     reviewDigestDriftTotal,
+    reviewDigestPersistedDriftTotal,
     queueDepth,
     queueInflight,
   };
@@ -978,4 +1037,90 @@ export function observeReviewDigestDrift(
 ): void {
   const kind = deriveReviewDigestDriftKind(drift);
   metrics.reviewDigestDriftTotal.inc({ kind });
+}
+
+/**
+ * Closed set of `kind` values the WRITE-side review-digest-drift
+ * counter (`reviewDigestPersistedDriftTotal`) can record:
+ *
+ *   - `fresh`     -- the worker had no prior persisted digest to compare
+ *                    against (first run for this review, or a legacy
+ *                    review created before tick 12 persisted digests).
+ *                    Counted so the rate vs `stale` is meaningful for
+ *                    the denominator.
+ *   - `unchanged` -- the worker's new digest agreed with the prior
+ *                    persisted digest byte-for-byte (no drift).
+ *   - `stale`     -- the worker's new digest disagreed with the prior
+ *                    persisted digest on at least one bucket; the
+ *                    review's bucket counts changed between runs.
+ *
+ * Three buckets (vs the read-side's two) because the write-side has
+ * the "no prior digest existed" case that the read-side can't see
+ * (the route handler synthesises an empty persisted digest on the
+ * legacy path).
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo.
+ */
+export const REVIEW_DIGEST_PERSISTED_DRIFT_KINDS = [
+  'fresh',
+  'unchanged',
+  'stale',
+] as const;
+export type ReviewDigestPersistedDriftKind =
+  (typeof REVIEW_DIGEST_PERSISTED_DRIFT_KINDS)[number];
+
+/**
+ * Derive the closed-set kind for the WRITE-side persisted-drift counter.
+ *
+ * The contract is intentionally different from the read-side
+ * `deriveReviewDigestDriftKind`:
+ *
+ *   - If `priorDigest` is `null` / `undefined`, the worker had nothing
+ *     to compare against -- the kind is `fresh`. We do NOT fall back
+ *     to the drift's hasDrift bit in this case (the caller would have
+ *     synthesised an empty persisted to produce a drift report, but
+ *     for telemetry attribution we still want to count it as `fresh`,
+ *     not `stale`, because the dashboard's "stale rate" should not
+ *     spike on first-run reviews).
+ *   - Otherwise, `drift.hasDrift` flips `stale` vs `unchanged`.
+ *
+ * Pure / exported so unit tests can pin the contract without spinning
+ * up a metrics bundle.
+ */
+export function deriveReviewDigestPersistedDriftKind(
+  priorDigest: unknown | null | undefined,
+  drift: { hasDrift: boolean },
+): ReviewDigestPersistedDriftKind {
+  if (priorDigest === null || priorDigest === undefined) return 'fresh';
+  return drift.hasDrift ? 'stale' : 'unchanged';
+}
+
+/**
+ * Record one worker completion on the
+ * `clawreview_review_digest_persisted_drift_total{kind}` counter.
+ *
+ * Fired once per accepted worker completion that produces a digest --
+ * including first runs (which fire with kind=`fresh` since there was
+ * nothing to compare against).
+ *
+ * The kind is derived from (priorDigest, drift) via
+ * `deriveReviewDigestPersistedDriftKind` so the counter cannot drift
+ * from the worker's own decision about what to do with the comparison:
+ * same predicate, two consumers (telemetry + worker log line).
+ *
+ * Distinct from `observeReviewDigestDrift` (the read-side helper)
+ * because the write-side has the extra `fresh` bucket for "no prior
+ * digest existed".
+ *
+ * Cheap to call from the worker's hot completion path: a single
+ * counter increment with one short label value. Bounded cardinality
+ * (three label values, ever).
+ */
+export function observeReviewDigestPersistedDrift(
+  metrics: MetricsBundle,
+  priorDigest: unknown | null | undefined,
+  drift: { hasDrift: boolean },
+): void {
+  const kind = deriveReviewDigestPersistedDriftKind(priorDigest, drift);
+  metrics.reviewDigestPersistedDriftTotal.inc({ kind });
 }

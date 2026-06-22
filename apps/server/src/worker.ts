@@ -14,6 +14,7 @@ import {
   buildInlineComments,
   buildSuppressionMap,
   calibrateConfidence,
+  computeDigestDrift,
   deriveCheckRun,
   findingDigest,
   recomputeAggregateTotals,
@@ -22,7 +23,7 @@ import {
 } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeSimilarityMerges } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeReviewDigestPersistedDrift, observeSimilarityMerges } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -335,6 +336,48 @@ export async function startWorker(logger: Logger): Promise<void> {
       topAgents: 8,
       hotspots: true,
     });
+
+    // Tick 15: WRITE-side persisted-drift counter. Compare the digest we
+    // JUST built against the previously-persisted digest for this review
+    // (if any). This pairs with the tick-13 read-side counter
+    // (clawreview_review_digest_drift_total) so an operator gets a
+    // complete observability picture:
+    //
+    //   - read-side fires when a dashboard /digest call sees a stale
+    //     persisted snapshot (was the cached number wrong?).
+    //   - write-side fires when a re-run produces different counts than
+    //     the prior run (did re-running actually change anything?).
+    //
+    // Three kinds (vs the read-side's two) because the worker has the
+    // "no prior digest existed" case: a first-time run for this review
+    // OR a legacy review created before tick 12 persisted digests at
+    // all. Counting first runs as `fresh` (rather than `stale`) keeps
+    // the dashboard's "stale rate" from spiking on cold starts.
+    //
+    // The store.get() call here is cheap (in-memory map lookup on the
+    // current InMemoryReviewStore) and the metric fire is a single
+    // counter increment. We intentionally derive the drift even when
+    // priorDigest is null so the closed-set predicate
+    // (`deriveReviewDigestPersistedDriftKind`) gets a real `drift`
+    // shape -- otherwise we'd have to special-case the kind logic
+    // inside the worker.
+    const priorRec = await store.get(data.reviewId);
+    const priorDigest = priorRec?.digest ?? null;
+    const priorDriftBaseline = priorDigest ?? findingDigest([], { hotspots: false });
+    const persistedDrift = computeDigestDrift(priorDriftBaseline, reviewDigest);
+    observeReviewDigestPersistedDrift(metrics, priorDigest, persistedDrift);
+    if (persistedDrift.hasDrift && priorDigest !== null) {
+      // Log structured for postmortem visibility. Only when a real
+      // prior existed AND counts changed -- a fresh first-run
+      // shouldn't pollute the log with "drift detected" noise.
+      log.info(
+        {
+          totalDelta: persistedDrift.totalDelta,
+          severityDelta: persistedDrift.bySeverityDelta,
+        },
+        'review digest changed between runs',
+      );
+    }
 
     const body = `${COMMENT_MARKER}\n${renderPrComment(aggregated, {
       prNumber: data.prNumber,

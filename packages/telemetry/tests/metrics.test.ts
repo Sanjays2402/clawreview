@@ -5,8 +5,10 @@ import {
   OPERATOR_POLL_BYPASS_REASONS,
   OPERATOR_POLL_RESULTS,
   REVIEW_DIGEST_DRIFT_KINDS,
+  REVIEW_DIGEST_PERSISTED_DRIFT_KINDS,
   WEBHOOK_STATS_WINDOW_MODES,
   deriveReviewDigestDriftKind,
+  deriveReviewDigestPersistedDriftKind,
   deriveWebhookStatsWindowMode,
   getMetrics,
   observeAgentExecutions,
@@ -15,6 +17,7 @@ import {
   observeOperatorPoll,
   observeOperatorPollBypass,
   observeReviewDigestDrift,
+  observeReviewDigestPersistedDrift,
   observeSimilarityMerges,
   observeWebhookDelivery,
   observeWebhookStatsWindowAnchor,
@@ -731,5 +734,111 @@ describe('observeReviewDigestDrift', () => {
     expect(text).toMatch(
       /clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 3/,
     );
+  });
+});
+
+describe('deriveReviewDigestPersistedDriftKind (tick 15)', () => {
+  it('returns fresh when priorDigest is null (no prior persisted to compare)', () => {
+    expect(deriveReviewDigestPersistedDriftKind(null, { hasDrift: true })).toBe('fresh');
+    expect(deriveReviewDigestPersistedDriftKind(null, { hasDrift: false })).toBe('fresh');
+  });
+
+  it('returns fresh when priorDigest is undefined (legacy review path)', () => {
+    expect(deriveReviewDigestPersistedDriftKind(undefined, { hasDrift: true })).toBe('fresh');
+  });
+
+  it('returns stale when prior existed AND hasDrift is true', () => {
+    // Any truthy object is a "prior persisted exists" signal.
+    expect(deriveReviewDigestPersistedDriftKind({}, { hasDrift: true })).toBe('stale');
+    expect(deriveReviewDigestPersistedDriftKind({ total: 5 }, { hasDrift: true })).toBe('stale');
+  });
+
+  it('returns unchanged when prior existed AND hasDrift is false', () => {
+    expect(deriveReviewDigestPersistedDriftKind({}, { hasDrift: false })).toBe('unchanged');
+    expect(deriveReviewDigestPersistedDriftKind({ total: 5 }, { hasDrift: false })).toBe(
+      'unchanged',
+    );
+  });
+
+  it('REVIEW_DIGEST_PERSISTED_DRIFT_KINDS is exactly [fresh, unchanged, stale] (cardinality contract)', () => {
+    expect([...REVIEW_DIGEST_PERSISTED_DRIFT_KINDS]).toEqual(['fresh', 'unchanged', 'stale']);
+  });
+
+  it('returned kind is always a member of the closed set', () => {
+    const cases: Array<[unknown, { hasDrift: boolean }]> = [
+      [null, { hasDrift: true }],
+      [null, { hasDrift: false }],
+      [undefined, { hasDrift: true }],
+      [{}, { hasDrift: true }],
+      [{}, { hasDrift: false }],
+    ];
+    for (const [prior, drift] of cases) {
+      const kind = deriveReviewDigestPersistedDriftKind(prior, drift);
+      expect(REVIEW_DIGEST_PERSISTED_DRIFT_KINDS).toContain(kind);
+    }
+  });
+});
+
+describe('observeReviewDigestPersistedDrift (tick 15)', () => {
+  it('emits the fresh label when priorDigest is null (first run / legacy)', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdpd-1', defaultMetrics: false });
+    observeReviewDigestPersistedDrift(metrics, null, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    // Even though hasDrift=true, kind is fresh because no prior to compare against.
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="fresh"[^}]*\} 1/,
+    );
+  });
+
+  it('emits the unchanged label when prior existed AND hasDrift=false', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdpd-2', defaultMetrics: false });
+    observeReviewDigestPersistedDrift(metrics, { total: 3 }, { hasDrift: false });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="unchanged"[^}]*\} 1/,
+    );
+  });
+
+  it('emits the stale label when prior existed AND hasDrift=true', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdpd-3', defaultMetrics: false });
+    observeReviewDigestPersistedDrift(metrics, { total: 3 }, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="stale"[^}]*\} 1/,
+    );
+  });
+
+  it('accumulates across the three kinds independently', async () => {
+    const metrics = getMetrics({ service: 'clawreview-rdpd-4', defaultMetrics: false });
+    // 2 fresh + 3 unchanged + 1 stale
+    observeReviewDigestPersistedDrift(metrics, null, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, undefined, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { x: 1 }, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { x: 1 }, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { x: 1 }, { hasDrift: false });
+    observeReviewDigestPersistedDrift(metrics, { x: 1 }, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="fresh"[^}]*\} 2/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="unchanged"[^}]*\} 3/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_digest_persisted_drift_total\{[^}]*kind="stale"[^}]*\} 1/,
+    );
+  });
+
+  it('does NOT touch the read-side counter (kept distinct from observeReviewDigestDrift)', async () => {
+    // The write-side and read-side counters are SEPARATE metrics. A
+    // worker write-side fire must not also bump the read-side total,
+    // otherwise the dashboard's "stale rate on reads vs writes"
+    // comparison would silently double-count.
+    const metrics = getMetrics({ service: 'clawreview-rdpd-5', defaultMetrics: false });
+    observeReviewDigestPersistedDrift(metrics, { x: 1 }, { hasDrift: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_digest_persisted_drift_total/);
+    // No read-side counter samples should have been emitted.
+    expect(text).not.toMatch(/clawreview_review_digest_drift_total\{/);
   });
 });
