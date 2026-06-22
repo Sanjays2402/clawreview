@@ -1234,6 +1234,204 @@ describe('reviews and stats routes', () => {
       expect(upperNone.json().slim).toBe(false);
       expect(mixedAll.json().slim).toBe(true);
     });
+
+    // Tick 20: `?minConfidence=<n>` and `?severityThreshold=<sev>` are
+    // pre-bucket filters passed straight through to findingDigest.
+    // They apply to the FRESH recompute only (the cached arm leaves
+    // the persisted digest unchanged so a dashboard's "preview
+    // filter" widget compares filtered-fresh against unfiltered-
+    // persisted via drift). Both query params are also echoed on the
+    // response so a CI gate / dashboard can verify what was applied.
+    describe('?minConfidence + ?severityThreshold pre-bucket filters (tick 20)', () => {
+      it('?minConfidence=0.5 drops below-floor findings from fresh; persisted untouched', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 200, headSha: 'h200', baseSha: 'b200' });
+        const findings = [
+          { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'medium', title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.4, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'low', title: 'Z', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.2, tags: [] },
+        ];
+        const { findingDigest } = await import('@clawreview/aggregator');
+        // Worker writes the persisted digest with NO filter, so it
+        // counts all 3.
+        const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 200, headSha: 'h200', baseSha: 'b200' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 3, totalCostUsd: 0,
+          },
+          findings, { digest },
+        );
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // Persisted is unfiltered (worker's original snapshot).
+        expect(body.persisted.total).toBe(3);
+        // Fresh applies the floor: only the 0.9 finding survives.
+        expect(body.fresh.total).toBe(1);
+        expect(body.fresh.totalsBySeverity.high).toBe(1);
+        expect(body.fresh.totalsBySeverity.medium).toBe(0);
+        expect(body.fresh.totalsBySeverity.low).toBe(0);
+        // Echoed filter is the resolved numeric.
+        expect(body.minConfidence).toBe(0.5);
+        expect(body.severityThreshold).toBeNull();
+        // Drift reflects the gap between unfiltered persisted (3) and
+        // filtered fresh (1): the dashboard's "preview filter" widget
+        // reads this to answer "would the PR header change?".
+        expect(body.drift.hasDrift).toBe(true);
+        expect(body.drift.totalDelta).toBe(-2);
+      });
+
+      it('?severityThreshold=medium drops nit/low from fresh; persisted untouched', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 201, headSha: 'h201', baseSha: 'b201' });
+        const findings = [
+          { agent: 'sec', category: 'security', severity: 'critical', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'medium', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.9, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'nit', title: 'C', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.9, tags: [] },
+        ];
+        const { findingDigest } = await import('@clawreview/aggregator');
+        const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 201, headSha: 'h201', baseSha: 'b201' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 3, totalCostUsd: 0,
+          },
+          findings, { digest },
+        );
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?severityThreshold=medium` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.persisted.total).toBe(3);
+        // critical + medium pass; nit dropped.
+        expect(body.fresh.total).toBe(2);
+        expect(body.fresh.totalsBySeverity.critical).toBe(1);
+        expect(body.fresh.totalsBySeverity.medium).toBe(1);
+        expect(body.fresh.totalsBySeverity.nit).toBe(0);
+        // Echo (raw operator-supplied string).
+        expect(body.severityThreshold).toBe('medium');
+        expect(body.minConfidence).toBeNull();
+      });
+
+      it('?minConfidence + ?severityThreshold compose (AND semantics)', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 202, headSha: 'h202', baseSha: 'b202' });
+        const findings = [
+          { agent: 'sec', category: 'security', severity: 'critical', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] }, // passes both
+          { agent: 'sec', category: 'security', severity: 'critical', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.3, tags: [] }, // fails conf
+          { agent: 'sec', category: 'security', severity: 'nit', title: 'C', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.9, tags: [] }, // fails sev
+          { agent: 'sec', category: 'security', severity: 'nit', title: 'D', rationale: 'r', file: 'd.ts', startLine: 4, confidence: 0.3, tags: [] }, // fails both
+        ];
+        const { findingDigest } = await import('@clawreview/aggregator');
+        const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 202, headSha: 'h202', baseSha: 'b202' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 4, totalCostUsd: 0,
+          },
+          findings, { digest },
+        );
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5&severityThreshold=high` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.persisted.total).toBe(4);
+        expect(body.fresh.total).toBe(1);
+        expect(body.fresh.totalsBySeverity.critical).toBe(1);
+        // Both filters echoed.
+        expect(body.minConfidence).toBe(0.5);
+        expect(body.severityThreshold).toBe('high');
+      });
+
+      it('absent filter params echo null (back-compat: unchanged response shape)', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 203, headSha: 'h203', baseSha: 'b203' });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 203, headSha: 'h203', baseSha: 'b203' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+          },
+          [],
+        );
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.minConfidence).toBeNull();
+        expect(body.severityThreshold).toBeNull();
+      });
+
+      it('cached arm IGNORES filters but still echoes them (diagnostic)', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 204, headSha: 'h204', baseSha: 'b204' });
+        const findings = [
+          { agent: 'sec', category: 'security', severity: 'critical', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'nit', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+        ];
+        const { findingDigest } = await import('@clawreview/aggregator');
+        const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 204, headSha: 'h204', baseSha: 'b204' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 2, totalCostUsd: 0,
+          },
+          findings, { digest },
+        );
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${r.id}/digest?recompute=cached&minConfidence=0.8&severityThreshold=high`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // Persisted unchanged: both findings counted (the cached arm
+        // skips re-filtering -- the persisted digest is the worker's
+        // write-time snapshot).
+        expect(body.persisted.total).toBe(2);
+        expect(body.fresh).toBeNull();
+        expect(body.drift).toBeNull();
+        // But the filters ARE echoed so an operator who mistakenly
+        // combined ?recompute=cached with the filter params can see
+        // they were inert.
+        expect(body.minConfidence).toBe(0.8);
+        expect(body.severityThreshold).toBe('high');
+      });
+
+      it('mis-cased severityThreshold echoes raw value but applies no filter (typo detectable)', async () => {
+        const store = getReviewStore();
+        const r = await store.start({ installationId: 30, owner: 'o', repo: 'r', prNumber: 205, headSha: 'h205', baseSha: 'b205' });
+        const findings = [
+          { agent: 'sec', category: 'security', severity: 'critical', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'sec', category: 'security', severity: 'nit', title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.9, tags: [] },
+        ];
+        const { findingDigest } = await import('@clawreview/aggregator');
+        const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+        await store.complete(
+          r.id,
+          {
+            pullRequest: { owner: 'o', repo: 'r', number: 205, headSha: 'h205', baseSha: 'b205' },
+            status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+            agentExecutions: [], totalFindings: 2, totalCostUsd: 0,
+          },
+          findings, { digest },
+        );
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?severityThreshold=Critical` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // Both findings still counted (filter normalised to null inside digest).
+        expect(body.fresh.total).toBe(2);
+        // Echo carries the raw operator-supplied value so a CI gate
+        // can detect the typo even though the filter silently no-op'd.
+        expect(body.severityThreshold).toBe('Critical');
+      });
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {

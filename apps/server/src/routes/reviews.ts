@@ -10,6 +10,7 @@ import {
   renderReviewReport,
 } from '@clawreview/aggregator';
 import { getMetrics, observeReviewDigestDrift } from '@clawreview/telemetry';
+import type { Severity } from '@clawreview/types';
 
 import { getReviewStore } from '../services/review-store.js';
 
@@ -156,6 +157,17 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         // parseSlimDirective so we can return a richer 400 message
         // than Zod's union error.
         slim: z.string().optional(),
+        // Tick 20: pre-bucket filter knobs. Both passed through to
+        // findingDigest verbatim; the digest's normaliser handles
+        // clamping (minConfidence) / case-insensitive rejection
+        // (severityThreshold). We accept a STRING here so a malformed
+        // numeric (e.g. minConfidence=bogus) reaches the normaliser
+        // which clamps to 0 (no filter) rather than rejecting -- the
+        // route stays forgiving so a dashboard typo doesn't 400 the
+        // whole panel. The resolved values are echoed in the response
+        // so a CI gate can detect the typo.
+        minConfidence: z.string().optional(),
+        severityThreshold: z.string().optional(),
       })
       .safeParse(req.query ?? {});
     if (!queryParse.success) {
@@ -168,6 +180,19 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       reply.code(400);
       return { error: 'BadQuery', message: slimDirective.message };
     }
+    // Tick 20: resolve the pre-bucket filters. Both flow through the
+    // digest's own normalisers so the server, the CLI, and the worker
+    // share one filter contract. A non-numeric minConfidence (e.g.
+    // ?minConfidence=bogus) coerces to NaN here and the normaliser
+    // returns 0 (no filter). An unknown severityThreshold passes the
+    // raw string to the normaliser which returns null (no filter).
+    // Both raw values are echoed below so a dashboard / CI gate can
+    // detect typos.
+    const rawMinConfidence = queryParse.data.minConfidence;
+    const rawSeverityThreshold = queryParse.data.severityThreshold;
+    const minConfidence =
+      rawMinConfidence === undefined ? undefined : Number(rawMinConfidence);
+    const severityThreshold = rawSeverityThreshold as Severity | undefined;
     // Resolve the field set to strip. 'none' -> empty set (no
     // stripping); 'all' -> all four heavy fields; 'fields' -> the
     // explicit user-supplied subset.
@@ -194,6 +219,14 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // calculation, no counter fire. The response shape mirrors the
       // fresh path with `fresh` + `drift` nulled so consumers can use
       // one schema regardless of mode.
+      //
+      // Tick 20: minConfidence / severityThreshold do NOT apply on the
+      // cached path -- the persisted digest was already filtered (or
+      // not) by the worker at write time, and re-filtering here would
+      // produce a different shape than the dashboard / CLI / PR
+      // comment header read. The filters are still echoed so a
+      // consumer that mistakenly passed them with ?recompute=cached
+      // can see they were inert (no-op on the cached arm).
       return {
         reviewId: rec.id,
         persisted: rec.digest
@@ -212,6 +245,14 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         // confirm WHICH fields were stripped. Always present (empty
         // array when slim was not passed) so the shape stays uniform.
         slimFields,
+        // Tick 20: echo the resolved pre-bucket filters. On cached
+        // mode these are inert (no-op) so the echo serves as a
+        // diagnostic: a consumer that sees the filter echoed but
+        // the persisted shape unchanged knows the cached arm
+        // skipped re-filtering.
+        minConfidence: minConfidence === undefined ? null : minConfidence,
+        severityThreshold:
+          rawSeverityThreshold === undefined ? null : rawSeverityThreshold,
       };
     }
     // Match the worker's tick-12 / tick-13 cap choices so a dashboard
@@ -221,10 +262,22 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // refreshing them here would mask a tag-rule change between the
     // worker and the recompute, so the fresh hotspots are intentionally
     // included for parity.
+    //
+    // Tick 20: pass through the operator-supplied minConfidence /
+    // severityThreshold so a dashboard can show "all findings" vs
+    // "filtered findings" via two round-trips with the same endpoint.
+    // The fresh digest reflects the filters; the persisted is NOT
+    // re-filtered (it carries whatever shape the worker wrote). The
+    // drift computation runs on the filtered fresh vs the persisted,
+    // so a drift report at a stricter threshold answers "would the
+    // PR header change if we tightened the floor?" -- a useful
+    // signal for a dashboard "preview filter" widget.
     const fresh = findingDigest(rec.findings, {
       topCategories: 8,
       topAgents: 8,
       hotspots: true,
+      minConfidence,
+      severityThreshold,
     });
     // Tolerate a legacy review (pre-tick-12) that never persisted a
     // digest. `computeDigestDrift` requires both sides; we synthesise
@@ -263,6 +316,14 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // confirm WHICH fields were stripped. Always present so the
       // shape stays uniform.
       slimFields,
+      // Tick 20: echo the resolved pre-bucket filters so a CI gate
+      // / dashboard can verify which filters actually applied. The
+      // raw operator-supplied severityThreshold is echoed (not the
+      // normalised value) so a typo / case-mismatch is detectable
+      // by comparing what was sent vs what was echoed.
+      minConfidence: minConfidence === undefined ? null : minConfidence,
+      severityThreshold:
+        rawSeverityThreshold === undefined ? null : rawSeverityThreshold,
     };
   });
 
