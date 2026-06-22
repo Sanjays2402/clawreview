@@ -132,12 +132,30 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // Composes with cached: `?recompute=cached&slim=true` returns the
     // slimmed persisted with fresh + drift null (the cached mode's
     // existing shape, minus the full sparse maps).
+    //
+    // Tick 17: `?slim` also accepts a comma-separated allowlist of
+    // field names to strip (e.g. `?slim=byTag,byFile`) so a consumer
+    // can strip JUST the heaviest map(s) without losing the others.
+    // Mirrors the tick-10 `?payloadFields=` projection on the
+    // webhook-recent endpoint -- one parser shape across the route
+    // surface. Valid field names: byTag, byAgent, byCategory, byFile.
+    // Unknown names reject 400 so a typo doesn't silently widen the
+    // projection. The boolean back-compat values (true / 1 / false /
+    // 0) still work and stay the recommended sugar for "strip
+    // everything".
+    //
+    // We do the parse manually rather than through Zod because the
+    // field-list shape doesn't have a clean Zod refinement that's
+    // worth the indirection -- the parseSlimDirective helper is
+    // pure / exported and the test surface pins both arms.
     const queryParse = z
       .object({
         recompute: z.enum(['fresh', 'cached']).optional(),
-        slim: z
-          .union([z.literal('true'), z.literal('false'), z.literal('1'), z.literal('0')])
-          .optional(),
+        // Slim accepts any string here; the actual validation
+        // (boolean sugar vs comma-list) happens in
+        // parseSlimDirective so we can return a richer 400 message
+        // than Zod's union error.
+        slim: z.string().optional(),
       })
       .safeParse(req.query ?? {});
     if (!queryParse.success) {
@@ -145,8 +163,27 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       return { error: 'BadQuery', issues: queryParse.error.flatten() };
     }
     const recomputeMode = queryParse.data.recompute ?? 'fresh';
-    const slim =
-      queryParse.data.slim === 'true' || queryParse.data.slim === '1';
+    const slimDirective = parseSlimDirective(queryParse.data.slim);
+    if (slimDirective.kind === 'invalid') {
+      reply.code(400);
+      return { error: 'BadQuery', message: slimDirective.message };
+    }
+    // Resolve the field set to strip. 'none' -> empty set (no
+    // stripping); 'all' -> all four heavy fields; 'fields' -> the
+    // explicit user-supplied subset.
+    const fieldsToStrip: Set<SlimField> =
+      slimDirective.kind === 'all'
+        ? new Set(SLIM_FIELDS)
+        : slimDirective.kind === 'fields'
+          ? slimDirective.fields
+          : new Set();
+    // Boolean echo: `slim=true` whenever ANY stripping happened so
+    // existing back-compat consumers that only check the boolean
+    // see the right answer. `slimFields` is the canonical list of
+    // fields actually stripped (always present, sorted for
+    // determinism so two consumers see byte-identical responses).
+    const slim = fieldsToStrip.size > 0;
+    const slimFields = [...fieldsToStrip].sort();
     const rec = await store.get(params.data.id);
     if (!rec) {
       reply.code(404);
@@ -159,7 +196,11 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // one schema regardless of mode.
       return {
         reviewId: rec.id,
-        persisted: rec.digest ? (slim ? slimDigest(rec.digest) : rec.digest) : null,
+        persisted: rec.digest
+          ? slim
+            ? slimDigestFields(rec.digest, fieldsToStrip)
+            : rec.digest
+          : null,
         fresh: null,
         drift: null,
         recompute: 'cached' as const,
@@ -167,6 +208,10 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         // was applied. `false` when slim was not passed -- consumers
         // that don't care can ignore the field.
         slim,
+        // Tick 17: echo the resolved field list so a consumer can
+        // confirm WHICH fields were stripped. Always present (empty
+        // array when slim was not passed) so the shape stays uniform.
+        slimFields,
       };
     }
     // Match the worker's tick-12 / tick-13 cap choices so a dashboard
@@ -201,8 +246,12 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // persisted digest, so the dashboard can render a "legacy
       // review, no persisted snapshot" hint instead of a misleading
       // "every bucket dropped to zero" banner.
-      persisted: rec.digest ? (slim ? slimDigest(rec.digest) : rec.digest) : null,
-      fresh: slim ? slimDigest(fresh) : fresh,
+      persisted: rec.digest
+        ? slim
+          ? slimDigestFields(rec.digest, fieldsToStrip)
+          : rec.digest
+        : null,
+      fresh: slim ? slimDigestFields(fresh, fieldsToStrip) : fresh,
       drift,
       // Echo the resolved mode so a consumer can verify which path the
       // server took. Always 'fresh' on this branch.
@@ -210,6 +259,10 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // Tick 16: echo the slim mode too so a consumer can confirm the
       // projection. `false` when slim was not passed (back-compat).
       slim,
+      // Tick 17: echo the resolved field list so a consumer can
+      // confirm WHICH fields were stripped. Always present so the
+      // shape stays uniform.
+      slimFields,
     };
   });
 
@@ -510,4 +563,140 @@ export function slimDigest<T extends { total: number; totalsBySeverity: unknown 
   if (d.topTags !== undefined) slim.topTags = d.topTags;
   if (d.hotspots !== undefined) slim.hotspots = d.hotspots;
   return slim as ReturnType<typeof slimDigest<T>>;
+}
+
+/**
+ * Heavy bucket field names eligible for the tick-17 `?slim=<list>`
+ * targeted projection. Sorted in alphabetical order for a stable
+ * `slimFields` echo on the response.
+ *
+ * Frozen + exported as a tuple so a consumer (dashboard, test) can
+ * iterate the canonical set without hard-coding the literal list.
+ * Adding a new heavy field requires extending both the tuple AND
+ * `slimDigestFields` -- centralising the list catches the omission
+ * via TypeScript's exhaustiveness check.
+ */
+export const SLIM_FIELDS = ['byAgent', 'byCategory', 'byFile', 'byTag'] as const;
+export type SlimField = (typeof SLIM_FIELDS)[number];
+
+/**
+ * Outcome of parsing the `?slim=<value>` query parameter.
+ *
+ *   - `'none'`     -- absent / `false` / `0` (default). No fields stripped.
+ *   - `'all'`      -- `true` / `1` sugar. All heavy maps stripped (tick 16 contract).
+ *   - `'fields'`   -- explicit comma-separated allowlist. The `fields`
+ *                     Set carries the resolved field names; the route
+ *                     echoes them under `slimFields`.
+ *   - `'invalid'`  -- malformed input. The route returns HTTP 400
+ *                     with `message` so a client can correct the typo.
+ *
+ * Pure / exported so the test surface can pin every error path
+ * without driving the Fastify route.
+ */
+export type SlimDirective =
+  | { kind: 'none' }
+  | { kind: 'all' }
+  | { kind: 'fields'; fields: Set<SlimField> }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Parse the `?slim=<value>` query parameter into a `SlimDirective`.
+ *
+ * Accepted shapes:
+ *   - absent (undefined / empty string / pure-whitespace)  -> 'none'
+ *   - 'true', '1'                                          -> 'all'
+ *   - 'false', '0'                                         -> 'none'
+ *   - comma-separated subset of SLIM_FIELDS                -> 'fields'
+ *
+ * The boolean sugar (`true`/`1`/`false`/`0`) stays the recommended
+ * shape for "strip everything" / "strip nothing" so existing
+ * dashboards / curl pipelines keep working unchanged. The fields-list
+ * shape is the new tick-17 surface for partial stripping.
+ *
+ * Validation rules on the fields-list arm:
+ *   - case-insensitive matching against SLIM_FIELDS (we accept
+ *     `bytag` and `byTag` symmetrically -- URL-case is often
+ *     mangled by tooling) but the resolved Set always carries the
+ *     canonical camelCase form (matches the digest field key).
+ *   - duplicate names dedupe silently (the Set drops them).
+ *   - an unknown field name rejects with an enumerated 'invalid'
+ *     message so the operator sees which name was wrong.
+ *   - an empty intermediate entry (`?slim=byTag,,byFile`) rejects --
+ *     it's almost always a forgotten name and silently widening
+ *     the projection would mask the typo.
+ *   - whitespace around names is trimmed.
+ *
+ * Pure (no mutation, no side effects).
+ */
+export function parseSlimDirective(raw: string | undefined): SlimDirective {
+  if (raw === undefined) return { kind: 'none' };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return { kind: 'none' };
+  // Boolean sugar (case-insensitive matches the existing tick-16
+  // back-compat -- we accept `True` / `TRUE` too because URL params
+  // sometimes come through capitalised).
+  const lower = trimmed.toLowerCase();
+  if (lower === 'true' || lower === '1') return { kind: 'all' };
+  if (lower === 'false' || lower === '0') return { kind: 'none' };
+  // Fields-list arm.
+  const parts = trimmed.split(',').map((s) => s.trim());
+  // Reject empty intermediate entries: a stray comma usually means a
+  // forgotten name (mirrors parseChain in the CLI's presets module).
+  if (parts.some((p) => p.length === 0)) {
+    return {
+      kind: 'invalid',
+      message: `?slim has an empty entry (likely a stray comma); got '${trimmed}'`,
+    };
+  }
+  // Case-insensitive field lookup. Build an index of canonical names
+  // so the resolved Set always carries the camelCase form regardless
+  // of how the URL was capitalised.
+  const canonicalByLower = new Map<string, SlimField>();
+  for (const f of SLIM_FIELDS) canonicalByLower.set(f.toLowerCase(), f);
+  const fields = new Set<SlimField>();
+  for (const part of parts) {
+    const canonical = canonicalByLower.get(part.toLowerCase());
+    if (!canonical) {
+      return {
+        kind: 'invalid',
+        message: `?slim has unknown field '${part}'; valid: ${SLIM_FIELDS.join(', ')}`,
+      };
+    }
+    fields.add(canonical);
+  }
+  return { kind: 'fields', fields };
+}
+
+/**
+ * Strip a specified subset of heavy bucket maps from a digest. The
+ * tick-17 generalisation of `slimDigest` -- where the original
+ * stripped ALL four heavy maps unconditionally, this one strips only
+ * the fields named in `toStrip`.
+ *
+ *   - `toStrip` empty            -> digest passes through unchanged
+ *                                   (saves an unnecessary copy on the
+ *                                   `?slim=false` / absent path).
+ *   - `toStrip` has every field  -> equivalent to the original
+ *                                   `slimDigest` (tick-16 back-compat).
+ *   - `toStrip` has a subset     -> only those fields are stripped.
+ *
+ * Pure: returns a new object; never mutates the input digest.
+ * Tolerates legacy digests missing topTags / hotspots / etc. (the
+ * helper reads only the documented fields and copies what's present).
+ */
+export function slimDigestFields<T extends Record<string, unknown>>(
+  digest: T,
+  toStrip: Set<SlimField>,
+): Record<string, unknown> {
+  if (toStrip.size === 0) return digest;
+  const out: Record<string, unknown> = {};
+  // Copy every key EXCEPT those in toStrip. Iterating the source
+  // means we preserve legacy / forward-compatible keys (a digest
+  // that grows a new field doesn't need a helper update unless the
+  // field is meant to be strippable).
+  for (const [k, v] of Object.entries(digest)) {
+    if (toStrip.has(k as SlimField)) continue;
+    out[k] = v;
+  }
+  return out;
 }

@@ -820,6 +820,132 @@ describe('reviews and stats routes', () => {
       expect(body.fresh.total).toBe(0);
       expect(body.slim).toBe(true);
     });
+
+    // Tick 17: `?slim=<fields>` partial projection. Today's `slim=true`
+    // is all-or-nothing; the comma-list lets a consumer strip JUST the
+    // heaviest map (typically `byTag` on tag-heavy reviews) while
+    // keeping `byAgent` / `byFile` / `byCategory` available for
+    // dashboard panels that render the full bucket distribution.
+    it('?slim=byTag strips only byTag (other heavy maps survive)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 70, headSha: 'h70', baseSha: 'b70' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+        { agent: 'style', category: 'style', severity: 'nit', title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.4, tags: ['t2'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 70, headSha: 'h70', baseSha: 'b70' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 2, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=byTag` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(true);
+      // Echoed slimFields carries the canonical resolved list.
+      expect(body.slimFields).toEqual(['byTag']);
+      // byTag stripped from persisted + fresh; the other heavy maps survive.
+      expect(body.persisted.byTag).toBeUndefined();
+      expect(body.persisted.byAgent).toBeDefined();
+      expect(body.persisted.byCategory).toBeDefined();
+      expect(body.persisted.byFile).toBeDefined();
+      expect(body.fresh.byTag).toBeUndefined();
+      expect(body.fresh.byAgent).toBeDefined();
+      expect(body.fresh.byCategory).toBeDefined();
+      expect(body.fresh.byFile).toBeDefined();
+      // top-N slices + total survive on both arms.
+      expect(body.persisted.total).toBe(2);
+      expect(Array.isArray(body.persisted.topTags)).toBe(true);
+    });
+
+    it('?slim=byTag,byFile strips both fields and echoes them sorted in slimFields', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 71, headSha: 'h71', baseSha: 'b71' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 71, headSha: 'h71', baseSha: 'b71' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      // Pass them in NON-canonical order; the response echoes the
+      // canonical sorted form so two clients see the same shape.
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=byFile,byTag` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(true);
+      expect(body.slimFields).toEqual(['byFile', 'byTag']);
+      expect(body.persisted.byFile).toBeUndefined();
+      expect(body.persisted.byTag).toBeUndefined();
+      // Untouched fields survive.
+      expect(body.persisted.byAgent).toBeDefined();
+      expect(body.persisted.byCategory).toBeDefined();
+    });
+
+    it('?slim with an unknown field name rejects 400 with an enumerated message', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 72, headSha: 'h72', baseSha: 'b72' });
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=byTag,bogus` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      // The error message names the offending field so the operator
+      // can fix the typo without guessing.
+      expect(body.message).toContain("'bogus'");
+      // ...and lists the valid names so they know what to use.
+      expect(body.message).toContain('byTag');
+      expect(body.message).toContain('byFile');
+    });
+
+    it('?slim with an empty intermediate entry rejects 400 (stray comma)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 73, headSha: 'h73', baseSha: 'b73' });
+      // A double comma (`byTag,,byFile`) is almost always a forgotten
+      // name; silently widening the projection would mask the typo.
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=byTag,,byFile` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      expect(body.message).toContain('empty entry');
+    });
+
+    it('?slim=BYTAG case-insensitively resolves to the canonical byTag', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 17, owner: 'o', repo: 'r', prNumber: 74, headSha: 'h74', baseSha: 'b74' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 74, headSha: 'h74', baseSha: 'b74' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=BYTAG` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // URL-cased input resolves to canonical camelCase in slimFields.
+      expect(body.slimFields).toEqual(['byTag']);
+      expect(body.persisted.byTag).toBeUndefined();
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
