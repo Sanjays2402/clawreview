@@ -224,6 +224,126 @@ describe('clawreview review drift', () => {
     expect(r.stdout).toContain('owasp:a01');
     expect(r.stdout).toContain('owasp:a07');
   });
+
+  // Tick 20: --min-confidence + --severity-threshold filters on the
+  // single-shot review drift command. Same contract as the server's
+  // /digest ?minConfidence= / ?severityThreshold= knobs and the CLI's
+  // `stats --min-confidence` flag -- all four consumers share one
+  // filter contract via findingDigest.
+  describe('--min-confidence + --severity-threshold (tick 20)', () => {
+    // Mixed findings: 4 total spanning confidence x severity so each
+    // filter arm can be exercised independently.
+    const mixed = () => [
+      { agent: 'A', category: 'security', severity: 'critical', title: 'A',
+        rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+      { agent: 'B', category: 'security', severity: 'medium', title: 'B',
+        rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.3, tags: [] },
+      { agent: 'C', category: 'style', severity: 'low', title: 'C',
+        rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.9, tags: [] },
+      { agent: 'D', category: 'style', severity: 'nit', title: 'D',
+        rationale: 'r', file: 'd.ts', startLine: 4, confidence: 0.2, tags: [] },
+    ];
+
+    it('--min-confidence floors fresh recompute and reflects in drift', async () => {
+      const dir = await tmpDir();
+      const path = join(dir, 'review.json');
+      const findings = mixed();
+      // Persisted: unfiltered (4 findings).
+      const digest = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      await writeFile(path, JSON.stringify({ reviewId: 'rv_filter', findings, digest }));
+      const r = await run([], { input: path, 'min-confidence': '0.5', format: 'json' });
+      // Persisted counted all 4; filtered fresh keeps only critical + low (confidence 0.9).
+      const out = JSON.parse(r.stdout);
+      expect(out.persisted.total).toBe(4);
+      expect(out.fresh.total).toBe(2);
+      expect(out.fresh.totalsBySeverity.critical).toBe(1);
+      expect(out.fresh.totalsBySeverity.low).toBe(1);
+      expect(out.fresh.totalsBySeverity.medium).toBe(0);
+      expect(out.fresh.totalsBySeverity.nit).toBe(0);
+      // Echoed filter is the resolved numeric.
+      expect(out.minConfidence).toBe(0.5);
+      expect(out.severityThreshold).toBeNull();
+      // Drift surfaces the gap (-2 from filter).
+      expect(out.drift.hasDrift).toBe(true);
+      expect(out.drift.totalDelta).toBe(-2);
+      // Exit 3 on drift.
+      expect(r.exitCode).toBe(3);
+    });
+
+    it('--severity-threshold drops less-severe findings from fresh', async () => {
+      const dir = await tmpDir();
+      const path = join(dir, 'review.json');
+      const findings = mixed();
+      const digest = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      await writeFile(path, JSON.stringify({ findings, digest }));
+      const r = await run([], { input: path, 'severity-threshold': 'medium', format: 'json' });
+      const out = JSON.parse(r.stdout);
+      // critical + medium pass; low + nit dropped.
+      expect(out.fresh.total).toBe(2);
+      expect(out.fresh.totalsBySeverity.critical).toBe(1);
+      expect(out.fresh.totalsBySeverity.medium).toBe(1);
+      expect(out.fresh.totalsBySeverity.low).toBe(0);
+      expect(out.fresh.totalsBySeverity.nit).toBe(0);
+      expect(out.severityThreshold).toBe('medium');
+      expect(out.minConfidence).toBeNull();
+    });
+
+    it('--min-confidence + --severity-threshold compose (AND)', async () => {
+      const dir = await tmpDir();
+      const path = join(dir, 'review.json');
+      const findings = mixed();
+      const digest = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      await writeFile(path, JSON.stringify({ findings, digest }));
+      const r = await run([], {
+        input: path,
+        'min-confidence': '0.5',
+        'severity-threshold': 'high',
+        format: 'json',
+      });
+      const out = JSON.parse(r.stdout);
+      // Only critical@0.9 clears BOTH floors.
+      expect(out.fresh.total).toBe(1);
+      expect(out.fresh.totalsBySeverity.critical).toBe(1);
+      // Echoes both.
+      expect(out.minConfidence).toBe(0.5);
+      expect(out.severityThreshold).toBe('high');
+    });
+
+    it('echoes null for both filters when neither flag is supplied (back-compat)', async () => {
+      const dir = await tmpDir();
+      const path = join(dir, 'review.json');
+      const findings = mixed();
+      const digest = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      await writeFile(path, JSON.stringify({ findings, digest }));
+      const r = await run([], { input: path, format: 'json' });
+      const out = JSON.parse(r.stdout);
+      expect(out.minConfidence).toBeNull();
+      expect(out.severityThreshold).toBeNull();
+      // All four findings counted on fresh (no filter).
+      expect(out.fresh.total).toBe(4);
+    });
+
+    it('filter requested on /digest input shape (no findings) emits a warning and is ignored', async () => {
+      const dir = await tmpDir();
+      const path = join(dir, 'digest.json');
+      // /digest body: persisted + fresh + no findings.
+      const persistedFindings = mixed();
+      const freshFindings = mixed().slice(0, 2);
+      const persisted = findingDigest(persistedFindings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      const fresh = findingDigest(freshFindings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+      await writeFile(path, JSON.stringify({ reviewId: 'rv_digest', persisted, fresh }));
+      const r = await run([], { input: path, 'min-confidence': '0.7', format: 'json' });
+      // Warning surfaces on stderr.
+      expect(r.stderr).toContain('--min-confidence / --severity-threshold');
+      expect(r.stderr).toContain('requires the /api/reviews/:id input shape');
+      // Fresh is unfiltered (the original 2).
+      const out = JSON.parse(r.stdout);
+      expect(out.fresh.total).toBe(2);
+      // Echo carries the raw operator value (so a CI gate can detect
+      // that they meant to pass it but couldn't).
+      expect(out.minConfidence).toBe(0.7);
+    });
+  });
 });
 
 describe('clawreview review drift --watch (tick 15)', () => {

@@ -11,7 +11,7 @@ Usage:
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>|<a>...<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
-  clawreview review drift [--input <path>] [--format text|json]
+  clawreview review drift [--input <path>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
@@ -95,5 +95,6 @@ Examples:
   clawreview run --format json | clawreview authors --top 5
   curl -s https://clawreview/api/reviews/abc123/digest | clawreview review drift
   curl -s https://clawreview/api/reviews/abc123 | clawreview review drift --format json | jq '.drift.hasDrift'
+  curl -s https://clawreview/api/reviews/abc123 | clawreview review drift --min-confidence 0.7  # preview "would drift change if we tighten the floor?"
 `;
 }

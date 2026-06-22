@@ -11,7 +11,7 @@ import {
   observeReviewDriftWatchPoll,
   type MetricsBundle,
 } from '@clawreview/telemetry';
-import type { Finding } from '@clawreview/types';
+import type { Finding, Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
 
@@ -140,6 +140,34 @@ async function runReviewDriftSingle(args: ParsedArgs): Promise<void> {
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
 
+  // Tick 20: --min-confidence / --severity-threshold pre-bucket
+  // filters. Same semantics as `stats --min-confidence` -- both flow
+  // through findingDigest's normaliser so the CLI shares one filter
+  // contract with the worker / server route / aggregator.
+  //
+  // Application rules for `review drift`:
+  //   - Input shape /api/reviews/:id (carries `findings`): the CLI
+  //     RE-COMPUTES `fresh` over `findings` with the filter applied,
+  //     and the drift is computed against the persisted digest as
+  //     usual. Use case: an operator wants to preview "would the
+  //     header change if we tightened the floor?" without going
+  //     through the dashboard.
+  //   - Input shape /api/reviews/:id/digest (carries `fresh`): the
+  //     filter cannot be applied client-side (we don't have the
+  //     findings array). The CLI emits a one-line stderr warning
+  //     and ignores the flag, leaving the existing fresh / drift
+  //     pair intact. Use case: an operator who already has a /digest
+  //     body and forgot the filter should hit the server with
+  //     ?minConfidence=... instead.
+  const minConfidenceRaw = args.flags['min-confidence'];
+  const minConfidence =
+    minConfidenceRaw === undefined ? undefined : Number(String(minConfidenceRaw));
+  const severityThreshold =
+    args.flags['severity-threshold'] === undefined
+      ? undefined
+      : String(args.flags['severity-threshold']);
+  const hasFilter = minConfidence !== undefined || severityThreshold !== undefined;
+
   let raw: string;
   if (inputPath) {
     try {
@@ -176,23 +204,46 @@ async function runReviewDriftSingle(args: ParsedArgs): Promise<void> {
   // over the /api/reviews/:id body's findings+digest (the /digest
   // body is the dedicated DTO, the /reviews/:id body is the
   // recompute fallback).
+  //
+  // Tick 20: when filters are supplied AND we hold the findings array,
+  // re-compute fresh from findings with the filters applied. When the
+  // input is /digest shape (no findings), filters can't apply
+  // client-side -- emit a warning, ignore the flag, keep the existing
+  // fresh.
   let persisted: FindingDigest | null;
   let fresh: FindingDigest;
-  if (parsed.fresh) {
-    // /digest body. `persisted` may be explicit null (legacy review).
-    fresh = parsed.fresh;
-    persisted = parsed.persisted ?? null;
-  } else if (Array.isArray(parsed.findings)) {
+  let filtersApplied = false;
+  if (Array.isArray(parsed.findings)) {
     // /api/reviews/:id body. Recompute fresh with the worker's tick-12
     // / tick-13 cap choices (8/8 + hotspots:true) so the output is
     // byte-identical to the server's /digest response on the same
-    // input.
+    // input. When --min-confidence / --severity-threshold is set, the
+    // filter applies BEFORE the bucket arithmetic (findingDigest's
+    // tick-19 / tick-20 contract).
     fresh = findingDigest(parsed.findings, {
       topCategories: 8,
       topAgents: 8,
       hotspots: true,
+      minConfidence,
+      severityThreshold: severityThreshold as Severity | undefined,
     });
     persisted = parsed.digest ?? null;
+    filtersApplied = hasFilter;
+  } else if (parsed.fresh) {
+    // /digest body. `persisted` may be explicit null (legacy review).
+    if (hasFilter) {
+      // Filter requested but findings absent. Warn so an operator
+      // realises the flag had no effect on this branch and re-hits
+      // the server with ?minConfidence=... instead.
+      process.stderr.write(
+        `clawreview review drift: --min-confidence / --severity-threshold ` +
+          `requires the /api/reviews/:id input shape (carries 'findings'); ` +
+          `received /api/reviews/:id/digest shape -- filters ignored. ` +
+          `Re-request the server with ?minConfidence=... / ?severityThreshold=...\n`,
+      );
+    }
+    fresh = parsed.fresh;
+    persisted = parsed.persisted ?? null;
   } else {
     process.stderr.write(
       `clawreview review drift: input lacks both 'fresh' and 'findings' -- ` +
@@ -209,7 +260,13 @@ async function runReviewDriftSingle(args: ParsedArgs): Promise<void> {
     persisted ?? findingDigest([], { hotspots: false });
   // Honour a pre-computed drift if the input carried one (saves the
   // re-walk; both server and CLI compute it identically by contract).
-  const drift = parsed.drift ?? computeDigestDrift(persistedForDrift, fresh);
+  // EXCEPT when filters are applied: the input's drift was computed
+  // against the unfiltered fresh, so we always recompute when the
+  // CLI ran the filter itself.
+  const drift =
+    filtersApplied || !parsed.drift
+      ? computeDigestDrift(persistedForDrift, fresh)
+      : parsed.drift;
 
   if (format === 'json') {
     process.stdout.write(
@@ -219,6 +276,14 @@ async function runReviewDriftSingle(args: ParsedArgs): Promise<void> {
           persisted, // echo null vs persisted as-is for legacy detection
           fresh,
           drift,
+          // Tick 20: echo the resolved filters so a CI gate / jq
+          // pipeline can verify what the CLI actually applied. The
+          // raw operator-supplied severityThreshold is echoed (not
+          // the normalised value) so a case-mismatch is detectable.
+          // `null` whenever the flag was absent (back-compat shape).
+          minConfidence: minConfidence === undefined ? null : minConfidence,
+          severityThreshold:
+            severityThreshold === undefined ? null : severityThreshold,
         },
         null,
         2,
