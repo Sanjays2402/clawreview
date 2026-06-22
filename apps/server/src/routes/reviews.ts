@@ -86,10 +86,58 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       reply.code(400);
       return { error: 'BadInput' };
     }
+    // Tick 15: `?recompute=fresh|cached` toggle. The default behaviour
+    // recomputes the digest on every request (matches tick 14's
+    // contract). `cached` skips the recompute and returns ONLY the
+    // persisted digest -- useful when a dashboard already pulled the
+    // full /api/reviews/:id body and just wants the persisted shape
+    // without a second tree walk over `findings`.
+    //
+    // Shape per mode:
+    //   - fresh   (default): { persisted, fresh, drift }  -- existing tick-14 shape
+    //   - cached            : { persisted, fresh: null, drift: null, recompute: 'cached' }
+    //
+    // The `recompute` echo lets a consumer detect at runtime which path
+    // the server took (the route may treat unknown values as the
+    // default; the echo confirms it). When `cached` is requested AND
+    // the review has no persisted digest (legacy), the response carries
+    // `persisted: null` (matches the default path) so the dashboard's
+    // "legacy review" branch doesn't need a separate code path for
+    // cached mode.
+    //
+    // Telemetry: the read-side drift counter only fires on the `fresh`
+    // path. A cached read is intentionally an observability no-op (it
+    // did not actually check for drift), so counting it would corrupt
+    // the read-side stale rate. The `recompute` label could be added
+    // later if a "how often does a dashboard request the cached path?"
+    // signal becomes useful.
+    const queryParse = z
+      .object({
+        recompute: z.enum(['fresh', 'cached']).optional(),
+      })
+      .safeParse(req.query ?? {});
+    if (!queryParse.success) {
+      reply.code(400);
+      return { error: 'BadQuery', issues: queryParse.error.flatten() };
+    }
+    const recomputeMode = queryParse.data.recompute ?? 'fresh';
     const rec = await store.get(params.data.id);
     if (!rec) {
       reply.code(404);
       return { error: 'NotFound' };
+    }
+    if (recomputeMode === 'cached') {
+      // Pure read of the persisted shape. No fresh recompute, no drift
+      // calculation, no counter fire. The response shape mirrors the
+      // fresh path with `fresh` + `drift` nulled so consumers can use
+      // one schema regardless of mode.
+      return {
+        reviewId: rec.id,
+        persisted: rec.digest ?? null,
+        fresh: null,
+        drift: null,
+        recompute: 'cached' as const,
+      };
     }
     // Match the worker's tick-12 / tick-13 cap choices so a dashboard
     // can compare persisted.topAgents / topCategories slices directly
@@ -126,6 +174,9 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       persisted: rec.digest ?? null,
       fresh,
       drift,
+      // Echo the resolved mode so a consumer can verify which path the
+      // server took. Always 'fresh' on this branch.
+      recompute: 'fresh' as const,
     };
   });
 

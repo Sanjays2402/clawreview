@@ -543,6 +543,147 @@ describe('reviews and stats routes', () => {
       expect(text).toMatch(/clawreview_review_digest_drift_total\{[^}]*kind="fresh"[^}]*\} 1/);
       expect(text).toMatch(/clawreview_review_digest_drift_total\{[^}]*kind="stale"[^}]*\} 1/);
     });
+
+    // Tick 15: `?recompute=cached` switch lets a dashboard that already
+    // pulled the full /api/reviews/:id body skip the fresh recompute
+    // and just get the persisted shape back.
+    it('returns only persisted (fresh/drift null) when ?recompute=cached', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 15, owner: 'o', repo: 'r', prNumber: 50, headSha: 'h50', baseSha: 'b50' });
+      const findings = [
+        { agent: 'security', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 50, headSha: 'h50', baseSha: 'b50' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.persisted).not.toBeNull();
+      expect(body.persisted.total).toBe(1);
+      // The cached path explicitly nulls fresh + drift so consumers
+      // don't accidentally read stale recompute data.
+      expect(body.fresh).toBeNull();
+      expect(body.drift).toBeNull();
+      // Echo the resolved mode so a consumer can verify which path the
+      // server took.
+      expect(body.recompute).toBe('cached');
+    });
+
+    it('returns persisted=null on cached mode for a legacy review (matches fresh-mode contract)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 15, owner: 'o', repo: 'r', prNumber: 51, headSha: 'h51', baseSha: 'b51' });
+      const findings = [
+        { agent: 'style', category: 'style', severity: 'nit', title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.3, tags: [] },
+      ];
+      // No digest persisted -> legacy review path.
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 51, headSha: 'h51', baseSha: 'b51' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings,
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Legacy: persisted is null on both modes (no synthesis on cached
+      // path; consumers use the same "has persisted?" check regardless
+      // of mode).
+      expect(body.persisted).toBeNull();
+      expect(body.fresh).toBeNull();
+      expect(body.drift).toBeNull();
+      expect(body.recompute).toBe('cached');
+    });
+
+    it('echoes recompute=fresh on the default (no query) path', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 15, owner: 'o', repo: 'r', prNumber: 52, headSha: 'h52', baseSha: 'b52' });
+      const findings = [
+        { agent: 'style', category: 'style', severity: 'nit', title: 'Z', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.5, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 52, headSha: 'h52', baseSha: 'b52' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      // No ?recompute= -> defaults to 'fresh' AND echoes it explicitly.
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.fresh).not.toBeNull();
+      expect(body.drift).not.toBeNull();
+      expect(body.recompute).toBe('fresh');
+    });
+
+    it('?recompute=cached does NOT fire the read-side drift counter (observability no-op)', async () => {
+      // Counting a cached read as a drift sample would corrupt the
+      // stale-rate ratio: the route didn't actually check for drift,
+      // so the counter must stay quiet. This pins the contract.
+      const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
+      resetMetricsForTests();
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 15, owner: 'o', repo: 'r', prNumber: 53, headSha: 'h53', baseSha: 'b53' });
+      const findings = [
+        { agent: 'security', category: 'security', severity: 'high', title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.8, tags: [] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 53, headSha: 'h53', baseSha: 'b53' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      // Three cached reads back-to-back.
+      await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=cached` });
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      const text = await metrics.registry.metrics();
+      // No clawreview_review_digest_drift_total{kind=...} sample should
+      // have been emitted from the cached path.
+      expect(text).not.toMatch(/clawreview_review_digest_drift_total\{[^}]*kind=/);
+    });
+
+    it('rejects unknown ?recompute=<other> with 400 BadQuery', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 15, owner: 'o', repo: 'r', prNumber: 54, headSha: 'h54', baseSha: 'b54' });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 54, headSha: 'h54', baseSha: 'b54' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?recompute=stale` });
+      // Reject loudly rather than silently falling through to 'fresh';
+      // a typo at the caller would otherwise be invisible.
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
