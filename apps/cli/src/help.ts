@@ -8,7 +8,7 @@ Usage:
   clawreview presets list [--root <dir>] [--format text|json]
   clawreview presets show <name> [--root <dir>] [--format yaml|json|text]
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text]
-  clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>]
+  clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
   clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--format text|json]
   clawreview review drift [--input <path>] [--format text|json]
@@ -68,6 +68,7 @@ Examples:
   clawreview presets diff strict permissive --format json --output - | jq '.changed'
   clawreview presets diff --base strict --target permissive --format json | jq '.changed'
   clawreview presets diff web-strict web-strict --since HEAD~5   # diff one local preset across 5 commits
+  clawreview presets diff web web --since-range HEAD~5..HEAD     # range sugar: split into base+target
   clawreview run --format json | clawreview stats --fail-on high
   clawreview run --format json | clawreview stats --by agent
   clawreview run --format json | clawreview stats --by agent --top-agents 3

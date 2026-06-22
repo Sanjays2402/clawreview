@@ -2623,3 +2623,239 @@ describe('clawreview presets diff --since-base / --since-target (tick 15)', () =
     expect(parsed.sinceBase).toBeNull();
   });
 });
+
+describe('parseSinceRange (tick 16)', () => {
+  // Pure-helper unit tests so every error path has a single-line
+  // test surface without driving the CLI binary.
+
+  it('returns absent when raw is unset / non-string', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    expect(parseSinceRange(undefined).kind).toBe('absent');
+    expect(parseSinceRange(null).kind).toBe('absent');
+    expect(parseSinceRange(42).kind).toBe('absent');
+    expect(parseSinceRange({}).kind).toBe('absent');
+    expect(parseSinceRange('').kind).toBe('absent');
+    expect(parseSinceRange('   ').kind).toBe('absent');
+  });
+
+  it('parses a simple two-ref range cleanly', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main..HEAD');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('main');
+    expect(r.target).toBe('HEAD');
+    expect(r.raw).toBe('main..HEAD');
+  });
+
+  it('trims whitespace around both refs and the whole range', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('  v1.2.3 .. v1.3.0  ');
+    expect(r.kind).toBe('ok');
+    if (r.kind !== 'ok') return;
+    expect(r.base).toBe('v1.2.3');
+    expect(r.target).toBe('v1.3.0');
+    // raw echoes the trimmed range so the JSON/YAML/text header is clean.
+    expect(r.raw).toBe('v1.2.3 .. v1.3.0');
+  });
+
+  it('rejects an empty base ref with a hint', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('..HEAD');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('base ref');
+    expect(r.message).toContain('--since-target');
+  });
+
+  it('rejects an empty target ref with a hint', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main..');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('target ref');
+    expect(r.message).toContain('--since-base');
+  });
+
+  it('rejects triple-dot syntax explicitly', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('main...HEAD');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('triple-dot');
+  });
+
+  it('rejects multiple `..` separators', async () => {
+    const { parseSinceRange } = await import('../src/commands/presets.js');
+    const r = parseSinceRange('a..b..c');
+    expect(r.kind).toBe('invalid');
+    if (r.kind !== 'invalid') return;
+    expect(r.message).toContain('exactly one');
+  });
+});
+
+describe('clawreview presets diff --since-range (tick 16)', () => {
+  it('splits a..b into sinceBase=a, sinceTarget=b', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // v1 at high.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    const v1 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // v2 at low.
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v2'], { cwd: dir });
+    const v2 = (await exec('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim();
+    // Range form should produce the SAME diff as the explicit form.
+    const range = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': `${v1}..${v2}`,
+    });
+    expect(range.exitCode).toBe(3);
+    const parsedRange = JSON.parse(range.stdout);
+    // sinceBase + sinceTarget echo NULL (the explicit flags weren't
+    // passed); sinceRange echoes the original string.
+    expect(parsedRange.sinceBase).toBeNull();
+    expect(parsedRange.sinceTarget).toBeNull();
+    expect(parsedRange.sinceRange).toBe(`${v1}..${v2}`);
+    expect(parsedRange.changed.severity_threshold).toEqual({ a: 'high', b: 'low' });
+    // Equivalence: the explicit form should match the range form's
+    // delta byte-for-byte (modulo the echo fields). Different test
+    // surfaces but same diff data.
+    const explicit = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-base': v1,
+      'since-target': v2,
+    });
+    const parsedExplicit = JSON.parse(explicit.stdout);
+    expect(parsedRange.changed).toEqual(parsedExplicit.changed);
+    expect(parsedRange.only_in_a).toEqual(parsedExplicit.only_in_a);
+    expect(parsedRange.only_in_b).toEqual(parsedExplicit.only_in_b);
+  });
+
+  it('rejects --since-range combined with --since-base', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main..HEAD',
+      'since-base': 'HEAD',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    expect(r.stderr).toContain('--since-range');
+    expect(r.stderr).toContain('--since-base');
+  });
+
+  it('rejects --since-range combined with --since-target', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main..HEAD',
+      'since-target': 'HEAD',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    expect(r.stderr).toContain('--since-range');
+    expect(r.stderr).toContain('--since-target');
+  });
+
+  it('rejects --since-range combined with --since (legacy)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main..HEAD',
+      since: 'HEAD',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    expect(r.stderr).toContain('--since-range');
+    expect(r.stderr).toContain('--since');
+  });
+
+  it('rejects an invalid --since-range value (empty target)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['web', 'web'], {
+      format: 'json',
+      'since-range': 'main..',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--since-range');
+    expect(r.stderr).toContain('target ref');
+  });
+
+  it('echoes the range in YAML and text headers', async () => {
+    const { execFile } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(execFile);
+    const dir = await tmpDir();
+    await exec('git', ['init', '-q', '-b', 'main'], { cwd: dir });
+    await exec('git', ['config', 'user.email', 'test@example.com'], { cwd: dir });
+    await exec('git', ['config', 'user.name', 'Test'], { cwd: dir });
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await exec('git', ['add', '.'], { cwd: dir });
+    await exec('git', ['commit', '-q', '-m', 'v1'], { cwd: dir });
+    await writeFile(
+      join(dir, '.clawreview/presets/web.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const yaml = await runDiff(dir, ['web', 'web'], {
+      format: 'yaml',
+      'since-range': 'HEAD..HEAD',
+    });
+    expect(yaml.exitCode).toBe(0); // both refs resolve to v1; no drift
+    expect(yaml.stdout).toContain('# since-range: HEAD..HEAD');
+    const text = await runDiff(dir, ['web', 'web'], {
+      format: 'text',
+      'since-range': 'HEAD..HEAD',
+    });
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain('since-range:');
+    expect(text.stdout).toContain('HEAD..HEAD');
+  });
+});

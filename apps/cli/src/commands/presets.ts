@@ -758,16 +758,26 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   // release-2.4 preset look like vs the release-2.6 preset?") where
   // neither side is HEAD.
   //
+  // Tick 16: --since-range <a>..<b> is sugar for `--since-base <a>
+  // --since-target <b>` -- mirrors `git log a..b` so an operator
+  // who reaches for the range syntax expects it to Just Work. The
+  // split happens here so the downstream resolution path stays
+  // unchanged (it sees the same `refForA` / `refForB` it would
+  // have seen with the explicit flags).
+  //
   // Flag precedence on each side:
-  //   - --since-base wins for chain A; otherwise --since (legacy);
-  //     otherwise HEAD (the working tree).
-  //   - --since-target wins for chain B; otherwise HEAD (no legacy
-  //     fallback because tick-14's --since never had a chain-B
-  //     equivalent).
+  //   - --since-base wins for chain A; otherwise --since-range A side;
+  //     otherwise --since (legacy); otherwise HEAD (working tree).
+  //   - --since-target wins for chain B; otherwise --since-range B
+  //     side; otherwise HEAD (no legacy fallback because tick-14's
+  //     --since never had a chain-B equivalent).
   //
   // Combining --since with --since-base on the same side is an error
   // (the operator clearly meant one or the other; refuse loudly so a
   // typo doesn't silently degrade to the wrong resolution).
+  // Combining --since-range with either explicit flag is also an
+  // error for the same reason -- if the operator wants a half-range
+  // they should use the explicit flag, not split a range syntax.
   //
   // Built-in presets are version-agnostic (they live in the
   // @clawreview/types package source); only LOCAL presets are
@@ -791,6 +801,47 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     typeof sinceTargetRaw === 'string' && sinceTargetRaw.trim().length > 0
       ? sinceTargetRaw.trim()
       : null;
+  // --since-range <a>..<b>: git-style range sugar. Splits into chain-A
+  // and chain-B refs that compose with the existing --since-base /
+  // --since-target resolution. Refuse loudly if the operator combined
+  // a range with either explicit flag -- it's almost always a typo
+  // (they probably forgot they set one or the other).
+  const sinceRangeRaw = args.flags['since-range'];
+  const sinceRangeParsed = parseSinceRange(sinceRangeRaw);
+  if (sinceRangeParsed.kind === 'invalid') {
+    process.stderr.write(
+      `clawreview presets diff: --since-range '${String(sinceRangeRaw ?? '')}' is invalid -- ` +
+        `${sinceRangeParsed.message}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  if (sinceRangeParsed.kind === 'ok') {
+    if (sinceBase !== null) {
+      process.stderr.write(
+        `clawreview presets diff: --since-range and --since-base are mutually ` +
+          `exclusive (both target chain a); pick one\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    if (sinceTarget !== null) {
+      process.stderr.write(
+        `clawreview presets diff: --since-range and --since-target are mutually ` +
+          `exclusive (both target chain b); pick one\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    if (sinceRef !== null) {
+      process.stderr.write(
+        `clawreview presets diff: --since-range and --since are mutually ` +
+          `exclusive (both target chain a); pick one\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+  }
   // Mutex: --since and --since-base apply to the SAME slot, so
   // accepting both would let a typo silently pick the wrong ref.
   // Refuse loudly. (--since with --since-target is fine: --since
@@ -804,10 +855,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
   // Resolved per-side refs. `since` is the legacy chain-A ref kept for
-  // back-compat; `sinceBase` is the explicit chain-A form. The
-  // helpers below treat them identically once we collapse them here.
-  const refForA = sinceBase ?? sinceRef;
-  const refForB = sinceTarget;
+  // back-compat; `sinceBase` is the explicit chain-A form. The range
+  // form contributes both sides at once when present. The helpers
+  // below treat them identically once we collapse them here.
+  const refForA = sinceBase ?? (sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.base : null) ?? sinceRef;
+  const refForB = sinceTarget ?? (sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.target : null);
 
   const localPresetsHead = await loadLocalPresets(root);
   let localPresetsForARef: Record<string, ConfigPreset> | null = null;
@@ -961,6 +1013,13 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
         since: sinceRef,
         sinceBase,
         sinceTarget,
+        // Tick 16: --since-range echoes the original range string when
+        // active so a downstream tool can detect "this diff came from a
+        // range" without having to compare sinceBase + sinceTarget for
+        // equality with the parsed range. `null` when --since-range
+        // was not passed; consumers that only key off the resolved
+        // sinceBase/sinceTarget see no behavioural change.
+        sinceRange: sinceRangeParsed.kind === 'ok' ? sinceRangeParsed.raw : null,
         // Surface the active filter so a downstream tool can verify
         // the diff was scoped (or not). Sorted for deterministic
         // JSON output. Exactly one of `onlyFields` / `excludeFields`
@@ -1003,6 +1062,9 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     }
     if (sinceTarget !== null) {
       headerLines.push(`# since-target: ${sinceTarget}  (chain b resolved at this git ref)`);
+    }
+    if (sinceRangeParsed.kind === 'ok') {
+      headerLines.push(`# since-range: ${sinceRangeParsed.raw}  (split into base + target)`);
     }
     if (onlyFields !== null) {
       headerLines.push(`# only-fields: ${[...onlyFields].sort().join(', ')}`);
@@ -1051,6 +1113,11 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     if (sinceTarget !== null) {
       process.stdout.write(
         `${kleur.bold('since-target')}: ${sinceTarget} ${kleur.gray('(chain b resolved at this git ref)')}\n`,
+      );
+    }
+    if (sinceRangeParsed.kind === 'ok') {
+      process.stdout.write(
+        `${kleur.bold('since-range')}: ${sinceRangeParsed.raw} ${kleur.gray('(split into base + target)')}\n`,
       );
     }
     if (onlyFields !== null) {
@@ -1119,6 +1186,82 @@ function parseChain(raw: string): string[] | null {
   const chain = raw.split(',').map((s) => s.trim());
   if (chain.some((s) => s.length === 0)) return null;
   return chain;
+}
+
+/**
+ * Result of parsing the `--since-range <a>..<b>` flag.
+ *
+ * Three states the caller can branch on without inspecting strings:
+ *   - `'absent'` -- flag was not passed at all; no error.
+ *   - `'ok'`     -- flag parsed cleanly; `base` + `target` are
+ *                   trimmed and non-empty; `raw` echoes the original
+ *                   for downstream JSON/YAML/text headers.
+ *   - `'invalid'` -- flag was passed but malformed; `message` carries
+ *                   a human-readable reason for the stderr line.
+ *
+ * Exported (alongside `parseSinceRange`) so the diff command and the
+ * test suite share one parser. The CLI rejects the flag at the
+ * top-level when this returns `'invalid'`; an `'absent'` result lets
+ * the resolution fall through to `--since-base` / `--since` / HEAD.
+ */
+export type SinceRangeParse =
+  | { kind: 'absent' }
+  | { kind: 'ok'; raw: string; base: string; target: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Parse the `--since-range <a>..<b>` flag value.
+ *
+ * Splits on the literal `..` separator (matches `git log a..b`
+ * syntax). Both sides must be non-empty after trimming -- a stray
+ * range like `..main` or `main..` is rejected because it's almost
+ * always a typo (the operator probably meant `--since-base main`
+ * or `--since-target main` instead).
+ *
+ * Multiple `..` separators (e.g. `a..b..c`) are rejected for the
+ * same reason: ambiguous, refuse loudly. The triple-dot syntax
+ * `a...b` (git's symmetric difference) is NOT supported -- this
+ * range is a simple two-ref split, not a merge-base resolution.
+ *
+ * Pure / exported so the test suite can pin every error path
+ * without driving the CLI binary.
+ */
+export function parseSinceRange(raw: unknown): SinceRangeParse {
+  if (typeof raw !== 'string' || raw.trim().length === 0) {
+    return { kind: 'absent' };
+  }
+  const trimmed = raw.trim();
+  // Reject `a...b` explicitly so the operator doesn't get a confusing
+  // empty-segment error from the simple split. Git's `...` is
+  // symmetric difference which doesn't map onto our two-ref model.
+  if (trimmed.includes('...')) {
+    return {
+      kind: 'invalid',
+      message: `triple-dot syntax 'a...b' is not supported (use 'a..b' for the simple two-ref range)`,
+    };
+  }
+  const parts = trimmed.split('..');
+  if (parts.length !== 2) {
+    return {
+      kind: 'invalid',
+      message: `expected exactly one '..' separator (e.g. 'main..HEAD'); got ${parts.length - 1}`,
+    };
+  }
+  const baseRaw = parts[0]!.trim();
+  const targetRaw = parts[1]!.trim();
+  if (baseRaw.length === 0) {
+    return {
+      kind: 'invalid',
+      message: `base ref (before '..') is empty; use --since-target instead if you only need a chain-b ref`,
+    };
+  }
+  if (targetRaw.length === 0) {
+    return {
+      kind: 'invalid',
+      message: `target ref (after '..') is empty; use --since-base instead if you only need a chain-a ref`,
+    };
+  }
+  return { kind: 'ok', raw: trimmed, base: baseRaw, target: targetRaw };
 }
 
 /**
