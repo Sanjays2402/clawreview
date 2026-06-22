@@ -391,6 +391,13 @@ export async function startWorker(logger: Logger): Promise<void> {
       // dashboard and CLI use.
       topCategories: 8,
       topAgents: 8,
+      // Tick 16: render the "By tag" breakdown line so the PR comment
+      // header carries the same per-tag ordering the dashboard reads
+      // from digest.topTags. Cap 8 mirrors the agent / category caps;
+      // when a repo doesn't tag its findings the line silently
+      // collapses to a single `(untagged) N` entry (or no line at
+      // all when total = 0 -- the no-findings path skips this branch).
+      topTags: 8,
       digest: reviewDigest,
     })}`;
 

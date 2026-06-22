@@ -419,3 +419,126 @@ describe('renderPrComment topAgents / topCategories (tick 11)', () => {
     expect(md).not.toMatch(/`a2` /);
   });
 });
+
+describe('renderPrComment topTags (tick 16)', () => {
+  // The "By tag" line is the third breakdown surface after By
+  // category and By agent. It opts in via `topTags` so existing
+  // tag-free callers see no change in their rendered comments.
+
+  function tagged() {
+    return aggregate(
+      [
+        // 3 findings tagged owasp:a01
+        { agent: 'sec', category: 'security' as const, severity: 'high' as const, file: 'a.ts', startLine: 1,  tags: ['owasp:a01'] },
+        { agent: 'sec', category: 'security' as const, severity: 'high' as const, file: 'a.ts', startLine: 11, tags: ['owasp:a01'] },
+        { agent: 'sec', category: 'security' as const, severity: 'high' as const, file: 'a.ts', startLine: 21, tags: ['owasp:a01'] },
+        // 2 findings tagged perf
+        { agent: 'perf', category: 'performance' as const, severity: 'medium' as const, file: 'b.ts', startLine: 1,  tags: ['perf'] },
+        { agent: 'perf', category: 'performance' as const, severity: 'medium' as const, file: 'b.ts', startLine: 2,  tags: ['perf'] },
+        // 1 finding tagged accessibility
+        { agent: 'a11y', category: 'maintainability' as const, severity: 'low' as const, file: 'c.ts', startLine: 1, tags: ['accessibility'] },
+        // 1 untagged finding
+        { agent: 'misc', category: 'bug' as const, severity: 'low' as const, file: 'd.ts', startLine: 1, tags: [] as string[] },
+      ].map((row, i) => ({
+        ...row,
+        title: `t${i}`,
+        rationale: 'r',
+        confidence: 0.8,
+      })),
+      { maxPerFile: 50, threshold: 'nit' as const },
+    );
+  }
+
+  it('renders the by-tag line ONLY when topTags is set (default: no tag line)', () => {
+    const r = tagged();
+    const without = renderPrComment(r, { prNumber: 1, headSha: 'abc1234' });
+    expect(without).not.toMatch(/By tag:/);
+
+    const withCap = renderPrComment(r, { prNumber: 1, headSha: 'abc1234', topTags: 5 });
+    expect(withCap).toMatch(/By tag: /);
+    // owasp:a01 leads at 3.
+    expect(withCap).toMatch(/`owasp:a01` 3/);
+    // perf at 2.
+    expect(withCap).toMatch(/`perf` 2/);
+    // accessibility and (untagged) tied at 1 -> alphabetical ascending
+    // puts `(untagged)` first because '(' < 'a' in ASCII.
+    expect(withCap).toMatch(/`\(untagged\)` 1/);
+    expect(withCap).toMatch(/`accessibility` 1/);
+  });
+
+  it('appends _(N more)_ when topTags truncates the list', () => {
+    const r = tagged();
+    const md = renderPrComment(r, { prNumber: 1, headSha: 'abc1234', topTags: 2 });
+    // Only owasp:a01 (3) and perf (2) make the cut. accessibility +
+    // (untagged) collapse into the tail annotation.
+    expect(md).toMatch(/By tag: `owasp:a01` 3 · `perf` 2 _\(2 more\)_/);
+    expect(md).not.toMatch(/`accessibility` /);
+    expect(md).not.toMatch(/`\(untagged\)` /);
+  });
+
+  it('does not render an (N more) tail when the cap is at or above the bucket count', () => {
+    const r = tagged();
+    const md = renderPrComment(r, { prNumber: 1, headSha: 'abc1234', topTags: 10 });
+    expect(md).toMatch(/By tag: /);
+    // All four tag buckets render -- no truncation annotation.
+    expect(md).toMatch(/`owasp:a01` 3/);
+    expect(md).toMatch(/`perf` 2/);
+    expect(md).toMatch(/`accessibility` 1/);
+    expect(md).toMatch(/`\(untagged\)` 1/);
+    // Belt-and-braces: NO _(N more)_ tail on the By tag line
+    // specifically (other lines might legitimately have one).
+    const tagLine = md.split('\n').find((l) => l.startsWith('By tag:'));
+    expect(tagLine).toBeDefined();
+    expect(tagLine).not.toMatch(/more\)_/);
+  });
+
+  it('reuses a caller-supplied digest for topTags (worker hot path)', () => {
+    // Same shape as the topAgents/topCategories caller-digest test:
+    // hand a fake digest with a pathological topTags slice and
+    // verify the renderer used the injected slice, not a recompute.
+    const r = tagged();
+    const fakeDigest = {
+      total: 0,
+      totalsBySeverity: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 },
+      byCategory: {},
+      byAgent: {},
+      byFile: {},
+      byTag: { 'injected-tag': 99 },
+      topAgents: [],
+      topCategories: [],
+      topFiles: [],
+      topTags: [{ tag: 'injected-tag', count: 99 }],
+    };
+    const md = renderPrComment(r, {
+      prNumber: 1,
+      headSha: 'abc1234',
+      topTags: 1,
+      digest: fakeDigest as unknown as FindingDigest,
+    });
+    expect(md).toMatch(/By tag: `injected-tag` 99/);
+    // The genuine tags must NOT appear.
+    expect(md).not.toMatch(/`owasp:a01` /);
+    expect(md).not.toMatch(/`perf` /);
+  });
+
+  it('composes with topCategories + topAgents (three breakdown lines)', () => {
+    // The three breakdown lines should all render in order:
+    // category, agent, tag. Tests that the new line slots in at the
+    // end without breaking the existing two.
+    const r = tagged();
+    const md = renderPrComment(r, {
+      prNumber: 1,
+      headSha: 'abc1234',
+      topCategories: 5,
+      topAgents: 5,
+      topTags: 5,
+    });
+    const lines = md.split('\n');
+    const categoryIdx = lines.findIndex((l) => l.includes('`security` '));
+    const agentIdx = lines.findIndex((l) => l.startsWith('By agent:'));
+    const tagIdx = lines.findIndex((l) => l.startsWith('By tag:'));
+    expect(categoryIdx).toBeGreaterThan(-1);
+    expect(agentIdx).toBeGreaterThan(categoryIdx);
+    expect(tagIdx).toBeGreaterThan(agentIdx);
+  });
+});

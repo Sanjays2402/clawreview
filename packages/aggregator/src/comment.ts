@@ -118,16 +118,35 @@ export interface CommentOptions {
    */
   topAgents?: number;
   /**
+   * Optional per-tag breakdown block in the comment header. When set,
+   * the renderer inserts a "By tag" line (capped at `topTags`) derived
+   * from the tick-15 `findingDigest()` topTags slice. The same data
+   * the CLI's `stats --by tag --top-tags <n>` (future) and the
+   * dashboard's tag panel consume.
+   *
+   * Mirrors the existing category / agent lines: each entry rendered
+   * as `` `tag` count `` joined by ` * `; the truncation annotation
+   * `_(N more)_` appears when the cap fires. The synthetic
+   * `(untagged)` bucket is surfaced alongside real tags by count --
+   * a corpus where most findings have no tags will show
+   * `(untagged)` first, which is the intended dashboard signal.
+   *
+   * Default: unset -> no by-tag header line (existing behaviour --
+   * tag rendering is opt-in because not every repo uses tags, and a
+   * `(untagged) 47` line would be noise for those repos).
+   */
+  topTags?: number;
+  /**
    * Pre-computed digest. When the caller already ran `findingDigest()`
    * (e.g. the worker reuses the same digest for the dashboard and the
    * comment), pass it here to skip the redundant walk inside this
    * renderer. The renderer only consumes `topAgents` / `topCategories`
-   * from this digest -- it does NOT use `topFiles` or `hotspots` (those
-   * still resolve via the `hotspots` opt).
+   * / `topTags` from this digest -- it does NOT use `topFiles` or
+   * `hotspots` (those still resolve via the `hotspots` opt).
    *
    * When unset, the renderer computes a digest internally IFF
-   * `topAgents` or `topCategories` is set. When neither is set, no
-   * digest is built (zero cost on the existing render path).
+   * `topAgents` or `topCategories` or `topTags` is set. When none are
+   * set, no digest is built (zero cost on the existing render path).
    */
   digest?: FindingDigest;
 }
@@ -153,19 +172,21 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     .map((s) => `${SEV_EMOJI[s]} ${totals[s]} ${SEVERITY_LABELS[s]}`)
     .join(' · ');
 
-  // Resolve a digest IF either of the top-N caps was set. Reuse the
+  // Resolve a digest IF any of the top-N caps was set. Reuse the
   // caller-supplied digest when present (worker hot path passes its
   // own); otherwise build one lazily so the existing cap-unset render
   // path is zero-cost.
   let digest: FindingDigest | undefined;
   const wantsTopCategories = typeof opts.topCategories === 'number' && opts.topCategories > 0;
   const wantsTopAgents = typeof opts.topAgents === 'number' && opts.topAgents > 0;
-  if (wantsTopCategories || wantsTopAgents) {
+  const wantsTopTags = typeof opts.topTags === 'number' && opts.topTags > 0;
+  if (wantsTopCategories || wantsTopAgents || wantsTopTags) {
     digest =
       opts.digest ??
       findingDigest(result.findings, {
         topCategories: wantsTopCategories ? opts.topCategories : 1,
         topAgents: wantsTopAgents ? opts.topAgents : 1,
+        topTags: wantsTopTags ? opts.topTags : 1,
         topFiles: 1,
       });
   }
@@ -206,12 +227,32 @@ export function renderPrComment(result: AggregateResult, opts: CommentOptions): 
     }
   }
 
+  // Tag line: opt-in (default off). Mirrors the agent line shape with
+  // a `By tag:` prefix so a reviewer can pattern-match across the
+  // three breakdown lines without re-reading the layout. The
+  // `(untagged)` sentinel surfaces alongside real tags ranked by
+  // count -- the dashboard reads byte-identical numbers via the same
+  // findingDigest helper.
+  let tagLine = '';
+  if (wantsTopTags && digest) {
+    const totalTags = Object.keys(digest.byTag).length;
+    const shownTags = digest.topTags;
+    if (shownTags.length > 0) {
+      const parts = shownTags.map((t) => `\`${t.tag}\` ${t.count}`);
+      const tail = totalTags > shownTags.length ? ` _(${totalTags - shownTags.length} more)_` : '';
+      tagLine = `By tag: ${parts.join(' · ')}${tail}`;
+    }
+  }
+
   const body: string[] = ['### ClawReview', '', summary];
   if (categoryLine) {
     body.push('', categoryLine);
   }
   if (agentLine) {
     body.push('', agentLine);
+  }
+  if (tagLine) {
+    body.push('', tagLine);
   }
   body.push('');
 
