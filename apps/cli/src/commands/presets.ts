@@ -816,6 +816,23 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     return;
   }
 
+  // Parse --max-output-bytes. Pure helper so the parser contract is
+  // unit-testable independently of the file-write. Defaults to
+  // PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES (100 KB) so an accidental
+  // pipe of a multi-megabyte preset diff into a downstream `jq` /
+  // `cat | mail` doesn't blow up a pipeline silently. An explicit
+  // `--max-output-bytes 0` disables the cap entirely.
+  const maxOutputBytesRaw = args.flags['max-output-bytes'];
+  const maxOutputBytes = parsePresetDiffMaxOutputBytes(maxOutputBytesRaw);
+  if (maxOutputBytes === 'invalid') {
+    process.stderr.write(
+      `clawreview presets diff: --max-output-bytes must be a non-negative integer ` +
+        `(0 disables the cap)\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
   const baseDelta = computePresetDelta(bodyA, bodyB);
   // Apply at most one of --only-fields / --exclude-fields (the mutex
   // check earlier already rejected the combo). The two filters share
@@ -850,6 +867,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
       2,
     )}\n`;
     if (outputPath !== null) {
+      const sizeCheck = enforcePresetDiffSizeCap(outputPath, jsonBody, maxOutputBytes);
+      if (sizeCheck !== 'ok') {
+        process.stderr.write(sizeCheck);
+        process.exitCode = 2;
+        return;
+      }
       await writePresetDiffOutput(outputPath, jsonBody);
     } else {
       process.stdout.write(jsonBody);
@@ -881,6 +904,12 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
     );
     const fullBody = `${header}\n${yamlBody}`;
     if (outputPath !== null) {
+      const sizeCheck = enforcePresetDiffSizeCap(outputPath, fullBody, maxOutputBytes);
+      if (sizeCheck !== 'ok') {
+        process.stderr.write(sizeCheck);
+        process.exitCode = 2;
+        return;
+      }
       await writePresetDiffOutput(outputPath, fullBody);
     } else {
       process.stdout.write(fullBody);
@@ -1221,6 +1250,129 @@ async function writePresetDiffOutput(
   await writeFile(outputPath, body, 'utf8');
   process.stderr.write(
     `clawreview presets diff: wrote ${body.length} bytes to ${outputPath}\n`,
+  );
+}
+
+/**
+ * Default size cap for `--output` / `--output -` writes when the
+ * caller doesn't pass `--max-output-bytes` explicitly. 100 KiB is
+ * chosen as a generous-but-bounded ceiling: a real-world preset diff
+ * fits in a few hundred bytes; a multi-kilobyte diff is plausible
+ * for a deeply-customised local preset stack; a megabyte-scale diff
+ * almost always indicates a runaway extends chain or a YAML that
+ * resolved to a giant body. Catching that BEFORE it lands on a pipe
+ * (where the downstream consumer is usually `jq` or `mail`) saves
+ * the on-call from a 30-second wait followed by a "what is this?"
+ * stack trace.
+ *
+ * Exported so test fixtures + integrations can reference the same
+ * literal without re-deriving it.
+ */
+export const PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES = 100 * 1024;
+
+/**
+ * Hard ceiling on `--max-output-bytes`. Even an explicit caller
+ * cannot ask for an unbounded write -- a 100 MiB preset diff was
+ * never the intended use case for this command, and an accidentally-
+ * typed `--max-output-bytes 100000000000` shouldn't allocate a
+ * gigabyte-scale buffer either. 16 MiB is a sanity ceiling that's
+ * still 160x the default; anything genuinely larger should be
+ * written via two `clawreview presets show <chain> --format yaml`
+ * calls and a manual diff, not through this command.
+ */
+export const PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING = 16 * 1024 * 1024;
+
+/**
+ * Pure parser for the `--max-output-bytes` flag. Returns:
+ *
+ *   - `number`     -- a valid byte cap (0 means "no cap", any
+ *                     positive integer means "fail when output
+ *                     exceeds N bytes"). Clamped to
+ *                     PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING.
+ *   - `'invalid'`  -- caller-supplied value was not a non-negative
+ *                     integer. The route layer surfaces this as
+ *                     exit-2 with a usage hint.
+ *
+ * Accepts string ("100000") or number forms because Hermes-style
+ * arg parsing hands flags as strings while a programmatic invoker
+ * (e.g. a test) is most naturally a number. Whitespace is trimmed.
+ *
+ * `undefined` / `null` / `true` (bare `--max-output-bytes` with no
+ * value) all map to the default cap so a stray flag without an
+ * argument doesn't accidentally disable the protection.
+ */
+export function parsePresetDiffMaxOutputBytes(
+  raw: unknown,
+): number | 'invalid' {
+  if (raw === undefined || raw === null || raw === true) {
+    return PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES;
+  }
+  let s: string;
+  if (typeof raw === 'number') {
+    s = String(raw);
+  } else if (typeof raw === 'string') {
+    s = raw.trim();
+  } else {
+    return 'invalid';
+  }
+  if (s.length === 0) return PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES;
+  // Reject decimals, signs, scientific notation; only plain
+  // non-negative integers make sense for a byte count.
+  if (!/^\d+$/.test(s)) return 'invalid';
+  const n = Number(s);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return 'invalid';
+  return Math.min(n, PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING);
+}
+
+/**
+ * Enforce the `--max-output-bytes` cap on a rendered diff body.
+ *
+ * Returns `'ok'` when the body is within the cap (or the cap is 0 /
+ * disabled). On overflow returns a stderr-ready error message
+ * including the actual and allowed sizes plus a hint to switch to a
+ * file-based `--output <path>` (which is the common escape hatch
+ * when the diff is genuinely large and the operator wants it
+ * persisted to disk anyway).
+ *
+ * Pure -- never touches the filesystem or process state. Exported so
+ * a unit test can pin the exact error message shape without spinning
+ * up a fake stdout / disk.
+ *
+ * The cap fires on STDOUT_SENTINEL writes too, because the stdout
+ * pipe is the exact case the cap was designed for: a pipeline
+ * accidentally streaming a multi-MB body into `jq` is worse than
+ * the same body landing as a file. For named-file writes the cap
+ * still applies (an operator who passed `--max-output-bytes 1024`
+ * presumably wanted the protection on the file path as well; the
+ * easy escape hatch is `--max-output-bytes 0` to disable it).
+ */
+export function enforcePresetDiffSizeCap(
+  outputPath: PresetDiffOutputTarget,
+  body: string,
+  maxBytes: number,
+): 'ok' | string {
+  // 0 (or any negative thanks to parsePresetDiffMaxOutputBytes
+  // clamping) disables the cap entirely. Mirrors the standard
+  // ulimit semantics: 0 = unlimited.
+  if (maxBytes === 0) return 'ok';
+  // Byte length: count UTF-8 bytes, not character code points. A
+  // YAML body packed with multi-byte unicode could be 2-3x larger
+  // in bytes than `.length` reports. Buffer.byteLength is the
+  // canonical Node way to get the wire byte count.
+  const bytes = Buffer.byteLength(body, 'utf8');
+  if (bytes <= maxBytes) return 'ok';
+  const target =
+    outputPath === STDOUT_SENTINEL ? 'stdout' : `'${outputPath}'`;
+  // Hint depends on the target: a stdout caller has the obvious
+  // escape (switch to a file); a file caller's escape is to bump
+  // the cap or disable it explicitly.
+  const hint =
+    outputPath === STDOUT_SENTINEL
+      ? `hint: write to a file with --output <path> instead, or pass --max-output-bytes 0 to disable the cap`
+      : `hint: raise --max-output-bytes (current: ${maxBytes}), or pass --max-output-bytes 0 to disable the cap`;
+  return (
+    `clawreview presets diff: refusing to write ${bytes} bytes to ${target} ` +
+    `(exceeds --max-output-bytes ${maxBytes})\n${hint}\n`
   );
 }
 

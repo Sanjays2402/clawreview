@@ -10,6 +10,10 @@ import {
   filterPresetDeltaExcluding,
   ONLY_FIELDS_EMPTY_ENTRY,
   parsePresetOnlyFields,
+  parsePresetDiffMaxOutputBytes,
+  enforcePresetDiffSizeCap,
+  PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES,
+  PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING,
   resolvePresetDiffOutputPath,
   STDOUT_SENTINEL,
 } from '../src/commands/presets.js';
@@ -1848,5 +1852,243 @@ describe('clawreview presets diff --base / --target (tick 13 named flags)', () =
     expect(parsed.changed.min_confidence).toBeUndefined();
     expect(parsed.onlyFields).toEqual(['severity_threshold']);
     expect(r.stderr).toBe('');
+  });
+});
+
+describe('parsePresetDiffMaxOutputBytes (tick 14 size cap parser)', () => {
+  it('defaults to PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES on undefined', () => {
+    expect(parsePresetDiffMaxOutputBytes(undefined)).toBe(PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES);
+  });
+
+  it('defaults on bare --max-output-bytes (true) without a value', () => {
+    expect(parsePresetDiffMaxOutputBytes(true)).toBe(PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES);
+  });
+
+  it('defaults on null and empty string', () => {
+    expect(parsePresetDiffMaxOutputBytes(null)).toBe(PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES);
+    expect(parsePresetDiffMaxOutputBytes('')).toBe(PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES);
+    expect(parsePresetDiffMaxOutputBytes('   ')).toBe(PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES);
+  });
+
+  it('accepts a string integer', () => {
+    expect(parsePresetDiffMaxOutputBytes('1024')).toBe(1024);
+  });
+
+  it('accepts a number directly', () => {
+    expect(parsePresetDiffMaxOutputBytes(2048)).toBe(2048);
+  });
+
+  it('accepts 0 as the explicit "no cap" sentinel', () => {
+    expect(parsePresetDiffMaxOutputBytes('0')).toBe(0);
+    expect(parsePresetDiffMaxOutputBytes(0)).toBe(0);
+  });
+
+  it('clamps to PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING for absurdly large values', () => {
+    expect(parsePresetDiffMaxOutputBytes('999999999999')).toBe(PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING);
+  });
+
+  it('rejects negative numbers as "invalid"', () => {
+    expect(parsePresetDiffMaxOutputBytes('-100')).toBe('invalid');
+    expect(parsePresetDiffMaxOutputBytes(-100)).toBe('invalid');
+  });
+
+  it('rejects non-integer numerics ("1.5", "1e3", "0x10")', () => {
+    expect(parsePresetDiffMaxOutputBytes('1.5')).toBe('invalid');
+    expect(parsePresetDiffMaxOutputBytes('1e3')).toBe('invalid');
+    expect(parsePresetDiffMaxOutputBytes('0x10')).toBe('invalid');
+  });
+
+  it('rejects garbage strings', () => {
+    expect(parsePresetDiffMaxOutputBytes('big')).toBe('invalid');
+    expect(parsePresetDiffMaxOutputBytes('100K')).toBe('invalid');
+  });
+
+  it('rejects non-string non-number values', () => {
+    expect(parsePresetDiffMaxOutputBytes({ value: 1 })).toBe('invalid');
+    expect(parsePresetDiffMaxOutputBytes([1024])).toBe('invalid');
+  });
+});
+
+describe('enforcePresetDiffSizeCap (tick 14 size cap enforcer)', () => {
+  it('returns "ok" when the body is within the cap', () => {
+    expect(enforcePresetDiffSizeCap('/tmp/x.json', 'hello', 100)).toBe('ok');
+  });
+
+  it('returns "ok" when the cap is 0 (disabled)', () => {
+    // Even a multi-MB body passes when the cap is explicitly disabled.
+    const giantBody = 'x'.repeat(2 * 1024 * 1024);
+    expect(enforcePresetDiffSizeCap('/tmp/x.json', giantBody, 0)).toBe('ok');
+  });
+
+  it('returns a stderr-ready error when the body exceeds the cap (file path)', () => {
+    const body = 'x'.repeat(1024);
+    const r = enforcePresetDiffSizeCap('/tmp/x.json', body, 100);
+    expect(r).not.toBe('ok');
+    const s = r as string;
+    expect(s).toContain('refusing to write 1024 bytes');
+    expect(s).toContain("'/tmp/x.json'");
+    expect(s).toContain('--max-output-bytes 100');
+    // File-path hint mentions raising the cap.
+    expect(s).toContain('raise --max-output-bytes');
+  });
+
+  it('returns a stderr-ready error with a stdout-specific hint when the target is the STDOUT sentinel', () => {
+    const body = 'x'.repeat(1024);
+    const r = enforcePresetDiffSizeCap(STDOUT_SENTINEL, body, 100);
+    expect(r).not.toBe('ok');
+    const s = r as string;
+    expect(s).toContain('to stdout');
+    expect(s).toContain('--output <path> instead');
+  });
+
+  it('counts UTF-8 bytes, not character code points', () => {
+    // 'é' is 2 bytes in UTF-8 (0xC3 0xA9). A 10-char string is 20
+    // bytes when packed with this character. The cap MUST fire on
+    // bytes, not characters, so a unicode-heavy body cannot sneak
+    // past via a low character count.
+    const body = 'é'.repeat(10);
+    expect(body.length).toBe(10);
+    expect(enforcePresetDiffSizeCap('/tmp/x.json', body, 15)).not.toBe('ok');
+    expect(enforcePresetDiffSizeCap('/tmp/x.json', body, 100)).toBe('ok');
+  });
+
+  it('is pure: never touches the filesystem or process state', () => {
+    // Smoke test: calling it many times with the same args returns the same value.
+    const body = 'x'.repeat(200);
+    expect(enforcePresetDiffSizeCap(STDOUT_SENTINEL, body, 100))
+      .toBe(enforcePresetDiffSizeCap(STDOUT_SENTINEL, body, 100));
+  });
+});
+
+describe('clawreview presets diff --max-output-bytes', () => {
+  it('refuses to write when the rendered body exceeds the cap (stdout sentinel)', async () => {
+    const dir = await tmpDir();
+    // Build a local preset stack that produces a substantial body.
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    // A YAML preset with many fields produces a few KB of diff output.
+    await writeFile(
+      join(dir, '.clawreview/presets/heavy.yml'),
+      [
+        'severity_threshold: high',
+        'min_confidence: 0.7',
+        'inline_comments:',
+        '  enabled: true',
+        '  min_severity: medium',
+        '  max: 20',
+        'hotspots:',
+        '  enabled: true',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/empty.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // Cap at 10 bytes -- the diff body is comfortably larger.
+    const r = await runDiff(dir, ['heavy', 'empty'], {
+      format: 'json',
+      output: '-',
+      'max-output-bytes': '10',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('refusing to write');
+    expect(r.stderr).toContain('exceeds --max-output-bytes 10');
+    // Nothing landed on stdout (the cap fired BEFORE the write).
+    expect(r.stdout).toBe('');
+  });
+
+  it('refuses to write when the body exceeds the cap (named file path)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\nmin_confidence: 0.9\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\nmin_confidence: 0.1\n',
+      'utf8',
+    );
+    const outPath = join(dir, 'out.json');
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: outPath,
+      'max-output-bytes': '50',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('refusing to write');
+    expect(r.stderr).toContain(`'${outPath}'`);
+    expect(r.stderr).toContain('raise --max-output-bytes');
+  });
+
+  it('writes the body when the cap is 0 (cap disabled)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+      'max-output-bytes': '0',
+    });
+    // No size cap -> writes succeed; exit 3 because there IS drift.
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout.length).toBeGreaterThan(0);
+    expect(r.stderr).toBe('');
+  });
+
+  it('writes the body when it fits comfortably under the cap', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    // A few-hundred-byte body easily fits in 100 KiB (the default).
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout.length).toBeGreaterThan(0);
+  });
+
+  it('rejects an invalid --max-output-bytes value with exit 2', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/a.yml'),
+      'severity_threshold: high\n',
+      'utf8',
+    );
+    await writeFile(
+      join(dir, '.clawreview/presets/b.yml'),
+      'severity_threshold: low\n',
+      'utf8',
+    );
+    const r = await runDiff(dir, ['a', 'b'], {
+      format: 'json',
+      output: '-',
+      'max-output-bytes': 'big',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--max-output-bytes must be a non-negative integer');
   });
 });
