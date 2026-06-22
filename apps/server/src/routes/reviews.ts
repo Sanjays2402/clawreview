@@ -604,8 +604,10 @@ export type SlimDirective =
  *
  * Accepted shapes:
  *   - absent (undefined / empty string / pure-whitespace)  -> 'none'
- *   - 'true', '1'                                          -> 'all'
- *   - 'false', '0'                                         -> 'none'
+ *   - 'true', '1', '*', 'all'                              -> 'all'
+ *                                                            (tick 19: `*` / `all` aliases)
+ *   - 'false', '0', 'none'                                 -> 'none'
+ *                                                            (tick 19: `none` alias)
  *   - comma-separated subset of SLIM_FIELDS                -> 'fields'
  *                                                            (tick 17 allowlist)
  *   - comma-separated `-<field>` entries                   -> 'fields'
@@ -655,9 +657,26 @@ export function parseSlimDirective(raw: string | undefined): SlimDirective {
   // Boolean sugar (case-insensitive matches the existing tick-16
   // back-compat -- we accept `True` / `TRUE` too because URL params
   // sometimes come through capitalised).
+  //
+  // Tick 19: extend the "strip everything" / "strip nothing" arm
+  // with shell-glob / keyword sugar so dashboards that round-trip
+  // the slim value through a CLI tool using `*` (glob convention)
+  // or `all` / `none` (keyword convention) get the same result a
+  // boolean would. The four shapes are exact aliases:
+  //   - 'true'  / '1' / '*' / 'all'    -> 'all'  (strip every heavy map)
+  //   - 'false' / '0' / 'none'         -> 'none' (strip nothing)
+  // We do NOT accept `*` as a comma-list entry (`?slim=*,byTag` rejects
+  // because the resolution would be ambiguous -- does the operator mean
+  // "strip everything AND byTag" which is a no-op, or "strip everything
+  // EXCEPT byTag" which is the inverse?). The star / all / none aliases
+  // are only valid as standalone values.
   const lower = trimmed.toLowerCase();
-  if (lower === 'true' || lower === '1') return { kind: 'all' };
-  if (lower === 'false' || lower === '0') return { kind: 'none' };
+  if (lower === 'true' || lower === '1' || lower === '*' || lower === 'all') {
+    return { kind: 'all' };
+  }
+  if (lower === 'false' || lower === '0' || lower === 'none') {
+    return { kind: 'none' };
+  }
   // Fields-list arm.
   const parts = trimmed.split(',').map((s) => s.trim());
   // Reject empty intermediate entries: a stray comma usually means a
@@ -667,6 +686,22 @@ export function parseSlimDirective(raw: string | undefined): SlimDirective {
       kind: 'invalid',
       message: `?slim has an empty entry (likely a stray comma); got '${trimmed}'`,
     };
+  }
+  // Tick 19: reject `*` / `all` / `none` appearing inside a comma-list
+  // (they're standalone aliases, not field names). Without this guard,
+  // `?slim=*,byTag` would fall through to the canonical-by-lower
+  // lookup, fail with "unknown field '*'", and surface a confusing
+  // error. Catch it here with a hint about the standalone usage.
+  for (const p of parts) {
+    const lp = p.toLowerCase();
+    if (lp === '*' || lp === 'all' || lp === 'none') {
+      return {
+        kind: 'invalid',
+        message:
+          `?slim alias '${p}' must be used standalone (not in a comma list); ` +
+          `got '${trimmed}'`,
+      };
+    }
   }
   // Tick 18: detect minus-prefix entries. If ANY entry carries the
   // prefix, we're in deny-list mode; if NONE do, we're in the legacy

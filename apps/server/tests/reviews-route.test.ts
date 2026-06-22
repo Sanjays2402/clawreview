@@ -1096,6 +1096,144 @@ describe('reviews and stats routes', () => {
       expect(body.persisted.byCategory).toBeDefined();
       expect(body.persisted.byFile).toBeDefined();
     });
+
+    // Tick 19: `?slim=*` / `?slim=all` / `?slim=none` keyword sugar
+    // so dashboards that round-trip the value through CLI tools using
+    // shell-glob (`*`) or keyword (`all`/`none`) conventions get the
+    // same behaviour the boolean shorthand would have.
+    it('?slim=* is an exact alias for ?slim=true (strips all heavy maps)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 21, owner: 'o', repo: 'r', prNumber: 191, headSha: 'h191', baseSha: 'b191' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 191, headSha: 'h191', baseSha: 'b191' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const star = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=*` });
+      const truth = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=true` });
+      expect(star.statusCode).toBe(200);
+      expect(truth.statusCode).toBe(200);
+      const starBody = star.json();
+      const truthBody = truth.json();
+      // Both arms set slim=true, strip the same fields, and produce
+      // byte-identical bucket strip-out. (slimFields is the canonical
+      // alphabetical list for both.)
+      expect(starBody.slim).toBe(true);
+      expect(truthBody.slim).toBe(true);
+      expect(starBody.slimFields).toEqual(['byAgent', 'byCategory', 'byFile', 'byTag']);
+      expect(truthBody.slimFields).toEqual(starBody.slimFields);
+      expect(starBody.persisted.byTag).toBeUndefined();
+      expect(starBody.persisted.byFile).toBeUndefined();
+      expect(starBody.persisted.byCategory).toBeUndefined();
+      expect(starBody.persisted.byAgent).toBeUndefined();
+    });
+
+    it('?slim=all is an exact alias for ?slim=true (keyword convention)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 22, owner: 'o', repo: 'r', prNumber: 192, headSha: 'h192', baseSha: 'b192' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 192, headSha: 'h192', baseSha: 'b192' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=all` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(true);
+      expect(body.slimFields).toEqual(['byAgent', 'byCategory', 'byFile', 'byTag']);
+      expect(body.persisted.byTag).toBeUndefined();
+    });
+
+    it('?slim=none is an exact alias for ?slim=false (strip nothing)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 23, owner: 'o', repo: 'r', prNumber: 193, headSha: 'h193', baseSha: 'b193' });
+      const findings = [
+        { agent: 'sec', category: 'security', severity: 'high', title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: ['t1'] },
+      ];
+      const { findingDigest } = await import('@clawreview/aggregator');
+      const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 193, headSha: 'h193', baseSha: 'b193' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+        },
+        findings, { digest },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=none` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.slim).toBe(false);
+      expect(body.slimFields).toEqual([]);
+      // Every heavy map survives (same as ?slim=false / default).
+      expect(body.persisted.byTag).toBeDefined();
+      expect(body.persisted.byFile).toBeDefined();
+    });
+
+    it('?slim=*,byTag rejects 400 with a "use standalone" hint (no ambiguity)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 24, owner: 'o', repo: 'r', prNumber: 194, headSha: 'h194', baseSha: 'b194' });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 194, headSha: 'h194', baseSha: 'b194' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=*,byTag` });
+      expect(res.statusCode).toBe(400);
+      const body = res.json();
+      expect(body.error).toBe('BadQuery');
+      expect(body.message).toContain('standalone');
+    });
+
+    it('case-insensitive: ?slim=ALL / ?slim=NONE / ?slim=All all work', async () => {
+      // URL params are often mangled to upper / mixed case by tools
+      // (Cloudflare query rewriting, etc.); the aliases should match
+      // case-insensitively just like the existing true / false sugar
+      // does.
+      const store = getReviewStore();
+      const r = await store.start({ installationId: 25, owner: 'o', repo: 'r', prNumber: 195, headSha: 'h195', baseSha: 'b195' });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 195, headSha: 'h195', baseSha: 'b195' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+        },
+        [],
+      );
+      const upperAll = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=ALL` });
+      const upperNone = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=NONE` });
+      const mixedAll = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?slim=All` });
+      expect(upperAll.statusCode).toBe(200);
+      expect(upperNone.statusCode).toBe(200);
+      expect(mixedAll.statusCode).toBe(200);
+      expect(upperAll.json().slim).toBe(true);
+      expect(upperNone.json().slim).toBe(false);
+      expect(mixedAll.json().slim).toBe(true);
+    });
   });
 
   it('bulk-dismisses findings via POST /api/reviews/:id/findings/bulk with filter', async () => {
