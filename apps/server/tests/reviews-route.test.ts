@@ -2357,5 +2357,71 @@ describe('reviews and stats routes', () => {
       expect(afterFull).toBe(beforeFull);
       expect(afterSlim).toBe(beforeSlim);
     });
+
+    // Tick 24: per-shape latency histogram pairs with the tick-23
+    // counter so a dashboard can quantify the slim-vs-full tradeoff.
+    it('fires clawreview_review_filter_report_read_duration_seconds with shape labels on each 200 (tick 24 histogram)', async () => {
+      const reviewId = await seedReviewWithFilterReport({ prNumber: 240, minConfidence: 0.5 });
+      const { getMetrics } = await import('@clawreview/telemetry');
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      // Capture baseline so the assertion isolates only this test's bumps.
+      const before = await metrics.registry.metrics();
+      const beforeFullMatch = before.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+      const beforeSlimMatch = before.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="slim"[^}]*\}\s*(\d+)/);
+      const beforeFull = beforeFullMatch ? Number(beforeFullMatch[1]) : 0;
+      const beforeSlim = beforeSlimMatch ? Number(beforeSlimMatch[1]) : 0;
+      // Three full + two slim reads.
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=true` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=true` });
+      const after = await metrics.registry.metrics();
+      const afterFullMatch = after.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+      const afterSlimMatch = after.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="slim"[^}]*\}\s*(\d+)/);
+      const afterFull = afterFullMatch ? Number(afterFullMatch[1]) : 0;
+      const afterSlim = afterSlimMatch ? Number(afterSlimMatch[1]) : 0;
+      expect(afterFull - beforeFull).toBe(3);
+      expect(afterSlim - beforeSlim).toBe(2);
+      // Histogram counts MUST match the counter counts (same fire
+      // discipline, same shape label). A divergence would mean a
+      // dashboard joining the two series gets bad data.
+      const counterFull = after.match(/clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+      const counterSlim = after.match(/clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*(\d+)/);
+      expect(counterFull).toBeTruthy();
+      expect(counterSlim).toBeTruthy();
+    });
+
+    it('does NOT fire the histogram on 404 arms (tick 24 fire discipline)', async () => {
+      const { getMetrics } = await import('@clawreview/telemetry');
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      const before = await metrics.registry.metrics();
+      const beforeFullMatch = before.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+      const beforeFull = beforeFullMatch ? Number(beforeFullMatch[1]) : 0;
+      // Two 404 arms exercised; neither must bump the histogram.
+      const notFound = await app.inject({ method: 'GET', url: '/api/reviews/nope-tick24/filter-report' });
+      expect(notFound.statusCode).toBe(404);
+      // Seed a legacy review to exercise the NoFilterReport arm.
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 24, owner: 'o', repo: 'r', prNumber: 241, headSha: 'h241', baseSha: 'b241',
+      });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 241, headSha: 'h241', baseSha: 'b241' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        [],
+      );
+      const legacy = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/filter-report` });
+      expect(legacy.statusCode).toBe(404);
+      const after = await metrics.registry.metrics();
+      const afterFullMatch = after.match(/clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+      const afterFull = afterFullMatch ? Number(afterFullMatch[1]) : 0;
+      expect(afterFull).toBe(beforeFull);
+    });
   });
 });

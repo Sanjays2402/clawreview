@@ -12,7 +12,7 @@ import {
   toCsv,
   renderReviewReport,
 } from '@clawreview/aggregator';
-import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied, observeReviewFilterReportRead } from '@clawreview/telemetry';
+import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied, observeReviewFilterReportRead, observeReviewFilterReportReadDuration } from '@clawreview/telemetry';
 import type { Severity } from '@clawreview/types';
 
 import { getReviewStore } from '../services/review-store.js';
@@ -686,6 +686,13 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     '/api/reviews/:id/filter-report',
     { preHandler: app.requireRole('readonly') },
     async (req, reply) => {
+      // Tick 24: start the latency clock at the top so the per-shape
+      // histogram captures the full route-handler work (param parse +
+      // query parse + store.get + body build). Only observed on the
+      // 200 path -- 404 arms (NotFound / NoFilterReport) are
+      // deliberately excluded so the histogram reflects actual
+      // persisted-shape reads and isn't biased by 404 lookup time.
+      const startedAt = performance.now();
       const store = getReviewStore();
       const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
       if (!params.success) {
@@ -728,8 +735,9 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // pre-determined by the slim bit).
       const metricsBundle = getMetrics({ service: 'clawreview-server' });
       observeReviewFilterReportRead(metricsBundle, slim);
+      let body: Record<string, unknown>;
       if (slim) {
-        return {
+        body = {
           reviewId: rec.id,
           inputTotal: fr.inputTotal,
           droppedTotal: fr.droppedTotal,
@@ -739,19 +747,29 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
           applied: fr.appliedFilters.any,
           slim: true,
         };
+      } else {
+        body = {
+          reviewId: rec.id,
+          inputTotal: fr.inputTotal,
+          droppedTotal: fr.droppedTotal,
+          appliedFilters: fr.appliedFilters,
+          // Surface `applied` at the top level too so a consumer that
+          // wants the single bit can read it without descending into
+          // appliedFilters.any -- matches the slim path's shape so
+          // dashboards have ONE name to bind regardless of mode.
+          applied: fr.appliedFilters.any,
+          slim: false,
+        };
       }
-      return {
-        reviewId: rec.id,
-        inputTotal: fr.inputTotal,
-        droppedTotal: fr.droppedTotal,
-        appliedFilters: fr.appliedFilters,
-        // Surface `applied` at the top level too so a consumer that
-        // wants the single bit can read it without descending into
-        // appliedFilters.any -- matches the slim path's shape so
-        // dashboards have ONE name to bind regardless of mode.
-        applied: fr.appliedFilters.any,
-        slim: false,
-      };
+      // Tick 24: observe the per-shape latency right before returning
+      // so the histogram captures the full request->response path.
+      // Same fire discipline as the counter: 200 only.
+      observeReviewFilterReportReadDuration(
+        metricsBundle,
+        slim,
+        (performance.now() - startedAt) / 1000,
+      );
+      return body;
     },
   );
 
