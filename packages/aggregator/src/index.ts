@@ -4,6 +4,7 @@ export * from './calibrate.js';
 export * from './check.js';
 export * from './comment.js';
 export * from './digest.js';
+export * from './filter-report-delta.js';
 export * from './hotspots.js';
 export * from './inline.js';
 export * from './sarif.js';

@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import kleur from 'kleur';
 import {
   computeDigestDrift,
+  computeFilterReportDelta as computeFilterReportDeltaAggregator,
   findingDigest,
   type FindingDigest,
   type FindingDigestDrift,
@@ -2257,59 +2258,27 @@ export interface FilterReportDelta {
  * deltas surface as base=null/target=null with changed=false, since
  * we can't tell whether a slim consumer ran a filter on those axes.
  * This keeps the helper symmetric across projection modes.
+ *
+ * Tick 27: the implementation now delegates to the aggregator-side
+ * `computeFilterReportDelta` so non-CLI consumers (a dashboard
+ * server, a webhook handler) can compute the same delta without
+ * importing the CLI. The CLI wrapper stays as the public entry
+ * point so existing test surfaces and back-compat consumers keep
+ * working byte-identically. The `FilterReportBody` (CLI) and
+ * `FilterReportBodyLike` (aggregator) shapes are structurally
+ * compatible; the cast threads the CLI's narrower type through
+ * the aggregator's permissive entry.
  */
 export function computeFilterReportDelta(
   base: FilterReportBody,
   target: FilterReportBody,
 ): FilterReportDelta {
-  const appliedChanged = base.applied !== target.applied;
-  const inputDelta = target.inputTotal - base.inputTotal;
-  const droppedDelta = target.droppedTotal - base.droppedTotal;
-  // Extract the per-axis thresholds; slim bodies carry no
-  // appliedFilters object, so we read defensively.
-  const baseFull = (base as FilterReportBodyFull).appliedFilters;
-  const targetFull = (target as FilterReportBodyFull).appliedFilters;
-  // Normalised values are the resolved thresholds the worker
-  // actually applied. We compare on those (the raw input is
-  // operator-controlled and not stable for comparison).
-  const baseMinConf = baseFull && baseFull.minConfidence.applied
-    ? baseFull.minConfidence.normalised
-    : null;
-  const targetMinConf = targetFull && targetFull.minConfidence.applied
-    ? targetFull.minConfidence.normalised
-    : null;
-  const baseSev = baseFull && baseFull.severityThreshold.applied
-    ? baseFull.severityThreshold.normalised
-    : null;
-  const targetSev = targetFull && targetFull.severityThreshold.applied
-    ? targetFull.severityThreshold.normalised
-    : null;
-  const minConfChanged = baseMinConf !== targetMinConf;
-  const sevChanged = baseSev !== targetSev;
-  const hasDelta =
-    appliedChanged ||
-    inputDelta !== 0 ||
-    droppedDelta !== 0 ||
-    minConfChanged ||
-    sevChanged;
-  return {
-    applied: { base: base.applied, target: target.applied, changed: appliedChanged },
-    inputTotal: {
-      base: base.inputTotal,
-      target: target.inputTotal,
-      delta: inputDelta,
-      changed: inputDelta !== 0,
-    },
-    droppedTotal: {
-      base: base.droppedTotal,
-      target: target.droppedTotal,
-      delta: droppedDelta,
-      changed: droppedDelta !== 0,
-    },
-    minConfidence: { base: baseMinConf, target: targetMinConf, changed: minConfChanged },
-    severityThreshold: { base: baseSev, target: targetSev, changed: sevChanged },
-    hasDelta,
-  };
+  // The aggregator's structural FilterReportBodyLike accepts the CLI's
+  // FilterReportBodyFull / FilterReportBodySlim shapes directly.
+  // (FilterReportBodyFull carries appliedFilters with raw|undefined on
+  // each axis; aggregator only reads applied+normalised which are
+  // structurally identical on both shapes.)
+  return computeFilterReportDeltaAggregator(base, target);
 }
 
 /**
