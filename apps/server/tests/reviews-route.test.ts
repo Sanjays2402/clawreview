@@ -1431,6 +1431,156 @@ describe('reviews and stats routes', () => {
         // can detect the typo even though the filter silently no-op'd.
         expect(body.severityThreshold).toBe('Critical');
       });
+
+      // Tick 21: per-request observability counter for the tick-20
+      // filter knobs. Wires findingDigestWithFilterReport's
+      // appliedFilters bits into a closed-set
+      // `clawreview_review_digest_filter_applied_total{min_confidence,severity_threshold}`
+      // Prometheus counter. Fresh arm only; cached arm is inert
+      // (the persisted digest carries no filter metadata).
+      //
+      // We read the counter directly from `getMetrics().registry`
+      // rather than via the /metrics endpoint -- the metrics plugin
+      // closure-captures the bundle at boot, so after another test
+      // calls resetMetricsForTests() the /metrics endpoint would
+      // serve the OLD bundle while route handlers use the new one.
+      // The direct registry read is what the existing drift counter
+      // test (line 508) uses too.
+      describe('clawreview_review_digest_filter_applied_total counter (tick 21)', () => {
+        async function seedReviewWithFindings(prNumber: number) {
+          const store = getReviewStore();
+          const r = await store.start({
+            installationId: 31,
+            owner: 'o',
+            repo: 'r',
+            prNumber,
+            headSha: `h${prNumber}`,
+            baseSha: `b${prNumber}`,
+          });
+          const findings = [
+            { agent: 'sec', category: 'security' as const, severity: 'high' as const, title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+            { agent: 'sec', category: 'security' as const, severity: 'low' as const, title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+          ];
+          const { findingDigest } = await import('@clawreview/aggregator');
+          const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+          await store.complete(
+            r.id,
+            {
+              pullRequest: { owner: 'o', repo: 'r', number: prNumber, headSha: `h${prNumber}`, baseSha: `b${prNumber}` },
+              status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+              agentExecutions: [], totalFindings: 2, totalCostUsd: 0,
+            },
+            findings, { digest },
+          );
+          return r;
+        }
+
+        async function metricsText(): Promise<string> {
+          const { getMetrics } = await import('@clawreview/telemetry');
+          const metrics = getMetrics({ service: 'clawreview-server' });
+          return metrics.registry.metrics();
+        }
+
+        function countSeries(text: string, minConf: 'yes' | 'no', sev: 'yes' | 'no'): number {
+          const re = new RegExp(
+            `clawreview_review_digest_filter_applied_total\\{[^}]*min_confidence="${minConf}"[^}]*severity_threshold="${sev}"[^}]*\\}\\s*(\\d+)`,
+          );
+          const m = text.match(re);
+          return m ? Number(m[1]) : 0;
+        }
+
+        // Each test resets metrics so it sees a clean baseline (matches
+        // the pattern used by the existing drift-counter test above).
+        beforeEach(async () => {
+          const { resetMetricsForTests } = await import('@clawreview/telemetry');
+          resetMetricsForTests();
+        });
+
+        it('fresh recompute without filter bumps no/no', async () => {
+          const r = await seedReviewWithFindings(300);
+          const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest` });
+          expect(res.statusCode).toBe(200);
+          expect(countSeries(await metricsText(), 'no', 'no')).toBe(1);
+        });
+
+        it('?minConfidence=0.5 bumps yes/no (not no/no)', async () => {
+          const r = await seedReviewWithFindings(301);
+          const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+          expect(res.statusCode).toBe(200);
+          const t = await metricsText();
+          expect(countSeries(t, 'yes', 'no')).toBe(1);
+          // The no/no labelset must NOT fire on this request -- the
+          // filter applied so we're in the yes/no labelset only.
+          expect(countSeries(t, 'no', 'no')).toBe(0);
+        });
+
+        it('?severityThreshold=high bumps no/yes (not yes/no)', async () => {
+          const r = await seedReviewWithFindings(302);
+          const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?severityThreshold=high` });
+          expect(res.statusCode).toBe(200);
+          const t = await metricsText();
+          expect(countSeries(t, 'no', 'yes')).toBe(1);
+          expect(countSeries(t, 'yes', 'no')).toBe(0);
+        });
+
+        it('?minConfidence + ?severityThreshold together bump yes/yes', async () => {
+          const r = await seedReviewWithFindings(303);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?minConfidence=0.5&severityThreshold=high`,
+          });
+          expect(res.statusCode).toBe(200);
+          expect(countSeries(await metricsText(), 'yes', 'yes')).toBe(1);
+        });
+
+        it('cached arm does NOT fire the counter (inert observability path)', async () => {
+          const r = await seedReviewWithFindings(304);
+          // Even with filter params, the cached arm doesn't fire the
+          // counter (it's inert -- the persisted digest carries no
+          // filter metadata so counting it would distort the
+          // "what fraction of dashboards filter?" ratio).
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?recompute=cached&minConfidence=0.7&severityThreshold=high`,
+          });
+          expect(res.statusCode).toBe(200);
+          const t = await metricsText();
+          // Every labelset stays at 0 -- the counter did not fire.
+          expect(countSeries(t, 'yes', 'yes')).toBe(0);
+          expect(countSeries(t, 'yes', 'no')).toBe(0);
+          expect(countSeries(t, 'no', 'yes')).toBe(0);
+          expect(countSeries(t, 'no', 'no')).toBe(0);
+        });
+
+        it('mis-cased ?severityThreshold=Critical normalises to no (filter no-op)', async () => {
+          const r = await seedReviewWithFindings(305);
+          // A typo normalises to null inside the digest, so the
+          // applied bit is false and the counter records no/no
+          // (the request DID hit the fresh arm; the filter just
+          // didn't apply).
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?severityThreshold=Critical`,
+          });
+          expect(res.statusCode).toBe(200);
+          const t = await metricsText();
+          // Counter records no/no -- the filter was supplied but
+          // normalised to a no-op. This matches the contract: the
+          // counter records the APPLIED bit, not the supplied bit.
+          expect(countSeries(t, 'no', 'no')).toBe(1);
+          expect(countSeries(t, 'no', 'yes')).toBe(0);
+        });
+
+        it('accumulates across calls (rate-able)', async () => {
+          // Two fresh calls with the same filter shape -> counter
+          // climbs to 2. This is the rate() denominator pattern a
+          // dashboard would consume: rate(...{min_confidence="yes"}[5m]).
+          const r = await seedReviewWithFindings(306);
+          await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+          await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+          expect(countSeries(await metricsText(), 'yes', 'no')).toBe(2);
+        });
+      });
     });
   });
 

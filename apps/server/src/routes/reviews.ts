@@ -4,12 +4,13 @@ import {
   aggregate,
   computeDigestDrift,
   findingDigest,
+  findingDigestWithFilterReport,
   toSarif,
   toJUnitXml,
   toCsv,
   renderReviewReport,
 } from '@clawreview/aggregator';
-import { getMetrics, observeReviewDigestDrift } from '@clawreview/telemetry';
+import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied } from '@clawreview/telemetry';
 import type { Severity } from '@clawreview/types';
 
 import { getReviewStore } from '../services/review-store.js';
@@ -272,13 +273,21 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // so a drift report at a stricter threshold answers "would the
     // PR header change if we tightened the floor?" -- a useful
     // signal for a dashboard "preview filter" widget.
-    const fresh = findingDigest(rec.findings, {
+    //
+    // Tick 21: use findingDigestWithFilterReport so we get the
+    // `appliedFilters` bits in the same pass -- the dashboard
+    // observability counter
+    // `clawreview_review_digest_filter_applied_total{min_confidence,severity_threshold}`
+    // fires below with those bits. Zero extra work vs the bare
+    // findingDigest call (the wrapper is a thin pure helper).
+    const filterReport = findingDigestWithFilterReport(rec.findings, {
       topCategories: 8,
       topAgents: 8,
       hotspots: true,
       minConfidence,
       severityThreshold,
     });
+    const fresh = filterReport.digest;
     // Tolerate a legacy review (pre-tick-12) that never persisted a
     // digest. `computeDigestDrift` requires both sides; we synthesise
     // an empty persisted-shape so the drift surfaces as "every fresh
@@ -289,9 +298,20 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // Fire the drift counter on the way out so an on-call sees the
     // stale-rate ratio across all /digest reads. The closed kind set
     // means cardinality is bounded at two regardless of traffic.
-    observeReviewDigestDrift(
-      getMetrics({ service: 'clawreview-server' }),
-      drift,
+    //
+    // Tick 21: ALSO fire the filter-applied counter so a dashboard
+    // can chart "what fraction of /digest reads filter?" -- the
+    // applied bits come from the filterReport we already computed,
+    // so this is a single counter increment with two short labels.
+    // Cached arm does NOT fire (it's higher up the function); only
+    // the fresh recompute path bumps this counter, matching the
+    // counter's documented contract.
+    const metricsBundle = getMetrics({ service: 'clawreview-server' });
+    observeReviewDigestDrift(metricsBundle, drift);
+    observeReviewDigestFilterApplied(
+      metricsBundle,
+      filterReport.appliedFilters.minConfidence.applied,
+      filterReport.appliedFilters.severityThreshold.applied,
     );
     return {
       reviewId: rec.id,
