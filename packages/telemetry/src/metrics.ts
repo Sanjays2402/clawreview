@@ -385,6 +385,36 @@ export interface MetricsBundle {
    */
   reviewFilterReportReadsTotal: Counter<string>;
   /**
+   * Tick 27: `clawreview_review_filter_report_reads_projection_total{projection}`
+   * -- per-projection-mode read counter for /api/reviews/:id/filter-report.
+   *
+   * Pairs with the tick-23 `reviewFilterReportReadsTotal{shape}` counter
+   * but adds an orthogonal axis. Today the `shape` label is full|slim
+   * (the response body shape). When `?fields=appliedFilters,inputTotal`
+   * is set the response is STILL `full` shape (just trimmed to the
+   * named keys), so the existing counter conflates `?fields` reads
+   * with default-full reads.
+   *
+   * The new counter distinguishes three mutually-exclusive modes:
+   *   - `full`  -- default response (no `?slim`, no `?fields`)
+   *   - `slim`  -- `?slim=true|1|yes|*|all` collapsing projection
+   *   - `fields` -- `?fields=<csv>` allowlist / `?fields=-<csv>` deny-list
+   *                 / `?fields=*|all|none` keyword sugar
+   *
+   * Use case: a dashboard team answering "which projection mode are
+   * operators reaching for?". The tick-23 shape counter answers
+   * "full vs slim"; this counter answers "is anyone using the
+   * field-allowlist mode I shipped in tick 24?". A field projection
+   * with zero traffic for 30 days is a candidate for deprecation;
+   * a field projection eating 80% of reads is the candidate for
+   * being made the default.
+   *
+   * Same fire discipline as the tick-23 counter: 200 reads only;
+   * 404 arms (NotFound, NoFilterReport) are deliberately excluded.
+   * Cardinality bounded at 3.
+   */
+  reviewFilterReportReadsProjectionTotal: Counter<string>;
+  /**
    * Tick 24: `clawreview_review_filter_report_read_duration_seconds{shape}`
    * -- per-shape latency histogram for /api/reviews/:id/filter-report.
    *
@@ -711,6 +741,19 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewFilterReportReadsProjectionTotal = new Counter({
+    name: 'clawreview_review_filter_report_reads_projection_total',
+    help:
+      'Tick 27: /api/reviews/:id/filter-report reads, labelled by the ' +
+      'projection MODE used (closed set: full | slim | fields). Pairs ' +
+      'with reviewFilterReportReadsTotal which labels by response SHAPE ' +
+      '(full | slim) -- the fields-projection mode produces a full-shape ' +
+      'response and would otherwise be invisible. Fires once per 200; ' +
+      '404 arms (NotFound, NoFilterReport) do NOT fire. Cardinality 3.',
+    labelNames: ['projection'],
+    registers: [registry],
+  });
+
   const reviewFilterReportReadDurationSeconds = new Histogram({
     name: 'clawreview_review_filter_report_read_duration_seconds',
     help:
@@ -831,6 +874,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDigestFilterAppliedTotal,
     findingsFilterPreAppliedTotal,
     reviewFilterReportReadsTotal,
+    reviewFilterReportReadsProjectionTotal,
     reviewFilterReportReadDurationSeconds,
     reviewFilterReportDiffTotal,
     reviewFilterReportDiffDurationSeconds,
@@ -1840,6 +1884,82 @@ export function observeReviewFilterReportRead(
 ): void {
   metrics.reviewFilterReportReadsTotal.inc({
     shape: deriveReviewFilterReportShape(slim),
+  });
+}
+
+/**
+ * Tick 27: closed set of projection modes for the
+ * `/api/reviews/:id/filter-report` endpoint -- the `projection` label
+ * on the `reviewFilterReportReadsProjectionTotal` counter.
+ *
+ *   - `full`   -- default response (no `?slim`, no `?fields`).
+ *   - `slim`   -- `?slim=true|1|yes|*|all` collapses the verbose
+ *                  appliedFilters object to a single boolean.
+ *   - `fields` -- `?fields=<csv>` allowlist / `?fields=-<csv>`
+ *                  deny-list / `?fields=*|all|none` keyword sugar.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series. A
+ * grep for REVIEW_FILTER_REPORT_PROJECTIONS is the one source of truth.
+ *
+ * Cardinality bounded at 3 -- same protection model as
+ * REVIEW_FILTER_REPORT_SHAPES (which is bounded at 2).
+ */
+export const REVIEW_FILTER_REPORT_PROJECTIONS = ['full', 'slim', 'fields'] as const;
+export type ReviewFilterReportProjection =
+  (typeof REVIEW_FILTER_REPORT_PROJECTIONS)[number];
+
+/**
+ * Tick 27: derive a `full | slim | fields` projection label from the
+ * route layer's parsed projection state.
+ *
+ * Pure: takes the two booleans the route already computed (`slim` from
+ * `?slim` parse, `fields` non-null from `?fields` parse) and returns
+ * the canonical label.
+ *
+ * Mutex enforcement: the route layer rejects `?slim + ?fields`
+ * combinations BEFORE calling this helper, so the function never
+ * sees `slim=true && fields=true`. We assert it defensively (both
+ * true -> error path falls through to `slim` which takes priority)
+ * because if someone wired this without the mutex check, biasing
+ * toward the more restrictive `slim` projection is the safer
+ * default than fabricating a synthetic 4th label.
+ */
+export function deriveReviewFilterReportProjection(
+  slim: boolean,
+  fields: boolean,
+): ReviewFilterReportProjection {
+  // Slim takes priority on the defensive both-true path because
+  // slim is a smaller wire payload (the route layer's mutex check
+  // would have caught this; this assignment is defence-in-depth).
+  if (slim) return 'slim';
+  if (fields) return 'fields';
+  return 'full';
+}
+
+/**
+ * Tick 27: record one accepted `/api/reviews/:id/filter-report` read
+ * on the `clawreview_review_filter_report_reads_projection_total{projection}`
+ * counter.
+ *
+ * Fires once per 200 response, paired with the tick-23
+ * `observeReviewFilterReportRead` call: the route layer should fire
+ * BOTH on the same accepted path so the per-shape (tick 23) and
+ * per-projection-mode (tick 27) counts reconcile per request.
+ *
+ * 404 arms (NotFound, NoFilterReport) are deliberately excluded --
+ * counting them would inflate the read rate with traffic that
+ * didn't actually consume the persisted shape.
+ *
+ * Cheap: a single counter increment with one short label.
+ */
+export function observeReviewFilterReportReadProjection(
+  metrics: MetricsBundle,
+  slim: boolean,
+  fields: boolean,
+): void {
+  metrics.reviewFilterReportReadsProjectionTotal.inc({
+    projection: deriveReviewFilterReportProjection(slim, fields),
   });
 }
 

@@ -1646,3 +1646,148 @@ describe('observeReviewFilterReportDiffDuration (tick 26)', () => {
   });
 });
 
+// Tick 27: deriveReviewFilterReportProjection + observeReviewFilterReportReadProjection
+// -- per-projection-mode counter for /api/reviews/:id/filter-report. Pairs
+// with tick-23's per-shape counter (full|slim) but adds a third axis
+// (fields) that the per-shape series collapses into 'full'.
+describe('deriveReviewFilterReportProjection (tick 27)', () => {
+  it('slim=false, fields=false -> full (default response, no projection)', async () => {
+    const { deriveReviewFilterReportProjection } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportProjection(false, false)).toBe('full');
+  });
+
+  it('slim=true, fields=false -> slim (collapsing projection)', async () => {
+    const { deriveReviewFilterReportProjection } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportProjection(true, false)).toBe('slim');
+  });
+
+  it('slim=false, fields=true -> fields (allowlist / deny-list projection)', async () => {
+    const { deriveReviewFilterReportProjection } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportProjection(false, true)).toBe('fields');
+  });
+
+  it('defensive both-true (mutex check should have caught this upstream) -> slim wins (safer default)', async () => {
+    const { deriveReviewFilterReportProjection } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportProjection(true, true)).toBe('slim');
+  });
+
+  it('REVIEW_FILTER_REPORT_PROJECTIONS is the closed tuple [full, slim, fields]', async () => {
+    const { REVIEW_FILTER_REPORT_PROJECTIONS } = await import('../src/metrics.js');
+    expect(REVIEW_FILTER_REPORT_PROJECTIONS).toEqual(['full', 'slim', 'fields']);
+  });
+});
+
+describe('observeReviewFilterReportReadProjection (tick 27)', () => {
+  afterEach(() => resetMetricsForTests());
+
+  it('fires the full counter when slim=false, fields=false', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadProjection } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrp-1', defaultMetrics: false });
+    observeReviewFilterReportReadProjection(metrics, false, false);
+    observeReviewFilterReportReadProjection(metrics, false, false);
+    const text = await metrics.registry.metrics();
+    const match = text.match(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="full"[^}]*\}\s*(\d+)/,
+    );
+    expect(match).toBeTruthy();
+    expect(Number(match![1])).toBe(2);
+  });
+
+  it('fires the slim counter when slim=true', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadProjection } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrp-2', defaultMetrics: false });
+    observeReviewFilterReportReadProjection(metrics, true, false);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="slim"[^}]*\}\s*1/,
+    );
+  });
+
+  it('fires the fields counter when fields=true', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadProjection } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrp-3', defaultMetrics: false });
+    observeReviewFilterReportReadProjection(metrics, false, true);
+    observeReviewFilterReportReadProjection(metrics, false, true);
+    observeReviewFilterReportReadProjection(metrics, false, true);
+    const text = await metrics.registry.metrics();
+    const match = text.match(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="fields"[^}]*\}\s*(\d+)/,
+    );
+    expect(match).toBeTruthy();
+    expect(Number(match![1])).toBe(3);
+  });
+
+  it('three projections accumulate independently (no cross-fire)', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadProjection } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrp-4', defaultMetrics: false });
+    for (let i = 0; i < 5; i++) observeReviewFilterReportReadProjection(metrics, false, false); // full
+    for (let i = 0; i < 3; i++) observeReviewFilterReportReadProjection(metrics, true, false);  // slim
+    for (let i = 0; i < 2; i++) observeReviewFilterReportReadProjection(metrics, false, true);  // fields
+    const text = await metrics.registry.metrics();
+    const full = text.match(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="full"[^}]*\}\s*(\d+)/,
+    );
+    const slim = text.match(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="slim"[^}]*\}\s*(\d+)/,
+    );
+    const fields = text.match(
+      /clawreview_review_filter_report_reads_projection_total\{[^}]*projection="fields"[^}]*\}\s*(\d+)/,
+    );
+    expect(Number(full![1])).toBe(5);
+    expect(Number(slim![1])).toBe(3);
+    expect(Number(fields![1])).toBe(2);
+    // Total reconciles
+    expect(Number(full![1]) + Number(slim![1]) + Number(fields![1])).toBe(10);
+  });
+
+  it('reconciles with tick-23 reviewFilterReportReadsTotal when both fire on same request', async () => {
+    // The route layer fires BOTH counters on each accepted 200. A
+    // dashboard joining them must see consistent counts: tick-23 sees
+    // (full | slim), tick-27 sees (full | slim | fields) where the
+    // fields-projection reads contribute to tick-23's 'full' bucket
+    // (because the response body shape is still full when ?fields is in play).
+    resetMetricsForTests();
+    const {
+      observeReviewFilterReportRead,
+      observeReviewFilterReportReadProjection,
+    } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrp-5', defaultMetrics: false });
+    // Simulate 3 default-full + 2 slim + 4 fields reads.
+    for (let i = 0; i < 3; i++) {
+      observeReviewFilterReportRead(metrics, false);
+      observeReviewFilterReportReadProjection(metrics, false, false);
+    }
+    for (let i = 0; i < 2; i++) {
+      observeReviewFilterReportRead(metrics, true);
+      observeReviewFilterReportReadProjection(metrics, true, false);
+    }
+    for (let i = 0; i < 4; i++) {
+      observeReviewFilterReportRead(metrics, false); // fields-projection still surfaces as full SHAPE
+      observeReviewFilterReportReadProjection(metrics, false, true);
+    }
+    const text = await metrics.registry.metrics();
+    // Tick-23: full=7 (3 default + 4 fields), slim=2
+    const shapeFull = text.match(/clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*(\d+)/);
+    const shapeSlim = text.match(/clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*(\d+)/);
+    expect(Number(shapeFull![1])).toBe(7);
+    expect(Number(shapeSlim![1])).toBe(2);
+    // Tick-27: full=3 (default only), slim=2, fields=4
+    const projFull = text.match(/clawreview_review_filter_report_reads_projection_total\{[^}]*projection="full"[^}]*\}\s*(\d+)/);
+    const projSlim = text.match(/clawreview_review_filter_report_reads_projection_total\{[^}]*projection="slim"[^}]*\}\s*(\d+)/);
+    const projFields = text.match(/clawreview_review_filter_report_reads_projection_total\{[^}]*projection="fields"[^}]*\}\s*(\d+)/);
+    expect(Number(projFull![1])).toBe(3);
+    expect(Number(projSlim![1])).toBe(2);
+    expect(Number(projFields![1])).toBe(4);
+    // Cross-series invariant: tick-23.full == tick-27.full + tick-27.fields
+    // (fields projection produces full-shape responses).
+    expect(Number(shapeFull![1])).toBe(Number(projFull![1]) + Number(projFields![1]));
+    // And tick-23.slim == tick-27.slim
+    expect(Number(shapeSlim![1])).toBe(Number(projSlim![1]));
+  });
+});
+
+

@@ -12,7 +12,7 @@ import {
   toCsv,
   renderReviewReport,
 } from '@clawreview/aggregator';
-import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied, observeReviewFilterReportRead, observeReviewFilterReportReadDuration } from '@clawreview/telemetry';
+import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied, observeReviewFilterReportRead, observeReviewFilterReportReadDuration, observeReviewFilterReportReadProjection } from '@clawreview/telemetry';
 import type { Severity } from '@clawreview/types';
 
 import { getReviewStore } from '../services/review-store.js';
@@ -764,6 +764,12 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // counter / histogram cardinality at 2.
       const metricsBundle = getMetrics({ service: 'clawreview-server' });
       observeReviewFilterReportRead(metricsBundle, slim);
+      // Tick 27: fire the per-projection-mode counter alongside the
+      // tick-23 per-shape counter. The two answer orthogonal
+      // questions (shape = response body shape; projection = which
+      // mode the operator requested) and reconcile per request --
+      // a dashboard joining them can attribute traffic precisely.
+      observeReviewFilterReportReadProjection(metricsBundle, slim, fields !== null);
       let body: Record<string, unknown>;
       if (slim) {
         body = {

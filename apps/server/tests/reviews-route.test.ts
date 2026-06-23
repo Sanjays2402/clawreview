@@ -2424,6 +2424,85 @@ describe('reviews and stats routes', () => {
       expect(afterFull).toBe(beforeFull);
     });
 
+    // Tick 27: per-projection-mode counter (full | slim | fields)
+    // distinguishes the three mutually-exclusive projection paths.
+    // The fields-projection produces a full-shape response so the
+    // tick-23 per-shape counter conflates them with default-full
+    // reads; this new counter answers "is anyone using ?fields?".
+    it('fires clawreview_review_filter_report_reads_projection_total with full|slim|fields labels (tick 27)', async () => {
+      const reviewId = await seedReviewWithFilterReport({ prNumber: 270, minConfidence: 0.5 });
+      const { getMetrics } = await import('@clawreview/telemetry');
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      const before = await metrics.registry.metrics();
+      const baseline = (label: string): number => {
+        const m = before.match(
+          new RegExp(`clawreview_review_filter_report_reads_projection_total\\{[^}]*projection="${label}"[^}]*\\}\\s*(\\d+)`),
+        );
+        return m ? Number(m[1]) : 0;
+      };
+      const beforeFull = baseline('full');
+      const beforeSlim = baseline('slim');
+      const beforeFields = baseline('fields');
+      // 2 default-full + 1 slim + 1 fields reads.
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=true` });
+      await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?fields=inputTotal,droppedTotal` });
+      const after = await metrics.registry.metrics();
+      const sample = (label: string): number => {
+        const m = after.match(
+          new RegExp(`clawreview_review_filter_report_reads_projection_total\\{[^}]*projection="${label}"[^}]*\\}\\s*(\\d+)`),
+        );
+        return m ? Number(m[1]) : 0;
+      };
+      expect(sample('full') - beforeFull).toBe(2);
+      expect(sample('slim') - beforeSlim).toBe(1);
+      expect(sample('fields') - beforeFields).toBe(1);
+    });
+
+    it('does NOT fire the projection counter on 404 arms (tick 27 fire discipline)', async () => {
+      const { getMetrics } = await import('@clawreview/telemetry');
+      const metrics = getMetrics({ service: 'clawreview-server' });
+      const before = await metrics.registry.metrics();
+      const baseline = (label: string): number => {
+        const m = before.match(
+          new RegExp(`clawreview_review_filter_report_reads_projection_total\\{[^}]*projection="${label}"[^}]*\\}\\s*(\\d+)`),
+        );
+        return m ? Number(m[1]) : 0;
+      };
+      const beforeFull = baseline('full');
+      const beforeFields = baseline('fields');
+      // NotFound 404
+      const notFound = await app.inject({ method: 'GET', url: '/api/reviews/nope-tick27/filter-report?fields=inputTotal' });
+      expect(notFound.statusCode).toBe(404);
+      // NoFilterReport 404 (legacy review)
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 27, owner: 'o', repo: 'r', prNumber: 271, headSha: 'h271', baseSha: 'b271',
+      });
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 271, headSha: 'h271', baseSha: 'b271' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        [],
+      );
+      const legacy = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/filter-report?fields=inputTotal` });
+      expect(legacy.statusCode).toBe(404);
+      const after = await metrics.registry.metrics();
+      const sample = (label: string): number => {
+        const m = after.match(
+          new RegExp(`clawreview_review_filter_report_reads_projection_total\\{[^}]*projection="${label}"[^}]*\\}\\s*(\\d+)`),
+        );
+        return m ? Number(m[1]) : 0;
+      };
+      expect(sample('full')).toBe(beforeFull);
+      expect(sample('fields')).toBe(beforeFields);
+    });
+
     // Tick 24: ?fields=appliedFilters,inputTotal,droppedTotal,applied
     // allowlist projection.
     describe('?fields= allowlist (tick 24)', () => {
