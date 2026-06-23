@@ -1,7 +1,11 @@
 import { readFile } from 'node:fs/promises';
 
 import kleur from 'kleur';
-import { findingDigest, type FindingDigest } from '@clawreview/aggregator';
+import {
+  findingDigestWithFilterReport,
+  type FindingDigest,
+  type FindingDigestFilterReport,
+} from '@clawreview/aggregator';
 import {
   SEVERITY_LABELS,
   SEVERITY_ORDER,
@@ -194,24 +198,37 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   }
 
   const findings = parsed.aggregated?.findings ?? [];
-  // findingDigest is the canonical single-pass summarizer (lives in
-  // @clawreview/aggregator); the worker and PR comment header use it
-  // too, so this CLI shows exactly the same numbers without inlining
-  // its own loops.
+  // findingDigestWithFilterReport is the canonical single-pass summarizer
+  // wrapper (lives in @clawreview/aggregator); it computes the same
+  // FindingDigest findingDigest() would AND surfaces inputTotal /
+  // droppedTotal / appliedFilters so the --filter-summary text header
+  // (tick 21) can attribute drops without re-walking findings.
   //
   // Tick 20: pass --min-confidence and --severity-threshold through
   // verbatim. The digest helper handles all normalisation /
   // clamping; we cast severityThreshold to the expected union since
   // we deliberately forward the raw string (the digest's normaliser
   // returns null for unknown values, so a typo is forgiving).
-  const digest = findingDigest(findings, {
+  const filterReport = findingDigestWithFilterReport(findings, {
     topFiles,
     topAgents,
     topCategories,
     minConfidence,
     severityThreshold: severityThreshold as Severity | undefined,
   });
+  const digest = filterReport.digest;
   const totals = computeTotals(findings, parsed.aggregated?.totals, digest);
+
+  // Tick 21: --filter-summary (text-mode opt-in) prints a compact
+  // one-line header showing which filter(s) applied and how many
+  // findings were dropped. Default OFF for back-compat -- existing
+  // text output stays unchanged when the flag is absent. JSON
+  // output is unaffected: the filter echo on the JSON shape has
+  // existed since tick 20 and consumers can compute the drop count
+  // themselves; the flag exists for the text surface where a
+  // dashboard-style "you're seeing 1 finding (filtered 2 of 3 by
+  // min_confidence >= 0.5)" line is the natural UX.
+  const showFilterSummary = Boolean(args.flags['filter-summary']);
 
   if (format === 'json') {
     process.stdout.write(
@@ -249,6 +266,21 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   const lines: string[] = [];
   lines.push(c.bold('ClawReview report'));
   lines.push('');
+
+  // Tick 21: when --filter-summary is set AND a filter actually
+  // applied, surface a one-line summary right after the header so
+  // an operator scanning the text output knows the totals are
+  // post-filter (not the full report). When neither filter applied
+  // (default invocation) the line is omitted to keep the back-
+  // compat text shape; when the flag is set but the filter was a
+  // no-op (e.g. a typo'd --severity-threshold normalised to null),
+  // we still print a "no filters applied" line so the operator
+  // sees their intent was acknowledged.
+  if (showFilterSummary) {
+    const summary = renderFilterSummaryLine(filterReport, c);
+    lines.push(summary);
+    lines.push('');
+  }
 
   // Primary block depends on --by. Severity stays first by default
   // because it's the most actionable grouping (it's also what
@@ -510,4 +542,59 @@ function parseTopFlag(raw: string | boolean | undefined, defaultValue: number): 
   const parsedNum = Number(raw);
   if (!Number.isFinite(parsedNum)) return defaultValue;
   return Math.max(1, Math.min(MAX_TOP, Math.floor(parsedNum)));
+}
+
+/**
+ * Tick 21: build the one-line `--filter-summary` text header.
+ *
+ * Use case: an operator reading `clawreview stats --min-confidence 0.5
+ * --filter-summary` should see ONE line that tells them:
+ *   - which filter(s) ran;
+ *   - what threshold each one resolved to (clamped values, not raw);
+ *   - how many findings were dropped vs. kept.
+ *
+ * Shape examples (uncoloured, for readability):
+ *
+ *   Showing 3 findings (filtered 0 of 3; no filters applied)
+ *   Showing 1 finding (filtered 2 of 3 by min_confidence >= 0.5)
+ *   Showing 2 findings (filtered 1 of 3 by severity_threshold >= high)
+ *   Showing 1 finding (filtered 2 of 3 by min_confidence >= 0.5 + severity_threshold >= high)
+ *
+ * The "Showing N findings" prefix uses the post-filter `digest.total`
+ * so it matches whatever the rendered totals block shows. The
+ * "(filtered M of K)" parenthetical uses inputTotal as K so the
+ * operator sees how many findings were on disk before the filter.
+ *
+ * When neither filter applied (the default invocation), the line
+ * collapses to "Showing N findings (no filters applied)" rather than
+ * disappearing entirely. That keeps the flag's behaviour
+ * predictable: opting in always produces a line.
+ *
+ * The normalised value is what the digest CONSUMED -- not the raw
+ * operator input. So `--min-confidence 1.5` shows ">= 1" (after
+ * clamping); a typo'd `--severity-threshold Critical` doesn't fire
+ * because applied=false, falling under the "no filters applied"
+ * branch.
+ *
+ * Pure / exported so the test surface can pin every arm.
+ */
+export function renderFilterSummaryLine(
+  report: FindingDigestFilterReport,
+  c: typeof kleur,
+): string {
+  const showing = report.digest.total === 1
+    ? '1 finding'
+    : `${report.digest.total} findings`;
+  const parts: string[] = [];
+  if (report.appliedFilters.minConfidence.applied) {
+    parts.push(`min_confidence >= ${report.appliedFilters.minConfidence.normalised}`);
+  }
+  if (report.appliedFilters.severityThreshold.applied) {
+    parts.push(`severity_threshold >= ${report.appliedFilters.severityThreshold.normalised}`);
+  }
+  const dropped = `filtered ${report.droppedTotal} of ${report.inputTotal}`;
+  const detail = parts.length === 0
+    ? `${dropped}; no filters applied`
+    : `${dropped} by ${parts.join(' + ')}`;
+  return c.cyan(`Showing ${showing} (${detail})`);
 }

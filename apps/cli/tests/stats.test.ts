@@ -784,4 +784,161 @@ describe('runStats', () => {
       expect(err()).toContain('1 finding(s) at or above');
     });
   });
+
+  // Tick 21: --filter-summary opts the operator into a one-line
+  // header in text-mode output showing which filter(s) applied and
+  // how many findings were dropped. Default OFF for back-compat;
+  // JSON mode is unaffected (existing tick-20 echo serves that use
+  // case).
+  describe('--filter-summary text-mode header (tick 21)', () => {
+    const FILTER_REPORT = {
+      aggregated: {
+        findings: [
+          { agent: 'A', category: 'security', severity: 'critical', title: 'C',
+            rationale: '', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          { agent: 'B', category: 'style', severity: 'medium', title: 'M',
+            rationale: '', file: 'b.ts', startLine: 2, confidence: 0.3, tags: [] },
+          { agent: 'C', category: 'style', severity: 'nit', title: 'N',
+            rationale: '', file: 'c.ts', startLine: 3, confidence: 0.4, tags: [] },
+        ],
+      },
+      summary: { agentExecutions: [], totalCostUsd: 0 },
+    };
+
+    it('absent flag: no Showing-line in text output (back-compat)', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, 'no-color': true },
+      });
+      expect(out()).not.toContain('Showing');
+    });
+
+    it('--filter-summary with no filters prints "no filters applied" line', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: { input: file, 'filter-summary': true, 'no-color': true },
+      });
+      // 3 findings, none dropped, no filter -> uniform line.
+      expect(out()).toContain('Showing 3 findings (filtered 0 of 3; no filters applied)');
+    });
+
+    it('--filter-summary + --min-confidence shows the floor and dropped count', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'min-confidence': '0.5',
+          'filter-summary': true,
+          'no-color': true,
+        },
+      });
+      // 1 finding survives the 0.5 floor; 2 dropped.
+      expect(out()).toContain('Showing 1 finding (filtered 2 of 3 by min_confidence >= 0.5)');
+    });
+
+    it('--filter-summary + --severity-threshold shows the threshold and dropped count', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'severity-threshold': 'medium',
+          'filter-summary': true,
+          'no-color': true,
+        },
+      });
+      // critical + medium survive; nit dropped.
+      expect(out()).toContain('Showing 2 findings (filtered 1 of 3 by severity_threshold >= medium)');
+    });
+
+    it('--filter-summary + both filters joins them with +', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'min-confidence': '0.5',
+          'severity-threshold': 'medium',
+          'filter-summary': true,
+          'no-color': true,
+        },
+      });
+      // Both filters applied: critical alone passes both.
+      expect(out()).toContain('Showing 1 finding (filtered 2 of 3 by min_confidence >= 0.5 + severity_threshold >= medium)');
+    });
+
+    it('--filter-summary with clamped --min-confidence 1.5 shows >= 1 (normalised)', async () => {
+      // Headline use case from the roadmap: the line shows the
+      // CLAMPED value, not the raw 1.5 -- matches the server's
+      // ?normalisedEcho contract so an operator reading either
+      // surface sees the same number.
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'min-confidence': '1.5',
+          'filter-summary': true,
+          'no-color': true,
+        },
+      });
+      expect(out()).toContain('min_confidence >= 1');
+    });
+
+    it('--filter-summary with mis-cased --severity-threshold falls under "no filters applied"', async () => {
+      // A typo normalises to null inside the digest -> applied=false
+      // -> the line collapses to "no filters applied" (the typo
+      // didn't make the filter run; the JSON echo still surfaces
+      // the raw value so a CI gate can detect it).
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'severity-threshold': 'Critical', // wrong case
+          'filter-summary': true,
+          'no-color': true,
+        },
+      });
+      expect(out()).toContain('no filters applied');
+    });
+
+    it('--filter-summary does not affect JSON output (tick-20 echo is the JSON surface)', async () => {
+      const file = join(dir, 'r.json');
+      await writeFile(file, JSON.stringify(FILTER_REPORT));
+      await runStats({
+        command: 'stats',
+        positional: [],
+        flags: {
+          input: file,
+          'min-confidence': '0.5',
+          'filter-summary': true,
+          format: 'json',
+          'no-color': true,
+        },
+      });
+      // JSON shape unchanged: the tick-20 echoes are present, no
+      // new "Showing" string anywhere in the body.
+      const parsed = JSON.parse(out());
+      expect(parsed.minConfidence).toBe(0.5);
+      expect(out()).not.toContain('Showing');
+    });
+  });
 });

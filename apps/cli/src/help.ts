@@ -10,7 +10,7 @@ Usage:
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text] [--since <git-ref> | --since-base <git-ref>] [--output <path>|-]
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>|<a>...<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
-  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--filter-summary] [--format text|json]
   clawreview review drift [--input <path>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
   clawreview baseline save [--input <path>] [--output <path>]
@@ -45,6 +45,9 @@ Flags:
                         stats: drop findings less severe than <sev> BEFORE counting (critical|high|
                         medium|low|nit). Mirror of cfg.severity_threshold -- composes with
                         --min-confidence (AND semantics).
+  --filter-summary   stats: text-mode only. Print a one-line header showing which filter(s)
+                     applied and how many findings were dropped. Off by default; the JSON output's
+                     tick-20 filter echoes already serve the same use case for machine consumers.
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
