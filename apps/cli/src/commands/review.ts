@@ -858,6 +858,191 @@ export function expandOnRecoverTemplate(
 }
 
 /**
+ * Tick 24: Closed set of `--on-regression-template` template names
+ * for the `review drift --base/--target` compare command. Mirrors
+ * ON_DRIFT_TEMPLATES / ON_RECOVER_TEMPLATES so an operator's mental
+ * model carries across all three hook surfaces.
+ *
+ * Re-exported as its own tuple so a future divergence (e.g. a
+ * regression-only "jira-ticket" template that opens a ticket on
+ * positive deltas) can land without disturbing the drift / recover
+ * surfaces.
+ */
+export const ON_REGRESSION_TEMPLATES = ['slack', 'webhook'] as const;
+export type OnRegressionTemplate = (typeof ON_REGRESSION_TEMPLATES)[number];
+
+/**
+ * Outcome of expanding `--on-regression-template <name>`. Identical
+ * shape to `OnDriftTemplateExpansion` / `OnRecoverTemplateExpansion`;
+ * surfaced under the existing 'on-regression' error path so the
+ * caller doesn't need to learn a new error sentinel.
+ */
+export type OnRegressionTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Expand a named `--on-regression-template` into the curl command
+ * the compare command will exec on a positive-delta regression
+ * sample.
+ *
+ * Env-var fallback ladder (mirrors expandOnRecoverTemplate's
+ * recover-specific -> shared pattern):
+ *   - `slack`   -> $SLACK_REGRESSION_WEBHOOK_URL, falling back to
+ *                  $SLACK_WEBHOOK_URL when the regression-specific
+ *                  one isn't set. An operator with ONE Slack channel
+ *                  receiving both drift and regression alerts
+ *                  doesn't have to duplicate the URL into two env
+ *                  vars.
+ *   - `webhook` -> $WEBHOOK_REGRESSION_URL, falling back to
+ *                  $WEBHOOK_URL. Same logic.
+ *
+ * The fallback is intentional: operators who want SEPARATE
+ * channels (a "drift" channel for digest staleness, a "regression"
+ * channel for new findings after a refactor) set both env vars
+ * and the regression-specific one wins.
+ *
+ * Validation:
+ *   - Unknown template name rejects with an enumerated list.
+ *   - Resolved URL must be non-empty after trim -> rejects with a
+ *     clear "set $X (or $Y as fallback)" message.
+ *
+ * Pure: takes the `env` map as an argument so tests can drive
+ * every arm without mutating `process.env`.
+ */
+export function expandOnRegressionTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): OnRegressionTemplateExpansion {
+  const lower = name.toLowerCase();
+  let primaryVar: string;
+  let fallbackVar: string;
+  switch (lower) {
+    case 'slack':
+      primaryVar = 'SLACK_REGRESSION_WEBHOOK_URL';
+      fallbackVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      primaryVar = 'WEBHOOK_REGRESSION_URL';
+      fallbackVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-regression-template '${name}'; valid: ${ON_REGRESSION_TEMPLATES.join(', ')}`,
+      };
+  }
+  const primary = (env[primaryVar] ?? '').trim();
+  const fallback = (env[fallbackVar] ?? '').trim();
+  const url = primary.length > 0 ? primary : fallback;
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-regression-template ${lower} requires \$${primaryVar} ` +
+        `(or \$${fallbackVar} as fallback) -- set one before running the compare command`,
+    };
+  }
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
+}
+
+/**
+ * Tick 24: outcome of parsing the `--on-regression` / `--on-regression-template`
+ * flag pair for `review drift --base/--target`. Mirrors the shape of
+ * the watch-mode template-parser arms so each error surface has a
+ * distinct discriminant.
+ *
+ *   - 'none'    -- neither flag set; no hook fires (back-compat with
+ *                  tick 23 compare).
+ *   - 'ok'      -- flag pair resolved cleanly. `command` carries the
+ *                  shell line the regression executor will exec.
+ *   - 'invalid' -- typo / mutex collision / unknown template / env-var
+ *                  unset. Caller surfaces `message` on stderr and
+ *                  exits 2.
+ */
+export type OnRegressionParseResult =
+  | { kind: 'none' }
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Tick 24: pure parser for the `--on-regression` / `--on-regression-template`
+ * flag pair.
+ *
+ * Validation rules:
+ *   - Neither flag set -> 'none' (no hook fires).
+ *   - --on-regression empty / non-string after trim -> 'invalid'
+ *     (almost always a typo).
+ *   - --on-regression-template AND --on-regression both set ->
+ *     'invalid' (mutex: pick one).
+ *   - --on-regression-template empty / non-string -> 'invalid'.
+ *   - --on-regression-template <name> with unknown name -> 'invalid'
+ *     with the enumerated valid set.
+ *   - --on-regression-template <name> with no env var set -> 'invalid'
+ *     with the "set $X" hint.
+ *
+ * Pure: env is passed as an argument so tests can drive every arm
+ * without mutating process.env.
+ */
+export function parseOnRegressionFlags(input: {
+  'on-regression'?: unknown;
+  'on-regression-template'?: unknown;
+  env: NodeJS.ProcessEnv;
+}): OnRegressionParseResult {
+  const explicit = input['on-regression'];
+  const template = input['on-regression-template'];
+
+  let onRegression: string | null = null;
+  if (explicit !== undefined) {
+    if (typeof explicit !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-regression must be a command string; got ${typeof explicit}`,
+      };
+    }
+    const trimmed = explicit.trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `--on-regression: empty / non-string value (pass a shell command)`,
+      };
+    }
+    onRegression = trimmed;
+  }
+
+  if (template !== undefined) {
+    if (onRegression !== null) {
+      return {
+        kind: 'invalid',
+        message: '--on-regression-template is mutually exclusive with --on-regression (pick one)',
+      };
+    }
+    if (typeof template !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-regression-template must be a template name string; got ${typeof template}`,
+      };
+    }
+    const name = template.trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid',
+        message: '--on-regression-template requires a template name (one of: slack, webhook)',
+      };
+    }
+    const expanded = expandOnRegressionTemplate(name, input.env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid', message: expanded.message };
+    }
+    onRegression = expanded.command;
+  }
+
+  return onRegression === null ? { kind: 'none' } : { kind: 'ok', command: onRegression };
+}
+
+/**
  * Internal seam for the watch loop's HTTP fetch. The default
  * implementation uses the global `fetch`; tests inject a stub that
  * returns canned bodies so the suite doesn't need to boot a real
@@ -1314,21 +1499,29 @@ export async function runReviewDriftCompare(
   // typo (e.g. --on-regression='') rejects early with exit 2 rather
   // than firing a no-op hook downstream. Empty / non-string value
   // means "no hook" (back-compat: existing compare calls don't fire).
-  const onRegressionRaw = args.flags['on-regression'];
-  const onRegression =
-    typeof onRegressionRaw === 'string' && onRegressionRaw.trim().length > 0
-      ? onRegressionRaw.trim()
-      : undefined;
-  if (onRegressionRaw !== undefined && onRegression === undefined) {
-    // Distinguish "flag passed but empty" (user error) from "flag
-    // not passed" (default). The former should reject loudly; the
-    // latter is the happy default.
-    process.stderr.write(
-      `clawreview review drift --on-regression: empty / non-string value (pass a shell command)\n`,
-    );
+  //
+  // Tick 24: --on-regression-template <name> mirrors tick-17's
+  // --on-drift-template for the compare command's regression hook.
+  // Same closed {slack, webhook} template set; same env-var
+  // fallback ladder (REGRESSION_-specific -> shared) so an operator
+  // with one Slack channel handling both drift and regression
+  // alerts doesn't need to set two env vars.
+  //
+  // Mutex with --on-regression: a template AND an explicit
+  // --on-regression command rejects (almost always a typo --
+  // the operator switched to the template but forgot to remove
+  // the raw command).
+  const onRegressionParse = parseOnRegressionFlags({
+    'on-regression': args.flags['on-regression'],
+    'on-regression-template': args.flags['on-regression-template'],
+    env: process.env,
+  });
+  if (onRegressionParse.kind === 'invalid') {
+    process.stderr.write(`clawreview review drift: ${onRegressionParse.message}\n`);
     process.exitCode = 2;
     return;
   }
+  const onRegression = onRegressionParse.kind === 'ok' ? onRegressionParse.command : undefined;
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;

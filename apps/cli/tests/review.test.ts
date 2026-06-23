@@ -2191,6 +2191,208 @@ describe('clawreview review drift --on-regression (tick 23)', () => {
       expect(slice!.byTagRegression['new-tag']).toBe(1);
     });
   });
+
+  // Tick 24: --on-regression-template slack|webhook expansion. Mirrors
+  // tick-17's --on-drift-template / tick-19's --on-recover-template.
+  describe('--on-regression-template (tick 24 template expansion)', () => {
+    it('expands slack with $SLACK_REGRESSION_WEBHOOK_URL primary', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const r = expandOnRegressionTemplate('slack', {
+        SLACK_REGRESSION_WEBHOOK_URL: 'https://hooks.slack.com/services/regression',
+        SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/drift',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        // Primary wins over fallback.
+        expect(r.command).toContain('https://hooks.slack.com/services/regression');
+        expect(r.command).toContain('curl -sS -X POST');
+        expect(r.command).toContain('--data-binary @-');
+      }
+    });
+
+    it('falls back to $SLACK_WEBHOOK_URL when primary is unset', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const r = expandOnRegressionTemplate('slack', {
+        SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/shared',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.command).toContain('https://hooks.slack.com/services/shared');
+      }
+    });
+
+    it('expands webhook with $WEBHOOK_REGRESSION_URL primary, falls back to $WEBHOOK_URL', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const primary = expandOnRegressionTemplate('webhook', {
+        WEBHOOK_REGRESSION_URL: 'https://hooks.example.com/regression',
+      });
+      if (primary.kind === 'ok') {
+        expect(primary.command).toContain('https://hooks.example.com/regression');
+      }
+      const fallback = expandOnRegressionTemplate('webhook', {
+        WEBHOOK_URL: 'https://hooks.example.com/shared',
+      });
+      if (fallback.kind === 'ok') {
+        expect(fallback.command).toContain('https://hooks.example.com/shared');
+      }
+    });
+
+    it('rejects unknown template name with the enumerated valid list', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const r = expandOnRegressionTemplate('discord', { WEBHOOK_URL: 'https://x' });
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') {
+        expect(r.message).toContain('discord');
+        expect(r.message).toContain('slack');
+        expect(r.message).toContain('webhook');
+      }
+    });
+
+    it('rejects when neither primary nor fallback env var is set (with the "set $X" hint)', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const r = expandOnRegressionTemplate('slack', {});
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') {
+        expect(r.message).toContain('SLACK_REGRESSION_WEBHOOK_URL');
+        expect(r.message).toContain('SLACK_WEBHOOK_URL');
+      }
+    });
+
+    it('case-insensitive on the template name', async () => {
+      const { expandOnRegressionTemplate } = await import('../src/commands/review.js');
+      const r = expandOnRegressionTemplate('SLACK', {
+        SLACK_WEBHOOK_URL: 'https://x',
+      });
+      expect(r.kind).toBe('ok');
+    });
+
+    it('ON_REGRESSION_TEMPLATES is the closed slack|webhook tuple', async () => {
+      const { ON_REGRESSION_TEMPLATES } = await import('../src/commands/review.js');
+      expect([...ON_REGRESSION_TEMPLATES]).toEqual(['slack', 'webhook']);
+    });
+
+    // parseOnRegressionFlags integration: each error arm + happy path.
+    describe('parseOnRegressionFlags (pure)', () => {
+      it('returns "none" when neither flag is set', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({ env: {} });
+        expect(r.kind).toBe('none');
+      });
+
+      it('resolves --on-regression alone', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({ 'on-regression': 'echo x', env: {} });
+        expect(r.kind).toBe('ok');
+        if (r.kind === 'ok') expect(r.command).toBe('echo x');
+      });
+
+      it('resolves --on-regression-template alone (with env var set)', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({
+          'on-regression-template': 'slack',
+          env: { SLACK_WEBHOOK_URL: 'https://x' },
+        });
+        expect(r.kind).toBe('ok');
+        if (r.kind === 'ok') expect(r.command).toContain('https://x');
+      });
+
+      it('rejects --on-regression empty / non-string', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const empty = parseOnRegressionFlags({ 'on-regression': '', env: {} });
+        expect(empty.kind).toBe('invalid');
+        const ws = parseOnRegressionFlags({ 'on-regression': '   ', env: {} });
+        expect(ws.kind).toBe('invalid');
+        const numeric = parseOnRegressionFlags({
+          'on-regression': 5 as unknown as string,
+          env: {},
+        });
+        expect(numeric.kind).toBe('invalid');
+      });
+
+      it('rejects both --on-regression AND --on-regression-template (mutex)', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({
+          'on-regression': 'echo x',
+          'on-regression-template': 'slack',
+          env: { SLACK_WEBHOOK_URL: 'https://x' },
+        });
+        expect(r.kind).toBe('invalid');
+        if (r.kind === 'invalid') {
+          expect(r.message).toContain('mutually exclusive');
+        }
+      });
+
+      it('rejects --on-regression-template empty', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({ 'on-regression-template': '', env: {} });
+        expect(r.kind).toBe('invalid');
+      });
+
+      it('rejects --on-regression-template with unknown name', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({
+          'on-regression-template': 'discord',
+          env: { WEBHOOK_URL: 'https://x' },
+        });
+        expect(r.kind).toBe('invalid');
+      });
+
+      it('rejects --on-regression-template with no env var set', async () => {
+        const { parseOnRegressionFlags } = await import('../src/commands/review.js');
+        const r = parseOnRegressionFlags({
+          'on-regression-template': 'slack',
+          env: {},
+        });
+        expect(r.kind).toBe('invalid');
+        if (r.kind === 'invalid') {
+          expect(r.message).toContain('SLACK_WEBHOOK_URL');
+        }
+      });
+    });
+
+    // Integration: --on-regression-template fires the same hook
+    // executor as --on-regression with the expanded command line.
+    it('fires the regression hook with the template-expanded curl command', async () => {
+      // Save + restore env so the test doesn't leak the URL.
+      const prev = process.env.SLACK_WEBHOOK_URL;
+      process.env.SLACK_WEBHOOK_URL = 'https://hooks.slack.com/services/integration-test';
+      try {
+        const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+        const targetFindings = [
+          f({ severity: 'high', file: 'a.ts' }),
+          f({ severity: 'medium', file: 'b.ts' }),
+        ];
+        const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+        const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+        const r = await runCompareWithOnRegression(baseDig, targetDig, {
+          'on-regression-template': 'slack',
+        });
+        expect(r.exitCode).toBe(3);
+        expect(r.hookCalls).toHaveLength(1);
+        // Template expanded into a curl line targeting the env URL.
+        expect(r.hookCalls[0]!.cmd).toContain('curl -sS -X POST');
+        expect(r.hookCalls[0]!.cmd).toContain('hooks.slack.com/services/integration-test');
+      } finally {
+        if (prev === undefined) delete process.env.SLACK_WEBHOOK_URL;
+        else process.env.SLACK_WEBHOOK_URL = prev;
+      }
+    });
+
+    it('rejects with exit 2 when --on-regression-template AND --on-regression are both passed', async () => {
+      const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+      const targetFindings = [f({ severity: 'high', file: 'a.ts' })];
+      const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+      const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+      const r = await runCompareWithOnRegression(baseDig, targetDig, {
+        'on-regression': 'echo x',
+        'on-regression-template': 'slack',
+      });
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain('mutually exclusive');
+      // Hook NEVER fires because parsing rejected.
+      expect(r.hookCalls).toHaveLength(0);
+    });
+  });
 });
 // Tick 23: `clawreview review filter-report <reviewId> --server <url>`
 // Single-shot CLI face of the new /api/reviews/:id/filter-report
