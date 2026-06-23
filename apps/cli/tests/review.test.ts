@@ -4965,6 +4965,299 @@ describe('clawreview review filter-report --diff --max-output-bytes (tick 27)', 
   });
 });
 
+// Tick 27: `clawreview review filter-report --diff --input <path|->` --
+// feed two pre-fetched filter-report bodies via a file (or stdin) instead
+// of fetching over HTTP. Use case: a CI gate has already fetched the
+// bodies (e.g. via a worker queue) and wants to skip the HTTP round-trip
+// in the diff command itself.
+describe('clawreview review filter-report --diff --input (tick 27)', () => {
+  async function runDiffWithInput(
+    flags: Record<string, string | boolean>,
+    inputReader: (source: unknown) => Promise<string>,
+    positionalTarget = 'rv_in_target',
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    // Fetcher should NEVER be invoked when --input is set; we wire a
+    // throw-on-call stub so an accidental fetch surfaces as a test failure.
+    const fetcher = async () => {
+      throw new Error('fetcher should not be called when --input is set');
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', positionalTarget],
+          flags: { 'no-color': true, ...flags },
+        },
+        // @ts-expect-error: injected is structurally typed wider than the parent's signature
+        { fetcher, inputReader },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): Record<string, unknown> {
+    return {
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    };
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // -- Pure parser tests --
+
+  it('parseFilterReportDiffInput: valid envelope parses to ok', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const body = JSON.stringify({ base: makeBody(), target: makeBody({ inputTotal: 15 }) });
+    const r = parseFilterReportDiffInput(body);
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.base.inputTotal).toBe(10);
+      expect(r.target.inputTotal).toBe(15);
+    }
+  });
+
+  it('parseFilterReportDiffInput: invalid JSON rejects with invalid-json', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const r = parseFilterReportDiffInput('not valid {');
+    expect(r.kind).toBe('invalid-json');
+  });
+
+  it('parseFilterReportDiffInput: non-object body rejects invalid-shape', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const r = parseFilterReportDiffInput('"a string"');
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') {
+      expect(r.message).toContain('{ base, target }');
+    }
+  });
+
+  it('parseFilterReportDiffInput: missing base key rejects invalid-shape', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const r = parseFilterReportDiffInput(JSON.stringify({ target: makeBody() }));
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') {
+      expect(r.message).toContain("'base'");
+    }
+  });
+
+  it('parseFilterReportDiffInput: missing target key rejects invalid-shape', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const r = parseFilterReportDiffInput(JSON.stringify({ base: makeBody() }));
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') {
+      expect(r.message).toContain("'target'");
+    }
+  });
+
+  it('parseFilterReportDiffInput: base is null rejects invalid-shape', async () => {
+    const { parseFilterReportDiffInput } = await import('../src/commands/review.js');
+    const r = parseFilterReportDiffInput(JSON.stringify({ base: null, target: makeBody() }));
+    expect(r.kind).toBe('invalid-shape');
+  });
+
+  it('resolveFilterReportDiffInputSource: `-` resolves to stdin sentinel', async () => {
+    const { resolveFilterReportDiffInputSource, FILTER_REPORT_DIFF_STDIN_SENTINEL } =
+      await import('../src/commands/review.js');
+    expect(resolveFilterReportDiffInputSource('-', '/cwd')).toBe(FILTER_REPORT_DIFF_STDIN_SENTINEL);
+  });
+
+  it('resolveFilterReportDiffInputSource: relative path resolves under cwd; absolute pass-through', async () => {
+    const { resolveFilterReportDiffInputSource } = await import('../src/commands/review.js');
+    expect(resolveFilterReportDiffInputSource('foo/bar.json', '/cwd')).toBe('/cwd/foo/bar.json');
+    expect(resolveFilterReportDiffInputSource('/abs/path.json', '/cwd')).toBe('/abs/path.json');
+  });
+
+  // -- Integration tests --
+
+  it('--input with a valid envelope skips the HTTP fetch and computes the delta', async () => {
+    const envelope = JSON.stringify({
+      base: makeBody({ inputTotal: 10 }),
+      target: makeBody({ inputTotal: 15 }),
+    });
+    const inputReader = async () => envelope;
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+        // NO --server -- back-compat verification that --input flips
+        // the server requirement off.
+      },
+      inputReader,
+    );
+    expect(r.exitCode).toBe(3); // has delta
+    expect(r.stdout).toContain('"baseId": "rv_in_base"');
+    expect(r.stdout).toContain('"targetId": "rv_in_target"');
+    expect(r.stdout).toContain('"hasDelta": true');
+  });
+
+  it('--input identical bodies returns exit 0 (no delta)', async () => {
+    const envelope = JSON.stringify({ base: makeBody(), target: makeBody() });
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+      },
+      async () => envelope,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('"hasDelta": false');
+  });
+
+  it('--input read error surfaces on stderr exit 2', async () => {
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/missing/file.json',
+      },
+      async () => {
+        throw new Error('ENOENT: no such file or directory');
+      },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--input read failed');
+    expect(r.stderr).toContain('ENOENT');
+  });
+
+  it('--input invalid JSON surfaces on stderr exit 2', async () => {
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+      },
+      async () => '{not valid',
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('not valid JSON');
+  });
+
+  it('--input missing base/target key surfaces on stderr exit 2', async () => {
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+      },
+      async () => JSON.stringify({ target: makeBody() }),
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain("missing 'base' key");
+  });
+
+  it('--input composes with --json-stream (renders 7 lines from disk bodies)', async () => {
+    const envelope = JSON.stringify({
+      base: makeBody({ inputTotal: 10 }),
+      target: makeBody({ inputTotal: 15 }),
+    });
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+        'json-stream': true,
+      },
+      async () => envelope,
+    );
+    expect(r.exitCode).toBe(3);
+    const lines = r.stdout.split('\n').filter((l) => l.length > 0);
+    expect(lines).toHaveLength(7);
+    const header = JSON.parse(lines[0]!);
+    expect(header.kind).toBe('header');
+    const footer = JSON.parse(lines[6]!);
+    expect(footer.kind).toBe('footer');
+    expect(footer.hasDelta).toBe(true);
+  });
+
+  it('--input WITHOUT --server is accepted (--input flips the server requirement off)', async () => {
+    const envelope = JSON.stringify({ base: makeBody(), target: makeBody() });
+    // No --server in flags; should still resolve cleanly.
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+      },
+      async () => envelope,
+    );
+    // identical bodies -> exit 0; the key assertion is "not exit 2".
+    expect(r.exitCode).toBe(0);
+  });
+
+  it('--input absent + --server absent reproduces the missing-server error (back-compat)', async () => {
+    // Without --input AND without --server, the parser rejects.
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        // no input, no server
+      },
+      async () => '',
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--diff requires --server');
+    expect(r.stderr).toContain('--input <path|->'); // hint mentions the alternative
+  });
+
+  it('--input composes with --output (delta body lands on disk)', async () => {
+    const fs = await import('node:fs/promises');
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), 'crwx-tick27-in-'));
+    const outFile = join(tmpDir, 'delta.json');
+    const envelope = JSON.stringify({
+      base: makeBody({ inputTotal: 10 }),
+      target: makeBody({ inputTotal: 15 }),
+    });
+    const r = await runDiffWithInput(
+      {
+        diff: 'rv_in_base',
+        format: 'json',
+        input: '/some/path.json',
+        output: outFile,
+      },
+      async () => envelope,
+    );
+    expect(r.exitCode).toBe(3);
+    const written = await fs.readFile(outFile, 'utf8');
+    expect(written).toContain('"hasDelta": true');
+    await fs.rm(tmpDir, { recursive: true });
+  });
+});
+
+
 
 
 

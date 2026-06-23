@@ -2137,12 +2137,21 @@ export async function runReviewFilterReport(
  *                           The compare needs both sides; we don't
  *                           guess a default.
  *   - `'missing-server'` -- --server <url> required to fetch both
- *                           /filter-report bodies.
+ *                           /filter-report bodies. Tick 27: NOT
+ *                           required when --input is set (the bodies
+ *                           are read from the input file / stdin,
+ *                           not the network).
  *   - `'invalid-format'` -- --format must be 'text' or 'json'.
  */
 export type FilterReportDiffConfigResult =
   | {
       kind: 'ok';
+      /**
+       * Resolved server URL. Empty string when --input is set (the
+       * runner reads input instead of fetching) -- the existence of
+       * --input is the signal to skip the HTTP path. A non-empty
+       * server URL is required ONLY when --input is absent.
+       */
       serverUrl: string;
       baseId: string;
       targetId: string;
@@ -2162,7 +2171,9 @@ export type FilterReportDiffConfigResult =
  * Validation:
  *   - baseId (from --diff value) required (missing -> 'missing-base')
  *   - targetId (from positional) required (missing -> 'missing-target')
- *   - serverUrl required (missing -> 'missing-server')
+ *   - serverUrl required when --input is ABSENT (missing -> 'missing-server').
+ *     Tick 27: when --input is set, the bodies come from the file /
+ *     stdin so --server is no longer required.
  *   - format: 'text' | 'json' (default 'text'; anything else ->
  *     'invalid-format')
  *
@@ -2174,6 +2185,14 @@ export function parseFilterReportDiffConfig(flags: {
   target?: unknown;
   server?: unknown;
   format?: unknown;
+  /**
+   * Tick 27: --input <path|-> opt-in. When set (truthy string),
+   * --server is no longer required; the runner reads pre-fetched
+   * filter-report bodies from the file / stdin instead of fetching
+   * over HTTP. The flag's value (path or '-') is consumed by the
+   * runner, NOT by this parser.
+   */
+  input?: unknown;
 }): FilterReportDiffConfigResult {
   const baseId = typeof flags.base === 'string' ? flags.base.trim() : '';
   if (baseId.length === 0) {
@@ -2191,11 +2210,17 @@ export function parseFilterReportDiffConfig(flags: {
         '--diff requires a positional <targetReviewId>: `clawreview review filter-report --diff <baseId> <targetId>`',
     };
   }
+  // Tick 27: --input flips the server requirement off. A non-empty
+  // string value is the trigger; bare `true` (--input with no value)
+  // is treated as a typo and surfaces under missing-server below.
+  const hasInput = typeof flags.input === 'string' && flags.input.length > 0;
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
-  if (serverRaw.length === 0) {
+  if (!hasInput && serverRaw.length === 0) {
     return {
       kind: 'missing-server',
-      message: '--diff requires --server <url> so both filter-reports can be fetched',
+      message:
+        '--diff requires --server <url> so both filter-reports can be fetched ' +
+        '(or pass --input <path|-> to skip the HTTP fetch and read pre-fetched bodies)',
     };
   }
   const serverUrl = serverRaw.replace(/\/+$/, '');
@@ -2451,6 +2476,159 @@ export function enforceFilterReportDiffSizeCap(
     `(exceeds --max-output-bytes ${maxBytes})\n${hint}\n`
   );
 }
+
+/**
+ * Tick 27: outcome of parsing a `review filter-report --diff --input`
+ * body. Either two filter-report bodies (the diff inputs) or one of
+ * three error sentinels.
+ *
+ *   - `'invalid-json'`  -- input wasn't valid JSON.
+ *   - `'invalid-shape'` -- JSON parsed but didn't carry the expected
+ *                          `{ base, target }` envelope or the bodies
+ *                          weren't shaped as filter-report responses.
+ *   - `'read-error'`    -- filesystem / stdin read failed.
+ */
+export type FilterReportDiffInputResult =
+  | { kind: 'ok'; base: FilterReportBody; target: FilterReportBody }
+  | { kind: 'invalid-json'; message: string }
+  | { kind: 'invalid-shape'; message: string }
+  | { kind: 'read-error'; message: string };
+
+/**
+ * Tick 27: validate a parsed `--input` body shape.
+ *
+ * The expected envelope is `{ base: FilterReportBody, target: FilterReportBody }`.
+ * We do shallow shape validation: both keys must be present and be
+ * objects. We do NOT validate every nested field (the diff helper
+ * tolerates slim bodies and missing appliedFilters), so the
+ * validator's job is just "this looks like the envelope, not some
+ * other JSON file pointed at by mistake".
+ *
+ * Pure: no IO, no mutation.
+ */
+function validateFilterReportDiffInputEnvelope(
+  parsed: unknown,
+): { kind: 'ok'; base: FilterReportBody; target: FilterReportBody } | { kind: 'invalid-shape'; message: string } {
+  if (parsed === null || typeof parsed !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message:
+        '--input body must be a JSON object with { base, target } envelope; got ' +
+        (parsed === null ? 'null' : typeof parsed),
+    };
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (!('base' in obj)) {
+    return {
+      kind: 'invalid-shape',
+      message: "--input body missing 'base' key (expected { base: <filterReportBody>, target: <filterReportBody> })",
+    };
+  }
+  if (!('target' in obj)) {
+    return {
+      kind: 'invalid-shape',
+      message: "--input body missing 'target' key (expected { base: <filterReportBody>, target: <filterReportBody> })",
+    };
+  }
+  const baseRaw = obj['base'];
+  const targetRaw = obj['target'];
+  if (baseRaw === null || typeof baseRaw !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: "--input body 'base' must be an object (filter-report response shape); got " + (baseRaw === null ? 'null' : typeof baseRaw),
+    };
+  }
+  if (targetRaw === null || typeof targetRaw !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: "--input body 'target' must be an object (filter-report response shape); got " + (targetRaw === null ? 'null' : typeof targetRaw),
+    };
+  }
+  return {
+    kind: 'ok',
+    base: baseRaw as FilterReportBody,
+    target: targetRaw as FilterReportBody,
+  };
+}
+
+/**
+ * Tick 27: pure parser for a `--input` body string. Returns the
+ * two filter-report bodies on success or one of the error sentinels
+ * (delegates shape validation to validateFilterReportDiffInputEnvelope).
+ *
+ * Exported so the test surface can pin every error arm without
+ * spinning up a filesystem.
+ */
+export function parseFilterReportDiffInput(rawBody: string): FilterReportDiffInputResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch (err) {
+    return {
+      kind: 'invalid-json',
+      message: `--input body is not valid JSON: ${(err as Error).message}`,
+    };
+  }
+  const envelope = validateFilterReportDiffInputEnvelope(parsed);
+  if (envelope.kind !== 'ok') return envelope;
+  return { kind: 'ok', base: envelope.base, target: envelope.target };
+}
+
+/**
+ * Tick 27: stdin sentinel for `--input -`. Same Symbol.for pattern
+ * as FILTER_REPORT_DIFF_STDOUT_SENTINEL so test-surface module
+ * duplication doesn't break identity compares.
+ */
+export const FILTER_REPORT_DIFF_STDIN_SENTINEL: unique symbol = Symbol.for(
+  'clawreview.review.filter-report.diff.input.stdin',
+);
+export type FilterReportDiffInputSource = string | typeof FILTER_REPORT_DIFF_STDIN_SENTINEL;
+
+/**
+ * Tick 27: resolve a user-provided `--input <path|->` value into
+ * either the stdin sentinel (when literally `-`) or an absolute
+ * filesystem path. Relative paths land under `cwd`.
+ *
+ * Pure: no IO. The path math mirrors `resolveFilterReportDiffOutputPath`
+ * so an operator who learned --output's `-` semantics knows --input's.
+ */
+export function resolveFilterReportDiffInputSource(
+  inputPath: string,
+  cwd: string,
+): FilterReportDiffInputSource {
+  if (inputPath === '-') return FILTER_REPORT_DIFF_STDIN_SENTINEL;
+  return isAbsolute(inputPath) ? inputPath : resolve(cwd, inputPath);
+}
+
+/**
+ * Tick 27: read the `--input` body from disk OR stdin.
+ *
+ * Injectable seam: the production reader uses `readFile` (file path)
+ * or accumulates `process.stdin` (sentinel). Tests inject a stub
+ * that returns canned bodies.
+ *
+ * On read failure (ENOENT, EPERM, stdin closed early) returns a
+ * `read-error` sentinel so the caller can surface a clean stderr
+ * message instead of letting the raw Node error leak.
+ */
+export type FilterReportDiffInputReader = (
+  source: FilterReportDiffInputSource,
+) => Promise<string>;
+
+export const defaultFilterReportDiffInputReader: FilterReportDiffInputReader = async (source) => {
+  if (source === FILTER_REPORT_DIFF_STDIN_SENTINEL) {
+    // Stdin read: accumulate chunks until EOF. Use 'utf8' encoding
+    // so the body is decoded the same way a file read would decode it.
+    return await new Promise<string>((resolveStdin, rejectStdin) => {
+      const chunks: string[] = [];
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', (chunk: string) => chunks.push(chunk));
+      process.stdin.on('end', () => resolveStdin(chunks.join('')));
+      process.stdin.on('error', (err: Error) => rejectStdin(err));
+    });
+  }
+  return await readFile(source, 'utf8');
+};
 
 /**
  * Tick 26: write the rendered JSON delta body to either stdout (when
@@ -2849,6 +3027,14 @@ export async function runReviewFilterReportDiff(
      * Tests inject a stub that records invocations.
      */
     onDeltaExecer?: WatchOnDriftExecer;
+    /**
+     * Tick 27: injectable reader for `--input <path|->`. The
+     * production reader (defaultFilterReportDiffInputReader) reads
+     * from `node:fs/promises` for paths and accumulates process.stdin
+     * for the sentinel. Tests inject a stub that returns canned
+     * envelope bodies without touching the filesystem or stdin.
+     */
+    inputReader?: FilterReportDiffInputReader;
   },
 ): Promise<void> {
   // Tick 26: start the per-invocation clock at the top so the
@@ -2883,6 +3069,7 @@ export async function runReviewFilterReportDiff(
     target: targetIdPositional,
     server: args.flags.server,
     format: args.flags.format,
+    input: args.flags.input,
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
@@ -2922,43 +3109,88 @@ export async function runReviewFilterReportDiff(
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+  const inputReader = injected?.inputReader ?? defaultFilterReportDiffInputReader;
 
-  // Fetch both /filter-report bodies in parallel -- they're
-  // independent so a serial fetch would be a needless latency penalty
-  // for a CI gate.
-  const baseUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.baseId)}/filter-report`;
-  const targetUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.targetId)}/filter-report`;
   let baseBody: FilterReportBody;
   let targetBody: FilterReportBody;
-  try {
-    const [baseRes, targetRes] = await Promise.all([fetcher(baseUrl), fetcher(targetUrl)]);
-    if (!baseRes.ok) {
+
+  // Tick 27: --input <path|-> opt-in. When set, read pre-fetched
+  // filter-report bodies from disk / stdin instead of issuing two
+  // HTTP fetches. Use case: a CI pipeline has already fetched both
+  // bodies (e.g. via a separate auth context, a worker queue, or
+  // a cached artifact) and wants to skip the round-trip in the diff
+  // command itself.
+  //
+  // Input envelope: `{ base: <filterReportBody>, target: <filterReportBody> }`.
+  // The two bodies are passed straight to computeFilterReportDelta;
+  // no shape-tightening beyond the envelope check.
+  //
+  // baseId / targetId from --diff <baseId> + positional <targetId>
+  // are still required (they label the output even when the bodies
+  // come from disk) -- the input envelope's body.reviewId is NOT
+  // consulted because it could be empty / wrong / from a different
+  // review than the operator intended.
+  const inputRaw = args.flags.input;
+  if (typeof inputRaw === 'string' && inputRaw.length > 0) {
+    const inputSource = resolveFilterReportDiffInputSource(inputRaw, process.cwd());
+    let inputBody: string;
+    try {
+      inputBody = await inputReader(inputSource);
+    } catch (err) {
       process.stderr.write(
-        `clawreview review filter-report --diff: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
+        `clawreview review filter-report --diff: --input read failed: ${(err as Error).message}\n`,
       );
       process.exitCode = 2;
       fireExit(false, null);
       return;
     }
-    if (!targetRes.ok) {
+    const parsed = parseFilterReportDiffInput(inputBody);
+    if (parsed.kind !== 'ok') {
       process.stderr.write(
-        `clawreview review filter-report --diff: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
+        `clawreview review filter-report --diff: ${parsed.message}\n`,
       );
       process.exitCode = 2;
       fireExit(false, null);
       return;
     }
-    const baseText = await baseRes.text();
-    const targetText = await targetRes.text();
-    baseBody = JSON.parse(baseText) as FilterReportBody;
-    targetBody = JSON.parse(targetText) as FilterReportBody;
-  } catch (err) {
-    process.stderr.write(
-      `clawreview review filter-report --diff fetch failed: ${(err as Error).message}\n`,
-    );
-    process.exitCode = 2;
-    fireExit(false, null);
-    return;
+    baseBody = parsed.base;
+    targetBody = parsed.target;
+  } else {
+    // Fetch both /filter-report bodies in parallel -- they're
+    // independent so a serial fetch would be a needless latency penalty
+    // for a CI gate.
+    const baseUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.baseId)}/filter-report`;
+    const targetUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.targetId)}/filter-report`;
+    try {
+      const [baseRes, targetRes] = await Promise.all([fetcher(baseUrl), fetcher(targetUrl)]);
+      if (!baseRes.ok) {
+        process.stderr.write(
+          `clawreview review filter-report --diff: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
+        );
+        process.exitCode = 2;
+        fireExit(false, null);
+        return;
+      }
+      if (!targetRes.ok) {
+        process.stderr.write(
+          `clawreview review filter-report --diff: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
+        );
+        process.exitCode = 2;
+        fireExit(false, null);
+        return;
+      }
+      const baseText = await baseRes.text();
+      const targetText = await targetRes.text();
+      baseBody = JSON.parse(baseText) as FilterReportBody;
+      targetBody = JSON.parse(targetText) as FilterReportBody;
+    } catch (err) {
+      process.stderr.write(
+        `clawreview review filter-report --diff fetch failed: ${(err as Error).message}\n`,
+      );
+      process.exitCode = 2;
+      fireExit(false, null);
+      return;
+    }
   }
 
   const delta = computeFilterReportDelta(baseBody, targetBody);
