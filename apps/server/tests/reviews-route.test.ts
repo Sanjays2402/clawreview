@@ -2531,6 +2531,113 @@ describe('reviews and stats routes', () => {
       });
     });
 
+    // Tick 25: ?fields deny-list (-prefix). Complement of the tick-24
+    // allowlist; pairs with /digest's ?slim=-byTag minus-prefix form
+    // so an operator who learned one route's projection knows the
+    // other.
+    describe('?fields= deny-list (-prefix, tick 25)', () => {
+      it('drops a single named field via -prefix (others kept)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 251, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-appliedFilters`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // Dropped field is gone.
+        expect(body.appliedFilters).toBeUndefined();
+        // Remaining FILTER_REPORT_FIELDS still present.
+        expect(body.inputTotal).toBe(3);
+        expect(body.droppedTotal).toBe(1);
+        expect(body.applied).toBe(true);
+        // Echo lists only the KEPT fields in canonical order.
+        expect(body.fields).toEqual(['inputTotal', 'droppedTotal', 'applied']);
+      });
+
+      it('drops multiple named fields via -prefix (kept set is FILTER_REPORT_FIELDS minus named)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 252, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-appliedFilters,-applied`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.appliedFilters).toBeUndefined();
+        expect(body.applied).toBeUndefined();
+        // The two remaining fields stay.
+        expect(body.inputTotal).toBe(3);
+        expect(body.droppedTotal).toBe(1);
+        // Canonical-order echo of the KEPT set.
+        expect(body.fields).toEqual(['inputTotal', 'droppedTotal']);
+      });
+
+      it('rejects mixed deny-list and allowlist entries', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 253, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-appliedFilters,inputTotal`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(String(res.json().issues)).toContain('mixes deny-list');
+      });
+
+      it('rejects a bare - with no field name after the prefix', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 254, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(String(res.json().issues)).toContain("bare '-'");
+      });
+
+      it('rejects -prefix with unknown field (enumerates valid set)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 255, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-notARealField`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(String(res.json().issues)).toContain('notARealField');
+        // Error message still enumerates the valid set.
+        expect(String(res.json().issues)).toContain('appliedFilters');
+      });
+
+      it('accepts -PREFIX with case-insensitive field names', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 256, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-APPLIEDFILTERS`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        expect(body.appliedFilters).toBeUndefined();
+        expect(body.fields).toEqual(['inputTotal', 'droppedTotal', 'applied']);
+      });
+
+      it('deny-listing every field collapses to empty kept set (reviewId/slim/fields echo preserved)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 257, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=-appliedFilters,-inputTotal,-droppedTotal,-applied`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // All four data fields stripped.
+        expect(body.appliedFilters).toBeUndefined();
+        expect(body.inputTotal).toBeUndefined();
+        expect(body.droppedTotal).toBeUndefined();
+        expect(body.applied).toBeUndefined();
+        // Identifiers + fields echo (empty) preserved.
+        expect(body.reviewId).toBe(reviewId);
+        expect(body.slim).toBe(false);
+        expect(body.fields).toEqual([]);
+      });
+    });
+
     // Tick 24: pure parseFilterReportFields / projectFilterReportFields
     // coverage so each helper has a regression pin without driving
     // the Fastify route.

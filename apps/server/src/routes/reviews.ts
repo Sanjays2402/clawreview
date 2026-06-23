@@ -1289,6 +1289,25 @@ export type FilterReportFieldsDirective =
  *     dashboard that depends on the echo for caching doesn't get
  *     spurious cache busts because of input reordering.
  *
+ * Tick 25: deny-list / minus-prefix form.
+ *   - Every entry starting with `-` flips the parser into deny-list
+ *     mode: the resolved set is FILTER_REPORT_FIELDS minus the named
+ *     fields. Use case: "give me everything EXCEPT appliedFilters"
+ *     without enumerating the rest (matches /digest's tick-18 ?slim
+ *     deny-list contract).
+ *   - Mixed (some entries with `-`, some without) rejects with a
+ *     clear "use one form or the other" message -- the resolution
+ *     would be ambiguous (does `-appliedFilters,inputTotal` mean
+ *     "drop appliedFilters AND keep inputTotal" which is fine, or
+ *     "drop appliedFilters then add inputTotal back" which would
+ *     duplicate the deny path?). Refuse loudly.
+ *   - Bare `-` (no field name after the prefix) rejects.
+ *   - Deny-naming all four fields collapses to an empty resolved
+ *     set (strip everything), which the route still honours: the
+ *     projection drops every data field, leaving reviewId / slim /
+ *     fields-echo (back-compat with the allowlist arm's behaviour
+ *     for an empty-after-projection body).
+ *
  * Pure: no mutation, no side effects.
  */
 export function parseFilterReportFields(raw: string | undefined): FilterReportFieldsDirective {
@@ -1302,10 +1321,53 @@ export function parseFilterReportFields(raw: string | undefined): FilterReportFi
       message: `?fields has an empty entry (likely a stray comma); got '${trimmed}'`,
     };
   }
+  // Tick 25: detect minus-prefix entries. If ANY entry carries the
+  // prefix, we're in deny-list mode; if NONE do, we're in the legacy
+  // allowlist arm; a mix rejects (the resolution would be ambiguous).
+  // Mirrors parseSlimDirective's tick-18 deny-list contract so an
+  // operator who learned one route's projection rules knows the
+  // other.
+  const hasMinusPrefix = parts.some((p) => p.startsWith('-'));
+  const allMinusPrefix = parts.every((p) => p.startsWith('-'));
+  if (hasMinusPrefix && !allMinusPrefix) {
+    return {
+      kind: 'invalid',
+      message:
+        `?fields mixes deny-list (-<field>) and allowlist (<field>) entries; ` +
+        `use one form or the other (got '${trimmed}')`,
+    };
+  }
   // Build a canonical-by-lower lookup so URL-case mangling still
   // resolves to the camelCase form the response body uses.
   const canonicalByLower = new Map<string, FilterReportField>();
   for (const f of FILTER_REPORT_FIELDS) canonicalByLower.set(f.toLowerCase(), f);
+  if (allMinusPrefix) {
+    // Deny-list arm: collect named fields (strip the prefix first),
+    // then resolve the kept set as FILTER_REPORT_FIELDS minus those.
+    const drop = new Set<FilterReportField>();
+    for (const part of parts) {
+      const after = part.slice(1).trim();
+      if (after.length === 0) {
+        return {
+          kind: 'invalid',
+          message:
+            `?fields has a bare '-' (missing field name after the prefix); got '${trimmed}'`,
+        };
+      }
+      const canonical = canonicalByLower.get(after.toLowerCase());
+      if (!canonical) {
+        return {
+          kind: 'invalid',
+          message: `?fields has unknown field '${after}'; valid: ${FILTER_REPORT_FIELDS.join(', ')}`,
+        };
+      }
+      drop.add(canonical);
+    }
+    // Stable canonical-order kept set so the response echo is the
+    // same shape regardless of input ordering.
+    const fields = FILTER_REPORT_FIELDS.filter((f) => !drop.has(f));
+    return { kind: 'ok', fields };
+  }
   const resolved = new Set<FilterReportField>();
   for (const part of parts) {
     const canonical = canonicalByLower.get(part.toLowerCase());
