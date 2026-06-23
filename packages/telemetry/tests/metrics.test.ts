@@ -1447,3 +1447,92 @@ describe('observeReviewFilterReportReadDuration (tick 24)', () => {
   });
 });
 
+// Tick 25: clawreview_review_filter_report_diff_total{result} counter
+// for the CLI `review filter-report --diff` two-review compare.
+// Pair-of-helpers test surface mirrors deriveReviewDriftWatchResult +
+// observeReviewDriftWatchPoll so the test patterns are uniform across
+// the two CLI-driven counters.
+describe('deriveReviewFilterReportDiffResult (tick 25)', () => {
+  it('returns identical when fetchOk=true and delta.hasDelta=false', async () => {
+    const { deriveReviewFilterReportDiffResult } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportDiffResult(true, { hasDelta: false })).toBe('identical');
+  });
+
+  it('returns delta when fetchOk=true and delta.hasDelta=true', async () => {
+    const { deriveReviewFilterReportDiffResult } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportDiffResult(true, { hasDelta: true })).toBe('delta');
+  });
+
+  it('returns error when fetchOk=false regardless of delta shape', async () => {
+    const { deriveReviewFilterReportDiffResult } = await import('../src/metrics.js');
+    // A failed fetch / parse should always count as error, even if
+    // the caller somehow carried a stale delta from earlier code.
+    expect(deriveReviewFilterReportDiffResult(false, { hasDelta: true })).toBe('error');
+    expect(deriveReviewFilterReportDiffResult(false, { hasDelta: false })).toBe('error');
+    expect(deriveReviewFilterReportDiffResult(false, null)).toBe('error');
+  });
+
+  it('returns error when fetchOk=true but delta is null (parse failure)', async () => {
+    const { deriveReviewFilterReportDiffResult } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportDiffResult(true, null)).toBe('error');
+  });
+
+  it('REVIEW_FILTER_REPORT_DIFF_RESULTS exports the closed three-value set', async () => {
+    const { REVIEW_FILTER_REPORT_DIFF_RESULTS } = await import('../src/metrics.js');
+    // Frozen tuple so a typo at a call site won't compile against
+    // the union type. We assert the exact membership so a future
+    // accidental widening (a fourth value) is caught here.
+    expect([...REVIEW_FILTER_REPORT_DIFF_RESULTS]).toEqual(['identical', 'delta', 'error']);
+  });
+});
+
+describe('observeReviewFilterReportDiff (tick 25)', () => {
+  it('bumps the counter under identical when fetchOk=true + no delta', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiff } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="identical"[^}]*\}\s*2/);
+  });
+
+  it('bumps the counter under delta when fetchOk=true + hasDelta', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiff } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="delta"[^}]*\}\s*1/);
+  });
+
+  it('bumps the counter under error when fetchOk=false', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiff } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiff(metrics, false, null);
+    observeReviewFilterReportDiff(metrics, false, { hasDelta: true });
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="error"[^}]*\}\s*2/);
+  });
+
+  it('counts every invocation separately across the three result buckets (no spillover)', async () => {
+    // A mixed CI fleet: 4 identical, 2 delta, 1 error. Every bucket
+    // should carry its own count; the buckets should not interfere.
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiff } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: true });
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: true });
+    observeReviewFilterReportDiff(metrics, false, null);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="identical"[^}]*\}\s*4/);
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="delta"[^}]*\}\s*2/);
+    expect(text).toMatch(/clawreview_review_filter_report_diff_total\{[^}]*result="error"[^}]*\}\s*1/);
+  });
+});
+

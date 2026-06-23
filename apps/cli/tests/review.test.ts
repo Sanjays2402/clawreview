@@ -3532,6 +3532,109 @@ describe('clawreview review filter-report --diff (tick 25)', () => {
     expect(stderr.join('')).toContain('HTTP 404');
     process.exitCode = 0;
   });
+
+  // Tick 25: wired metrics tests for clawreview_review_filter_report_
+  // diff_total{result}. Mirrors the tick-17 watch-metrics group: real
+  // bundle from @clawreview/telemetry, scrape the registry text to
+  // assert the closed-set {identical, delta, error} labels fired.
+  describe('metrics (tick 25)', () => {
+    async function runDiffWithMetrics(
+      flags: Record<string, string | boolean>,
+      bodies: { base: string; target: string },
+      positional: string[],
+    ): Promise<{ exitCode: number; metricsText: string }> {
+      const { runReviewFilterReport } = await import('../src/commands/review.js');
+      const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
+      resetMetricsForTests();
+      const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+      // Silence stdout/stderr -- they're not under test here.
+      const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
+      const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+      const fetcher = async (url: string) => {
+        if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+          return { ok: true, status: 200, text: async () => bodies.base };
+        }
+        return { ok: true, status: 200, text: async () => bodies.target };
+      };
+      process.exitCode = 0;
+      try {
+        await runReviewFilterReport(
+          { command: 'review', positional, flags: { 'no-color': true, ...flags } },
+          { fetcher, metrics },
+        );
+      } finally {
+        writeStdout.mockRestore();
+        writeStderr.mockRestore();
+      }
+      const exitCode = typeof process.exitCode === 'number' ? process.exitCode : 0;
+      process.exitCode = 0;
+      const metricsText = await metrics.registry.metrics();
+      return { exitCode, metricsText };
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('fires the identical label on a no-delta diff (CLI exit 0)', async () => {
+      const same = makeFullBody({ inputTotal: 10 });
+      const r = await runDiffWithMetrics(
+        { diff: 'rv_a', server: 'http://x' },
+        { base: same, target: same },
+        ['filter-report', 'rv_b'],
+      );
+      expect(r.exitCode).toBe(0);
+      expect(r.metricsText).toMatch(
+        /clawreview_review_filter_report_diff_total\{[^}]*result="identical"[^}]*\}\s*1/,
+      );
+    });
+
+    it('fires the delta label on a non-empty diff (CLI exit 3)', async () => {
+      const base = makeFullBody({ inputTotal: 10 });
+      const target = makeFullBody({ inputTotal: 20 });
+      const r = await runDiffWithMetrics(
+        { diff: 'rv_a', server: 'http://x' },
+        { base, target },
+        ['filter-report', 'rv_b'],
+      );
+      expect(r.exitCode).toBe(3);
+      expect(r.metricsText).toMatch(
+        /clawreview_review_filter_report_diff_total\{[^}]*result="delta"[^}]*\}\s*1/,
+      );
+    });
+
+    it('fires the error label on a config-error invocation', async () => {
+      const { runReviewFilterReport } = await import('../src/commands/review.js');
+      const { getMetrics, resetMetricsForTests } = await import('@clawreview/telemetry');
+      resetMetricsForTests();
+      const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+      const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
+      const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation((() => true) as never);
+      const fetcher = async () => ({ ok: true, status: 200, text: async () => makeFullBody() });
+      process.exitCode = 0;
+      try {
+        // Missing --server triggers the config-error path which fires
+        // result=error.
+        await runReviewFilterReport(
+          {
+            command: 'review',
+            positional: ['filter-report', 'rv_b'],
+            flags: { 'no-color': true, diff: 'rv_a' },
+          },
+          { fetcher, metrics },
+        );
+      } finally {
+        writeStdout.mockRestore();
+        writeStderr.mockRestore();
+      }
+      expect(process.exitCode).toBe(2);
+      const text = await metrics.registry.metrics();
+      expect(text).toMatch(
+        /clawreview_review_filter_report_diff_total\{[^}]*result="error"[^}]*\}\s*1/,
+      );
+      process.exitCode = 0;
+    });
+  });
 });
 
 

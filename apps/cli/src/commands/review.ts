@@ -9,6 +9,7 @@ import {
 } from '@clawreview/aggregator';
 import {
   observeReviewDriftWatchPoll,
+  observeReviewFilterReportDiff,
   type MetricsBundle,
 } from '@clawreview/telemetry';
 import type { Finding, Severity } from '@clawreview/types';
@@ -2002,7 +2003,7 @@ export type FilterReportBody = FilterReportBodyFull | FilterReportBodySlim;
  */
 export async function runReviewFilterReport(
   args: ParsedArgs,
-  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper },
+  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper; metrics?: MetricsBundle },
 ): Promise<void> {
   // Positional shape: `clawreview review filter-report <reviewId>`.
   // args.positional[0] is the subcommand name 'filter-report';
@@ -2344,7 +2345,7 @@ export async function runReviewFilterReportDiff(
   args: ParsedArgs,
   baseId: string,
   targetIdPositional: string,
-  injected?: { fetcher?: WatchFetcher },
+  injected?: { fetcher?: WatchFetcher; metrics?: MetricsBundle },
 ): Promise<void> {
   const config = parseFilterReportDiffConfig({
     base: baseId,
@@ -2355,11 +2356,20 @@ export async function runReviewFilterReportDiff(
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
     process.exitCode = 2;
+    // Tick 25: fire the counter with result=error for the config-
+    // error arm too, so a CI dashboard sees the misconfiguration
+    // rate alongside the fetch-error / shape-rejection rate. The
+    // metrics bundle is optional -- callers that didn't wire one
+    // simply skip the fire.
+    if (injected?.metrics) {
+      observeReviewFilterReportDiff(injected.metrics, false, null);
+    }
     return;
   }
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+  const metrics = injected?.metrics;
 
   // Fetch both /filter-report bodies in parallel -- they're
   // independent so a serial fetch would be a needless latency penalty
@@ -2375,6 +2385,7 @@ export async function runReviewFilterReportDiff(
         `clawreview review filter-report --diff: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
       );
       process.exitCode = 2;
+      if (metrics) observeReviewFilterReportDiff(metrics, false, null);
       return;
     }
     if (!targetRes.ok) {
@@ -2382,6 +2393,7 @@ export async function runReviewFilterReportDiff(
         `clawreview review filter-report --diff: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
       );
       process.exitCode = 2;
+      if (metrics) observeReviewFilterReportDiff(metrics, false, null);
       return;
     }
     const baseText = await baseRes.text();
@@ -2393,6 +2405,7 @@ export async function runReviewFilterReportDiff(
       `clawreview review filter-report --diff fetch failed: ${(err as Error).message}\n`,
     );
     process.exitCode = 2;
+    if (metrics) observeReviewFilterReportDiff(metrics, false, null);
     return;
   }
 
@@ -2409,6 +2422,10 @@ export async function runReviewFilterReportDiff(
   // so a CI gate can `clawreview review filter-report --diff base
   // target --server <url>` and gate on the exit code.
   process.exitCode = delta.hasDelta ? 3 : 0;
+  // Tick 25: fire the diff counter with the resolved result label
+  // (identical | delta). The error arm is fired on each early-return
+  // branch above.
+  if (metrics) observeReviewFilterReportDiff(metrics, true, delta);
 }
 
 /**

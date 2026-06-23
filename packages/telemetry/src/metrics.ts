@@ -409,6 +409,32 @@ export interface MetricsBundle {
    * because they didn't actually consume the persisted shape.
    */
   reviewFilterReportReadDurationSeconds: Histogram<string>;
+  /**
+   * Tick 25: `clawreview_review_filter_report_diff_total{result}` --
+   * per-invocation outcome for the CLI `review filter-report --diff`
+   * two-review compare. Closed result set:
+   *
+   *   - `'identical'` -- both bodies fetched, computeFilterReportDelta
+   *                      returned hasDelta=false. CLI exit 0.
+   *   - `'delta'`     -- both bodies fetched, hasDelta=true. CLI exit 3.
+   *   - `'error'`     -- config error / fetch failure / shape rejection.
+   *                      CLI exit 2.
+   *
+   * Use case: a fleet of CI runners each invoking `review filter-report
+   * --diff` to gate on filter-shape drift between two builds wants a
+   * single observability surface (rather than parsing N exit codes).
+   * The closed-set discriminator lets a dashboard slice the rate of
+   * each outcome over time without sampling stdout.
+   *
+   * Cardinality bounded at 3 (the entire closed set).
+   *
+   * Distinct from `reviewDriftWatchPollsTotal` because the diff
+   * command's outcome semantics are different from the watch loop's:
+   * the watch fires once PER POLL, diff fires once PER INVOCATION.
+   * Pairing them in PromQL gives a fuller picture of CI filter-shape
+   * health: watch covers the live signal, diff covers the gated signal.
+   */
+  reviewFilterReportDiffTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -674,6 +700,21 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewFilterReportDiffTotal = new Counter({
+    name: 'clawreview_review_filter_report_diff_total',
+    help:
+      'Tick 25: per-invocation outcome for the CLI review filter-report ' +
+      '--diff two-review compare, labeled by result (closed set: identical ' +
+      '| delta | error). identical = both bodies fetched, hasDelta=false ' +
+      '(CLI exit 0); delta = both bodies fetched, hasDelta=true (CLI exit ' +
+      '3); error = config / fetch / parse failure (CLI exit 2). Fires once ' +
+      'per CLI invocation. Pair with clawreview_review_drift_watch_polls_' +
+      'total to compare the live (watch) vs gated (diff) views of filter-' +
+      'shape health across a CI fleet.',
+    labelNames: ['result'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -741,6 +782,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     findingsFilterPreAppliedTotal,
     reviewFilterReportReadsTotal,
     reviewFilterReportReadDurationSeconds,
+    reviewFilterReportDiffTotal,
     queueDepth,
     queueInflight,
   };
@@ -1462,6 +1504,67 @@ export function observeReviewDriftWatchPoll(
 ): void {
   const result = deriveReviewDriftWatchResult(fetchOk, drift);
   metrics.reviewDriftWatchPollsTotal.inc({ result });
+}
+
+/**
+ * Tick 25: closed set of `result` label values the
+ * `clawreview_review_filter_report_diff_total` counter can record:
+ *
+ *   - `'identical'` -- both bodies fetched, hasDelta=false. CLI exit 0.
+ *   - `'delta'`     -- both bodies fetched, hasDelta=true. CLI exit 3.
+ *   - `'error'`     -- config / fetch / parse failure. CLI exit 2.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series.
+ */
+export const REVIEW_FILTER_REPORT_DIFF_RESULTS = ['identical', 'delta', 'error'] as const;
+export type ReviewFilterReportDiffResult =
+  (typeof REVIEW_FILTER_REPORT_DIFF_RESULTS)[number];
+
+/**
+ * Derive the closed-set `result` label from a diff invocation
+ * outcome. Two inputs:
+ *
+ *   - `fetchOk` -- did both HTTP fetches + JSON parses succeed?
+ *   - `delta`   -- the computed FilterReportDelta (carries hasDelta),
+ *                  or null when the fetch path errored (in which case
+ *                  the predicate ignores it and returns 'error').
+ *
+ * Truth table:
+ *   - fetchOk=false, delta=any        -> 'error'
+ *   - fetchOk=true,  delta=null       -> 'error'  (parse failure)
+ *   - fetchOk=true,  delta.hasDelta=false -> 'identical'
+ *   - fetchOk=true,  delta.hasDelta=true  -> 'delta'
+ *
+ * Pure / exported so the test surface can pin every arm without
+ * driving the diff command.
+ */
+export function deriveReviewFilterReportDiffResult(
+  fetchOk: boolean,
+  delta: { hasDelta: boolean } | null,
+): ReviewFilterReportDiffResult {
+  if (!fetchOk || delta === null) return 'error';
+  return delta.hasDelta ? 'delta' : 'identical';
+}
+
+/**
+ * Record one `review filter-report --diff` invocation on the
+ * `clawreview_review_filter_report_diff_total{result}` counter.
+ *
+ * Called once per CLI invocation. Bounded cardinality (three label
+ * values, ever). Cheap to call; the metrics bundle is injected so a
+ * CLI consumer that doesn't want a Prometheus dep can omit it (the
+ * diff command simply skips the fire); a production deploy wires
+ * a real bundle and the counter shows up on /metrics scrapes for
+ * whichever sidecar is exporting the CLI's counters.
+ */
+export function observeReviewFilterReportDiff(
+  metrics: MetricsBundle,
+  fetchOk: boolean,
+  delta: { hasDelta: boolean } | null,
+): void {
+  const result = deriveReviewFilterReportDiffResult(fetchOk, delta);
+  metrics.reviewFilterReportDiffTotal.inc({ result });
 }
 
 /**
