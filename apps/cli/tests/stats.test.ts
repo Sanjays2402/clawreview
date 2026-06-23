@@ -1272,5 +1272,120 @@ describe('runStats', () => {
         expect(zero.kind).toBe('severityBucket');
       });
     });
+
+    // Tick 25: --no-footer suppresses the JSONL footer line so a
+    // consumer that only wants the header + per-severity buckets
+    // gets exactly that. Default OFF for back-compat with the
+    // tick-23 7-line stream contract.
+    describe('--jsonl --no-footer (tick 25)', () => {
+      it('emits header + 5 severity buckets (6 lines total, no footer)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            'no-footer': true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        const lines = out().trim().split('\n');
+        // 1 header + 5 severity = 6 lines (footer suppressed).
+        expect(lines).toHaveLength(6);
+        // Header still has kind=filterSummary.
+        expect(JSON.parse(lines[0]!).kind).toBe('filterSummary');
+        // Lines 2-6 are the severity buckets in canonical order.
+        const order = ['critical', 'high', 'medium', 'low', 'nit'];
+        for (let i = 0; i < 5; i += 1) {
+          const bucket = JSON.parse(lines[1 + i]!);
+          expect(bucket.kind).toBe('severityBucket');
+          expect(bucket.severity).toBe(order[i]);
+        }
+        // No reportFooter line.
+        expect(out()).not.toContain('"kind":"reportFooter"');
+      });
+
+      it('--no-footer is a no-op when --jsonl is not set (legacy body still has footer fields)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            // --jsonl is missing -- --no-footer should have no effect.
+            'no-footer': true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // Output is the legacy single-object JSON body; --no-footer
+        // didn't strip the byAgent / topFiles fields from it.
+        const stdout = out().trim();
+        // One header line then the pretty JSON body. Strip the header.
+        const newlineIdx = stdout.indexOf('\n');
+        const body = JSON.parse(stdout.slice(newlineIdx + 1));
+        expect(body.byAgent).toBeDefined();
+        expect(body.topFiles).toBeDefined();
+      });
+
+      it('--no-footer is a no-op in text mode (text output unchanged)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            'no-footer': true,
+            // format: text (default)
+            'no-color': true,
+          },
+        });
+        const stdout = out();
+        // Same text body --jsonl produces (text-mode is silent no-op
+        // for the JSONL chain; --no-footer is also silent here).
+        expect(stdout).toContain('Showing 1 finding');
+        expect(stdout).not.toContain('"kind":"severityBucket"');
+      });
+
+      it('--no-footer + --fail-on: gate still fires (CI consumer keeps its exit code contract)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            'no-footer': true,
+            'fail-on': 'high',
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // Unfiltered FILTER_REPORT has 1 critical -> fail-on high fires.
+        expect(process.exitCode).toBe(1);
+        process.exitCode = 0;
+        // Stream is 6 lines: header + 5 buckets, no footer.
+        const lines = out().trim().split('\n');
+        expect(lines).toHaveLength(6);
+      });
+    });
   });
 });

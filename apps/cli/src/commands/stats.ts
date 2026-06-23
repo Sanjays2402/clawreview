@@ -275,6 +275,20 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // When set WITHOUT --json-header, it's also a no-op -- the body
   // shape only makes sense paired with the header.
   const wantJsonl = Boolean(args.flags['jsonl']);
+  // Tick 25: --no-footer. Suppresses the JSONL footer line so a
+  // consumer that only wants the header + per-severity buckets gets
+  // exactly that. Use case: a log aggregator that classifies events
+  // by `kind` discriminator doesn't want the `reportFooter` line
+  // (which collapses several sparse maps into one large blob) to
+  // dominate the stream's bytes; dropping it cuts the per-report
+  // wire payload by roughly half on a typical mid-sized repo.
+  //
+  // Default OFF for back-compat -- existing JSONL consumers see the
+  // same 7-line stream they got in tick 23. When --jsonl isn't set
+  // (or the parent --filter-summary + --json-header chain isn't
+  // satisfied), this flag is a no-op (same back-compat stance as
+  // --jsonl itself).
+  const suppressFooter = Boolean(args.flags['no-footer']);
 
   if (format === 'json') {
     // Tick 22: opt-in JSON-header line. When --json-header AND
@@ -311,20 +325,28 @@ export async function runStats(args: ParsedArgs): Promise<void> {
       // `totals` field (already conveyed via the severity-bucket
       // lines) -- consumers that just want the per-bucket counts
       // don't have to parse the footer.
-      const footer: StatsReportFooter = {
-        kind: 'reportFooter',
-        byAgent: digest.byAgent,
-        byCategory: digest.byCategory,
-        byFile: digest.byFile,
-        topFiles: digest.topFiles,
-        topAgents: digest.topAgents,
-        topCategories: digest.topCategories,
-        totalCostUsd: parsed.summary?.totalCostUsd,
-        groupBy,
-        minConfidence: minConfidence === undefined ? null : minConfidence,
-        severityThreshold: severityThreshold === undefined ? null : severityThreshold,
-      };
-      process.stdout.write(`${JSON.stringify(footer)}\n`);
+      //
+      // Tick 25: --no-footer suppresses the footer line entirely.
+      // When set, the stream ends after the last severity bucket so
+      // a consumer that only wants the header + buckets gets exactly
+      // that. Default OFF for back-compat with the tick-23 7-line
+      // stream contract.
+      if (!suppressFooter) {
+        const footer: StatsReportFooter = {
+          kind: 'reportFooter',
+          byAgent: digest.byAgent,
+          byCategory: digest.byCategory,
+          byFile: digest.byFile,
+          topFiles: digest.topFiles,
+          topAgents: digest.topAgents,
+          topCategories: digest.topCategories,
+          totalCostUsd: parsed.summary?.totalCostUsd,
+          groupBy,
+          minConfidence: minConfidence === undefined ? null : minConfidence,
+          severityThreshold: severityThreshold === undefined ? null : severityThreshold,
+        };
+        process.stdout.write(`${JSON.stringify(footer)}\n`);
+      }
       // --fail-on still applies on JSONL output for the same
       // reason it applies on the legacy body: CI gates expect
       // a non-zero exit code when the gate fails.
