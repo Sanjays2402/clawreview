@@ -189,6 +189,19 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         // When absent / falsey / 'false' / '0' / 'no', the response
         // shape is unchanged from tick 20.
         normalisedEcho: z.string().optional(),
+        // Tick 22: ?filterDropEcho=true|1|yes opts the consumer
+        // into a `filterDropped: number` field alongside the
+        // existing filter echoes. Surfaces the count of findings
+        // dropped by the pre-bucket filters so a dashboard can
+        // render "filtered 12 of 20" inline without hand-walking
+        // `findings` or re-running findingDigest. The count comes
+        // from `findingDigestWithFilterReport.droppedTotal` which
+        // is already computed on the fresh arm; this flag just
+        // exposes it on the wire. Default (absent / 'false' / '0'
+        // / 'no') leaves the response shape unchanged. Boolean-
+        // sugar parser mirrors normalisedEcho exactly (any string,
+        // shared parseNormalisedEchoFlag-style parser).
+        filterDropEcho: z.string().optional(),
       })
       .safeParse(req.query ?? {});
     if (!queryParse.success) {
@@ -224,6 +237,12 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     // parseNormalisedEchoFlag helper so the same parsing contract
     // is shared with the test surface.
     const normalisedEcho = parseNormalisedEchoFlag(queryParse.data.normalisedEcho);
+    // Tick 22: parse the new ?filterDropEcho flag with the same
+    // boolean-sugar contract as normalisedEcho so a consumer that
+    // already knows ?normalisedEcho=true / =1 / =yes can opt into
+    // the drop-count echo the same way. Absent / falsy leaves the
+    // response shape unchanged from tick 21.
+    const filterDropEcho = parseNormalisedEchoFlag(queryParse.data.filterDropEcho);
     // Resolve the field set to strip. 'none' -> empty set (no
     // stripping); 'all' -> all four heavy fields; 'fields' -> the
     // explicit user-supplied subset.
@@ -297,6 +316,34 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
               normalisedSeverityThreshold:
                 normaliseDigestSeverityThreshold(rawSeverityThreshold),
             }
+          : {}),
+        // Tick 22: opt-in filter-drop echo on the cached arm. On
+        // cached, the drop count is the WORKER'S drop count (from
+        // rec.filterReport at write time), NOT the query knobs'
+        // count -- the cached arm doesn't re-filter (the persisted
+        // digest carries whatever filter the worker applied). The
+        // worker-side filter is in rec.filterReport.droppedTotal;
+        // on a legacy review (pre-tick-22, no persisted filter
+        // report) we fall back to a sensible synth: 0 when the
+        // persisted digest equals findings.length (no drops),
+        // otherwise (rec.findings.length - rec.digest.total)
+        // which reconstructs the count even without the report.
+        // filterInputTotal mirrors fresh-arm semantics:
+        // rec.filterReport.inputTotal when present, else
+        // rec.findings.length.
+        ...(filterDropEcho
+          ? rec.filterReport
+            ? {
+                filterDropped: rec.filterReport.droppedTotal,
+                filterInputTotal: rec.filterReport.inputTotal,
+              }
+            : {
+                filterDropped: Math.max(
+                  0,
+                  rec.findings.length - (rec.digest?.total ?? rec.findings.length),
+                ),
+                filterInputTotal: rec.findings.length,
+              }
           : {}),
       };
     }
@@ -400,6 +447,23 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         ? {
             normalisedMinConfidence: filterReport.appliedFilters.minConfidence.normalised,
             normalisedSeverityThreshold: filterReport.appliedFilters.severityThreshold.normalised,
+          }
+        : {}),
+      // Tick 22: opt-in filter-drop echo. When ?filterDropEcho=true,
+      // the response carries `filterDropped: number` so a dashboard
+      // can render "filtered M of K" without re-walking findings
+      // or running findingDigest twice. The count comes from
+      // filterReport.droppedTotal which we already computed for
+      // the appliedFilters bits, so the wire-side cost is one
+      // extra integer. `inputTotal` is also surfaced for
+      // symmetry: a dashboard shouldn't have to compute K = M + N
+      // when the server already has it. On the fresh arm,
+      // inputTotal is the length of `rec.findings` BEFORE the
+      // filter; droppedTotal is `inputTotal - fresh.total`.
+      ...(filterDropEcho
+        ? {
+            filterDropped: filterReport.droppedTotal,
+            filterInputTotal: filterReport.inputTotal,
           }
         : {}),
     };

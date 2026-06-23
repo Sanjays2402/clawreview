@@ -1836,6 +1836,205 @@ describe('reviews and stats routes', () => {
           });
         });
       });
+
+      // Tick 22: ?filterDropEcho=true|1|yes opts the consumer into a
+      // `filterDropped: number` + `filterInputTotal: number` echo on
+      // the /digest response so a dashboard can render "filtered M
+      // of K" without re-walking findings or running findingDigest
+      // twice. On the fresh arm the counts come from the
+      // findingDigestWithFilterReport pass the route already ran; on
+      // the cached arm the counts come from rec.filterReport (the
+      // worker's write-time snapshot) with a legacy synth fallback.
+      // Default OFF for back-compat (the tick-21 response shape is
+      // unchanged when the flag is absent).
+      describe('?filterDropEcho=true filter drop echo (tick 22)', () => {
+        async function seedReview(prNumber: number) {
+          const store = getReviewStore();
+          const r = await store.start({
+            installationId: 33, owner: 'o', repo: 'r', prNumber,
+            headSha: `h${prNumber}`, baseSha: `b${prNumber}`,
+          });
+          const findings = [
+            { agent: 'sec', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+            { agent: 'sec', category: 'security' as const, severity: 'low' as const, title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+            { agent: 'sec', category: 'security' as const, severity: 'nit' as const, title: 'C', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.1, tags: [] },
+          ];
+          const { findingDigest } = await import('@clawreview/aggregator');
+          const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+          await store.complete(
+            r.id,
+            {
+              pullRequest: { owner: 'o', repo: 'r', number: prNumber, headSha: `h${prNumber}`, baseSha: `b${prNumber}` },
+              status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+              agentExecutions: [], totalFindings: 3, totalCostUsd: 0,
+              skippedFiles: [],
+            },
+            findings, { digest },
+          );
+          return r;
+        }
+
+        it('absent ?filterDropEcho: response shape unchanged (back-compat)', async () => {
+          const r = await seedReview(500);
+          const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          // Tick-21 raw + (absent) normalised echoes still present.
+          expect(body.minConfidence).toBe(0.5);
+          // filterDropped / filterInputTotal ABSENT on the default path
+          // so a tick-21 consumer sees no diff in the response shape.
+          expect(body.filterDropped).toBeUndefined();
+          expect(body.filterInputTotal).toBeUndefined();
+        });
+
+        it('?filterDropEcho=true on fresh arm with --min-confidence drop surfaces both counts', async () => {
+          const r = await seedReview(501);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?minConfidence=0.5&filterDropEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          // 3 findings -> 1 survives (confidence 0.9 >= 0.5); 2 dropped.
+          expect(body.fresh.total).toBe(1);
+          expect(body.filterDropped).toBe(2);
+          expect(body.filterInputTotal).toBe(3);
+        });
+
+        it('?filterDropEcho=true with no filter surfaces zero drops + full input', async () => {
+          // Without a filter, droppedTotal must be 0 -- the echo
+          // is still present (lets a dashboard always render the
+          // "filtered N of K" parenthetical without conditional
+          // logic). filterInputTotal equals fresh.total in that case.
+          const r = await seedReview(502);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?filterDropEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.fresh.total).toBe(3);
+          expect(body.filterDropped).toBe(0);
+          expect(body.filterInputTotal).toBe(3);
+        });
+
+        it('?filterDropEcho=true composes with both filters (AND semantics)', async () => {
+          const r = await seedReview(503);
+          const res = await app.inject({
+            method: 'GET',
+            // 'medium' threshold drops nit/low; 0.5 confidence drops low/nit too.
+            // Only the high+confidence=0.9 finding survives.
+            url: `/api/reviews/${r.id}/digest?minConfidence=0.5&severityThreshold=medium&filterDropEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.fresh.total).toBe(1);
+          expect(body.filterDropped).toBe(2);
+          // Pairs with tick-21 normalisedEcho cleanly: a dashboard can
+          // request BOTH on the same call and render "showing 1 of 3
+          // (filtered 2 by confidence >= 0.5 + severity >= medium)".
+        });
+
+        it('?filterDropEcho=true on cached arm uses worker-persisted droppedTotal', async () => {
+          // Seed a review with a worker-persisted filter report
+          // (mirrors the tick-22 worker contract). The cached arm
+          // must surface rec.filterReport.droppedTotal verbatim,
+          // NOT re-run the filter against the query knobs (which
+          // would give a different number).
+          const store = getReviewStore();
+          const r = await store.start({
+            installationId: 33, owner: 'o', repo: 'r', prNumber: 504,
+            headSha: 'h504', baseSha: 'b504',
+          });
+          const findings = [
+            { agent: 'sec', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+            { agent: 'sec', category: 'security' as const, severity: 'low' as const, title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+          ];
+          const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+          const report = findingDigestWithFilterReport(findings, {
+            topAgents: 8, topCategories: 8, hotspots: true,
+            minConfidence: 0.5,
+          });
+          const { digest, ...persistedSlice } = report;
+          await store.complete(
+            r.id,
+            {
+              pullRequest: { owner: 'o', repo: 'r', number: 504, headSha: 'h504', baseSha: 'b504' },
+              status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+              agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+              skippedFiles: [],
+            },
+            findings, { digest, filterReport: persistedSlice },
+          );
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?recompute=cached&filterDropEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.recompute).toBe('cached');
+          // Persisted report had droppedTotal=1 (one low-confidence
+          // finding dropped at write time). Echoed verbatim, NOT
+          // re-derived against the query.
+          expect(body.filterDropped).toBe(1);
+          expect(body.filterInputTotal).toBe(2);
+        });
+
+        it('?filterDropEcho=true on legacy cached review falls back to (findings - digest.total)', async () => {
+          // A pre-tick-22 review has no persisted filter report.
+          // The cached arm synthesises filterDropped from
+          // (rec.findings.length - rec.digest.total) so dashboards
+          // get a sensible answer even on legacy data.
+          const store = getReviewStore();
+          const r = await store.start({
+            installationId: 33, owner: 'o', repo: 'r', prNumber: 505,
+            headSha: 'h505', baseSha: 'b505',
+          });
+          // Worker built a pre-tick-22 digest (filter-aware but with
+          // no filterReport ref to the store). 2 input findings,
+          // 1 survives the persisted filter.
+          const findings = [
+            { agent: 'sec', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+            { agent: 'sec', category: 'security' as const, severity: 'low' as const, title: 'B', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+          ];
+          const { findingDigest } = await import('@clawreview/aggregator');
+          const digest = findingDigest(findings, {
+            topAgents: 8, topCategories: 8, hotspots: true,
+            minConfidence: 0.5,
+          });
+          await store.complete(
+            r.id,
+            {
+              pullRequest: { owner: 'o', repo: 'r', number: 505, headSha: 'h505', baseSha: 'b505' },
+              status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+              agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+              skippedFiles: [],
+            },
+            findings, { digest }, // <-- no filterReport: legacy shape
+          );
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?recompute=cached&filterDropEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          // Synth fallback: findings.length(2) - digest.total(1) = 1.
+          expect(body.filterDropped).toBe(1);
+          expect(body.filterInputTotal).toBe(2);
+        });
+
+        it('?filterDropEcho=false / 0 / no leaves the response shape unchanged', async () => {
+          const r = await seedReview(506);
+          for (const v of ['false', '0', 'no', 'False', 'NO']) {
+            const res = await app.inject({
+              method: 'GET',
+              url: `/api/reviews/${r.id}/digest?minConfidence=0.5&filterDropEcho=${encodeURIComponent(v)}`,
+            });
+            expect(res.statusCode).toBe(200);
+            expect(res.json().filterDropped).toBeUndefined();
+          }
+        });
+      });
     });
   });
 
