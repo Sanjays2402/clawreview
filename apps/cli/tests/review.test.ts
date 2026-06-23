@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { findingDigest } from '@clawreview/aggregator';
 
@@ -4311,6 +4311,375 @@ describe('clawreview review filter-report --diff --on-delta hook (tick 26)', () 
     expect(ON_DELTA_TEMPLATES).toEqual(['slack', 'webhook']);
   });
 });
+
+// Tick 27: `clawreview review filter-report --diff --on-delta-once` --
+// process-level dedup of the --on-delta hook so a batch script
+// invoking the diff command N times against the same (base, target)
+// pair gets ONE notification, not N. Asymmetric on direction:
+// swapping (base, target) re-fires (different delta sign).
+describe('clawreview review filter-report --diff --on-delta-once (tick 27)', () => {
+  async function runDiffWithHook(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+    onDeltaExecer: (cmd: string, payload: string) => Promise<{ exitCode: number | null; stderr: string }>,
+    positionalTarget = 'rv_target_27',
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', positionalTarget],
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher, onDeltaExecer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  // Each test starts with a clean dedup cache so prior test cases'
+  // fires don't leak in.
+  beforeEach(async () => {
+    const { resetOnDeltaOnceCache } = await import('../src/commands/review.js');
+    resetOnDeltaOnceCache();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('parseOnDeltaOnceFlag: literal true', async () => {
+    const { parseOnDeltaOnceFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOnceFlag(true)).toBe(true);
+  });
+
+  it("parseOnDeltaOnceFlag: string sugar 'true'|'1'|'yes' (case-insensitive)", async () => {
+    const { parseOnDeltaOnceFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOnceFlag('true')).toBe(true);
+    expect(parseOnDeltaOnceFlag('TRUE')).toBe(true);
+    expect(parseOnDeltaOnceFlag('1')).toBe(true);
+    expect(parseOnDeltaOnceFlag('yes')).toBe(true);
+    expect(parseOnDeltaOnceFlag('Yes')).toBe(true);
+  });
+
+  it('parseOnDeltaOnceFlag: absent / false / unknown string -> false', async () => {
+    const { parseOnDeltaOnceFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOnceFlag(undefined)).toBe(false);
+    expect(parseOnDeltaOnceFlag(false)).toBe(false);
+    expect(parseOnDeltaOnceFlag('false')).toBe(false);
+    expect(parseOnDeltaOnceFlag('0')).toBe(false);
+    expect(parseOnDeltaOnceFlag('no')).toBe(false);
+    expect(parseOnDeltaOnceFlag('maybe')).toBe(false);
+    expect(parseOnDeltaOnceFlag(42)).toBe(false);
+  });
+
+  it('first --on-delta fire for (base, target) records the key; second invocation with same pair is inert', async () => {
+    const calls: Array<{ cmd: string; payload: string }> = [];
+    const execer = async (cmd: string, payload: string) => {
+      calls.push({ cmd, payload });
+      return { exitCode: 0, stderr: '' };
+    };
+    // Same pair, two invocations. With --on-delta-once, only the first fires.
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_base_once',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_target_once',
+    );
+    expect(r1.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_base_once',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_target_once',
+    );
+    // Exit code still 3 -- only the hook side-effect is deduped.
+    expect(r2.exitCode).toBe(3);
+    // Still only one call.
+    expect(calls).toHaveLength(1);
+  });
+
+  it('--on-delta-once does NOT dedup across DIFFERENT pairs (each unique pair gets one notification)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_A',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_T1',
+    );
+    expect(r1.exitCode).toBe(3);
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_B', // different base -> different pair
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_T1',
+    );
+    expect(r2.exitCode).toBe(3);
+    // Two unique pairs -> two fires.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('--on-delta-once dedup is direction-sensitive: swapping (A, B) -> (B, A) re-fires', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_A',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_B',
+    );
+    expect(r1.exitCode).toBe(3);
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_B', // swapped: was target, now base
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      // delta swapped sign: inputTotal -5 instead of +5, but still has delta.
+      { base: makeBody({ inputTotal: 15 }), target: makeBody({ inputTotal: 10 }) },
+      execer,
+      'rv_A',
+    );
+    expect(r2.exitCode).toBe(3);
+    // Different ordered pair -> re-fires.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('--on-delta WITHOUT --on-delta-once fires every invocation (back-compat)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_base_bc',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_target_bc',
+    );
+    expect(r1.exitCode).toBe(3);
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_base_bc',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_target_bc',
+    );
+    expect(r2.exitCode).toBe(3);
+    // Without --on-delta-once, both invocations fire.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('--on-delta-once on a no-delta invocation does NOT record (no fire, no cache touch)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    // First invocation: identical bodies -> no delta -> no fire.
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_nd_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody(), target: makeBody() },
+      execer,
+      'rv_nd_target',
+    );
+    expect(r1.exitCode).toBe(0);
+    expect(calls).toHaveLength(0);
+    // Second invocation: now they differ -> SHOULD fire (the no-delta
+    // first invocation didn't record the key, so the dedup is fresh).
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_nd_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 20 }) },
+      execer,
+      'rv_nd_target',
+    );
+    expect(r2.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('--on-delta-once with a failing hook STILL records the key (no auto-retry within the process)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 7, stderr: 'webhook 500' };
+    };
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_fa_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://broken',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_fa_target',
+    );
+    expect(r1.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    expect(r1.stderr).toContain('--on-delta exited 7');
+    // Second invocation with same pair: the dedup still applies even
+    // though the first attempt failed -- the operator wanted "once
+    // per process" not "until success". A retry needs a fresh process.
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_fa_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://broken',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_fa_target',
+    );
+    expect(r2.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('resetOnDeltaOnceCache clears the dedup set (re-firing a previously-deduped pair)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r1 = await runDiffWithHook(
+      {
+        diff: 'rv_rs_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_rs_target',
+    );
+    expect(r1.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    // Reset, then re-run -> should fire again.
+    const { resetOnDeltaOnceCache } = await import('../src/commands/review.js');
+    resetOnDeltaOnceCache();
+    const r2 = await runDiffWithHook(
+      {
+        diff: 'rv_rs_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      'rv_rs_target',
+    );
+    expect(r2.exitCode).toBe(3);
+    expect(calls).toHaveLength(2);
+  });
+});
+
 
 
 

@@ -2540,6 +2540,60 @@ export function expandOnDeltaTemplate(
 }
 
 /**
+ * Tick 27: process-level set of (baseId|targetId) pairs already
+ * notified via `--on-delta` / `--on-delta-template` when
+ * `--on-delta-once` is set. Use case: a batch script that runs the
+ * diff command N times against the same target review (e.g. a
+ * compliance audit walking many base candidates against one target)
+ * wants ONE notification per pair, not N notifications.
+ *
+ * Scope is the CLI process: a fresh Node invocation starts with an
+ * empty set, mirroring the standard "this CLI session" boundary.
+ * A long-running consumer that invokes runReviewFilterReportDiff
+ * multiple times in-process gets the dedup behaviour.
+ *
+ * Key format: `${baseId}|${targetId}`. The pipe is safe because
+ * review ids are URL-safe (alphanumeric + `_` + `-`) per the server's
+ * id-validation contract. Asymmetric: (base=A, target=B) is a
+ * different key than (base=B, target=A), so swapping sides intentionally
+ * re-fires the hook (the delta is direction-sensitive: a regression
+ * vs a recovery surface as different bucket signs).
+ *
+ * Exported as `resetOnDeltaOnceCache` so tests can drive a clean
+ * dedup state between cases without spawning a fresh Node process.
+ */
+const ON_DELTA_ONCE_FIRED = new Set<string>();
+
+/**
+ * Tick 27: clear the process-level `--on-delta-once` dedup cache.
+ * Tests call this between cases to guarantee a clean slate; the
+ * production CLI never calls it (the cache lives for the process
+ * lifetime by design).
+ */
+export function resetOnDeltaOnceCache(): void {
+  ON_DELTA_ONCE_FIRED.clear();
+}
+
+/**
+ * Tick 27: pure parser for `--on-delta-once` flag. Boolean-sugar
+ * contract matching the CLI's other boolean flags (--slim,
+ * --require-filter, --filter-summary): accepts `true|1|yes` strings
+ * or the literal `true` boolean. Anything else resolves to `false`
+ * (back-compat default).
+ *
+ * Exported for tests so the boolean-sugar arms (string vs literal
+ * vs false-like) are pinned independently of the runner.
+ */
+export function parseOnDeltaOnceFlag(raw: unknown): boolean {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') {
+    const lower = raw.trim().toLowerCase();
+    return lower === 'true' || lower === '1' || lower === 'yes';
+  }
+  return false;
+}
+
+/**
  * Tick 26: parse `--on-delta <cmd>` / `--on-delta-template <name>` flags
  * for `review filter-report --diff` into a resolved command string (or
  * a sentinel error).
@@ -2869,7 +2923,19 @@ export async function runReviewFilterReportDiff(
   // shouldn't promote the diff command's exit from 3 to 2. The
   // tick-25 counter still records the (identical | delta) result
   // because the diff itself succeeded.
-  if (onDeltaCommand !== null && delta.hasDelta) {
+  //
+  // Tick 27: --on-delta-once gates the hook with a process-level
+  // dedup keyed by `${baseId}|${targetId}`. First fire for a pair
+  // in the process records the key; subsequent invocations with
+  // the SAME pair are inert. A batch script processing many reviews
+  // gets one notification per unique pair, not per-invocation.
+  // The exit code is unaffected (still 3 on delta) so a CI gate
+  // sees the same signal; only the hook side-effect is deduped.
+  const onDeltaOnce = parseOnDeltaOnceFlag(args.flags['on-delta-once']);
+  const onDeltaOnceKey = `${config.baseId}|${config.targetId}`;
+  const onDeltaSuppressedByOnce =
+    onDeltaOnce && ON_DELTA_ONCE_FIRED.has(onDeltaOnceKey);
+  if (onDeltaCommand !== null && delta.hasDelta && !onDeltaSuppressedByOnce) {
     const payload = JSON.stringify({
       baseId: config.baseId,
       targetId: config.targetId,
@@ -2886,6 +2952,15 @@ export async function runReviewFilterReportDiff(
       process.stderr.write(
         `clawreview review filter-report --diff: --on-delta failed: ${(err as Error).message}\n`,
       );
+    }
+    // Record the fire AFTER the exec (whether success or failure) so
+    // the dedup respects "we attempted the notification". A retry
+    // attempt for a transient failure would require a fresh process
+    // (the dedup is per-process by design); if an operator wants
+    // automatic retries, they should wrap the CLI in a retry loop
+    // and NOT pass --on-delta-once.
+    if (onDeltaOnce) {
+      ON_DELTA_ONCE_FIRED.add(onDeltaOnceKey);
     }
   }
   // Tick 25: fire the diff counter with the resolved result label
