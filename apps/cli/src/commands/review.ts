@@ -2382,6 +2382,117 @@ async function writeFilterReportDiffOutput(
 }
 
 /**
+ * Tick 26: closed shape of one line in the `--json-stream` output of
+ * `review filter-report --diff`. Tagged discriminated union so a
+ * downstream consumer (`jq -c '. as $line | $line.kind'`) can route
+ * each line to the right handler without parsing the body twice.
+ *
+ * Always 7 lines per invocation (1 header + 5 axes + 1 footer) --
+ * the per-axis lines come out in a stable declaration order so a
+ * naive consumer that just appends lines to a list gets the same
+ * ordering every run.
+ */
+export type FilterReportDiffStreamLine =
+  | { kind: 'header'; baseId: string; targetId: string }
+  | {
+      kind: 'axis';
+      name: 'applied';
+      base: boolean;
+      target: boolean;
+      changed: boolean;
+    }
+  | {
+      kind: 'axis';
+      name: 'inputTotal' | 'droppedTotal';
+      base: number;
+      target: number;
+      delta: number;
+      changed: boolean;
+    }
+  | {
+      kind: 'axis';
+      name: 'minConfidence';
+      base: number | null;
+      target: number | null;
+      changed: boolean;
+    }
+  | {
+      kind: 'axis';
+      name: 'severityThreshold';
+      base: string | null;
+      target: string | null;
+      changed: boolean;
+    }
+  | { kind: 'footer'; hasDelta: boolean };
+
+/**
+ * Tick 26: render a `FilterReportDelta` as a 7-line newline-delimited
+ * JSON stream.
+ *
+ * Pure: takes the ids and delta, returns the bytes. No IO. Exported
+ * so the test surface can pin every line's shape independently of
+ * the runner. The body carries a trailing newline so a `--output -`
+ * stdout write or a file write produces byte-identical bytes that a
+ * downstream `wc -l` would count as 7.
+ *
+ * Line order is stable across invocations:
+ *   1: header
+ *   2-6: axes (applied, inputTotal, droppedTotal, minConfidence, severityThreshold)
+ *   7: footer
+ *
+ * A consumer doing `head -1 | jq -r .kind` always reads 'header';
+ * `tail -1 | jq -r .hasDelta` always reads the gate bit.
+ */
+export function renderFilterReportDiffJsonStream(
+  baseId: string,
+  targetId: string,
+  delta: FilterReportDelta,
+): string {
+  const lines: FilterReportDiffStreamLine[] = [
+    { kind: 'header', baseId, targetId },
+    {
+      kind: 'axis',
+      name: 'applied',
+      base: delta.applied.base,
+      target: delta.applied.target,
+      changed: delta.applied.changed,
+    },
+    {
+      kind: 'axis',
+      name: 'inputTotal',
+      base: delta.inputTotal.base,
+      target: delta.inputTotal.target,
+      delta: delta.inputTotal.delta,
+      changed: delta.inputTotal.changed,
+    },
+    {
+      kind: 'axis',
+      name: 'droppedTotal',
+      base: delta.droppedTotal.base,
+      target: delta.droppedTotal.target,
+      delta: delta.droppedTotal.delta,
+      changed: delta.droppedTotal.changed,
+    },
+    {
+      kind: 'axis',
+      name: 'minConfidence',
+      base: delta.minConfidence.base,
+      target: delta.minConfidence.target,
+      changed: delta.minConfidence.changed,
+    },
+    {
+      kind: 'axis',
+      name: 'severityThreshold',
+      base: delta.severityThreshold.base,
+      target: delta.severityThreshold.target,
+      changed: delta.severityThreshold.changed,
+    },
+    { kind: 'footer', hasDelta: delta.hasDelta },
+  ];
+  return lines.map((line) => JSON.stringify(line)).join('\n') + '\n';
+}
+
+/**
  * Tick 25: `clawreview review filter-report --diff <baseReviewId> <targetReviewId>`
  *
  * Two-review compare mode for the filter-report endpoint. Fetches
@@ -2510,6 +2621,30 @@ export async function runReviewFilterReportDiff(
 
   const delta = computeFilterReportDelta(baseBody, targetBody);
 
+  // Tick 26: --json-stream emits a line-delimited JSON stream instead
+  // of a single multi-line JSON body. Mirrors `stats --jsonl` (tick 23)
+  // for the same use case: log-aggregator pipelines that ingest one
+  // JSON event per line.
+  //
+  // Shape (always 7 lines):
+  //   line 1: { kind: 'header', baseId, targetId }
+  //   line 2: { kind: 'axis', name: 'applied', ... }
+  //   line 3: { kind: 'axis', name: 'inputTotal', ... }
+  //   line 4: { kind: 'axis', name: 'droppedTotal', ... }
+  //   line 5: { kind: 'axis', name: 'minConfidence', ... }
+  //   line 6: { kind: 'axis', name: 'severityThreshold', ... }
+  //   line 7: { kind: 'footer', hasDelta }
+  //
+  // Requires --format json (text-mode JSON streaming is meaningless).
+  // When set without --format json: a no-op (the multi-line body
+  // path runs); same back-compat stance as stats --jsonl.
+  //
+  // Composes with --output: the stream lands on disk / stdout
+  // sentinel verbatim. Composes with --on-delta hook (tick 26 #5)
+  // because the delta object is computed before the rendering switch.
+  const wantJsonStream = Boolean(args.flags['json-stream']);
+  const renderJsonStream = wantJsonStream && config.format === 'json';
+
   // Tick 26: --output <path> writes the JSON delta body to a file
   // (or stdout when --output -) instead of printing it directly.
   // Mirrors `presets diff --output` so a migration-ticket / CI flow
@@ -2537,23 +2672,25 @@ export async function runReviewFilterReportDiff(
     return;
   }
 
-  if (outputTarget !== null) {
-    // --output path: serialise the delta as JSON regardless of any
-    // text-mode color tags (the format check above already rejected
-    // --format text + --output). The body shape matches stdout's
-    // JSON output so a downstream consumer can swap "redirect stdout
-    // to file" for "--output <path>" without changing the parsing
-    // code.
-    const body = `${JSON.stringify(
+  // Build the JSON body once so --output / --json-stream / stdout
+  // arms share the same bytes.
+  const buildBody = (): string => {
+    if (renderJsonStream) {
+      return renderFilterReportDiffJsonStream(config.baseId, config.targetId, delta);
+    }
+    return `${JSON.stringify(
       { baseId: config.baseId, targetId: config.targetId, delta },
       null,
       2,
     )}\n`;
-    await writeFilterReportDiffOutput(outputTarget, body);
+  };
+
+  if (outputTarget !== null) {
+    // --output path: write the resolved body (single-doc or stream)
+    // to disk / stdout sentinel.
+    await writeFilterReportDiffOutput(outputTarget, buildBody());
   } else if (config.format === 'json') {
-    process.stdout.write(
-      `${JSON.stringify({ baseId: config.baseId, targetId: config.targetId, delta }, null, 2)}\n`,
-    );
+    process.stdout.write(buildBody());
   } else {
     renderFilterReportDeltaText(config.baseId, config.targetId, delta);
   }

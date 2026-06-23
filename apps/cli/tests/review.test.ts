@@ -3826,5 +3826,181 @@ describe('clawreview review filter-report --diff --output (tick 26)', () => {
   });
 });
 
+// Tick 26: `clawreview review filter-report --diff --json-stream` emits
+// a 7-line newline-delimited JSON stream instead of a single multi-line
+// JSON body. Mirrors `stats --jsonl` for log-aggregator pipelines.
+describe('clawreview review filter-report --diff --json-stream (tick 26)', () => {
+  async function runDiffStream(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_target_x'],
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('emits exactly 7 lines (header + 5 axes + footer) when --json-stream + --format json', async () => {
+    const r = await runDiffStream(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', 'json-stream': true },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(3);
+    const lines = r.stdout.trim().split('\n');
+    expect(lines).toHaveLength(7);
+    const parsed = lines.map((l) => JSON.parse(l));
+    expect(parsed[0].kind).toBe('header');
+    expect(parsed[0].baseId).toBe('rv_base_1');
+    expect(parsed[0].targetId).toBe('rv_target_x');
+    expect(parsed[1].kind).toBe('axis');
+    expect(parsed[1].name).toBe('applied');
+    expect(parsed[2].name).toBe('inputTotal');
+    expect(parsed[3].name).toBe('droppedTotal');
+    expect(parsed[4].name).toBe('minConfidence');
+    expect(parsed[5].name).toBe('severityThreshold');
+    expect(parsed[6].kind).toBe('footer');
+    expect(parsed[6].hasDelta).toBe(true);
+  });
+
+  it('inputTotal axis line carries base, target, and signed delta', async () => {
+    const r = await runDiffStream(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', 'json-stream': true },
+      { base: makeBody({ inputTotal: 20 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    const lines = r.stdout.trim().split('\n');
+    const axis = lines.map((l) => JSON.parse(l)).find((p) => p.name === 'inputTotal');
+    expect(axis.base).toBe(20);
+    expect(axis.target).toBe(15);
+    expect(axis.delta).toBe(-5);
+    expect(axis.changed).toBe(true);
+  });
+
+  it('--json-stream without --format json is a no-op (back-compat: still emits the multi-line body)', async () => {
+    const r = await runDiffStream(
+      { diff: 'rv_base_1', server: 'http://x', format: 'text', 'json-stream': true },
+      { base: makeBody(), target: makeBody({ inputTotal: 15 }) },
+    );
+    // Falls through to text-mode renderer.
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('filter-report diff');
+    // No JSONL output.
+    expect(r.stdout.split('\n').filter((l) => l.startsWith('{')).length).toBe(0);
+  });
+
+  it('--json-stream + --format json (no other flags) emits the stream by default', async () => {
+    // The default stdout path -- no --output -- still routes through
+    // the stream renderer when --json-stream is set with --format json.
+    const r = await runDiffStream(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', 'json-stream': true },
+      { base: makeBody(), target: makeBody() },
+    );
+    expect(r.exitCode).toBe(0);
+    const lines = r.stdout.trim().split('\n');
+    expect(lines).toHaveLength(7);
+    const footer = JSON.parse(lines[6]!);
+    expect(footer.hasDelta).toBe(false);
+  });
+
+  it('--json-stream composes with --output (stream lands on disk verbatim)', async () => {
+    const dir = await tmpDir();
+    const path = join(dir, 'stream.jsonl');
+    const r = await runDiffStream(
+      {
+        diff: 'rv_base_1',
+        server: 'http://x',
+        format: 'json',
+        'json-stream': true,
+        output: path,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toBe('');
+    const { readFile } = await import('node:fs/promises');
+    const written = await readFile(path, 'utf8');
+    expect(written.trim().split('\n')).toHaveLength(7);
+    // First line is the header.
+    expect(JSON.parse(written.split('\n')[0]!).kind).toBe('header');
+  });
+
+  it('renderFilterReportDiffJsonStream: pure helper produces stable line ordering', async () => {
+    const { renderFilterReportDiffJsonStream, computeFilterReportDelta } = await import(
+      '../src/commands/review.js'
+    );
+    const base = JSON.parse(makeBody({ inputTotal: 5 }));
+    const target = JSON.parse(makeBody({ inputTotal: 10 }));
+    const delta = computeFilterReportDelta(base, target);
+    const stream = renderFilterReportDiffJsonStream('rv_a', 'rv_b', delta);
+    const lines = stream.trim().split('\n');
+    // Stable ordering: header, applied, inputTotal, droppedTotal, minConfidence, severityThreshold, footer.
+    const names = lines.map((l) => {
+      const p = JSON.parse(l);
+      return p.kind === 'axis' ? p.name : p.kind;
+    });
+    expect(names).toEqual([
+      'header',
+      'applied',
+      'inputTotal',
+      'droppedTotal',
+      'minConfidence',
+      'severityThreshold',
+      'footer',
+    ]);
+  });
+});
+
 
 
