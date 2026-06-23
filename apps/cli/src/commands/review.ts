@@ -119,6 +119,18 @@ export async function runReviewDrift(args: ParsedArgs): Promise<void> {
   if (watchReviewId.length > 0) {
     return runReviewDriftWatch(args, watchReviewId);
   }
+  // Tick 22: --base / --target compare mode. When both are set,
+  // fetch BOTH reviews' /digest bodies from --server and compute
+  // the drift between their `fresh` digests. Use case: an operator
+  // who just landed a bug fix wants to know "did the fix actually
+  // clear high-confidence high-severity findings?" -- the answer
+  // is the drift between the OLD review (--base) and the NEW
+  // review (--target).
+  const baseId = typeof args.flags.base === 'string' ? args.flags.base.trim() : '';
+  const targetId = typeof args.flags.target === 'string' ? args.flags.target.trim() : '';
+  if (baseId.length > 0 || targetId.length > 0) {
+    return runReviewDriftCompare(args, baseId, targetId);
+  }
   return runReviewDriftSingle(args);
 }
 
@@ -1162,4 +1174,316 @@ export async function runReviewDriftWatch(
   }
   // Stopped by --max-polls -- exit reflects last sample.
   process.exitCode = lastHasDrift ? 3 : 0;
+}
+
+/**
+ * Tick 22: validation outcome for `runReviewDriftCompare`. Either a
+ * fully-resolved config or one of the error sentinels.
+ *
+ * Mirrors `WatchConfigResult`'s discriminated-union shape so the
+ * test surface can pin each error arm individually.
+ */
+export type CompareConfigResult =
+  | {
+      kind: 'ok';
+      serverUrl: string;
+      baseId: string;
+      targetId: string;
+      format: 'text' | 'json';
+    }
+  | { kind: 'missing-base'; message: string }
+  | { kind: 'missing-target'; message: string }
+  | { kind: 'missing-server'; message: string }
+  | { kind: 'invalid-format'; message: string };
+
+/**
+ * Tick 22: pure parser for `review drift --base / --target` config.
+ *
+ * Exported so the same shape (defaults, error sentinels) has one
+ * test surface. Mirrors `parseWatchConfig` patterns: each error arm
+ * is a distinct discriminant; the happy path returns a fully-typed
+ * shape.
+ */
+export function parseCompareConfig(flags: {
+  base?: unknown;
+  target?: unknown;
+  server?: unknown;
+  format?: unknown;
+}): CompareConfigResult {
+  const baseId = typeof flags.base === 'string' ? flags.base.trim() : '';
+  if (baseId.length === 0) {
+    return {
+      kind: 'missing-base',
+      message:
+        '--base <reviewId> is required for two-review compare mode (saw empty / non-string value)',
+    };
+  }
+  const targetId = typeof flags.target === 'string' ? flags.target.trim() : '';
+  if (targetId.length === 0) {
+    return {
+      kind: 'missing-target',
+      message:
+        '--target <reviewId> is required for two-review compare mode (saw empty / non-string value)',
+    };
+  }
+  const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
+  if (serverRaw.length === 0) {
+    return {
+      kind: 'missing-server',
+      message: '--base / --target requires --server <url> so both reviews can be fetched',
+    };
+  }
+  // Strip a trailing slash so the URL template compose is unambiguous
+  // -- mirrors parseWatchConfig.
+  const serverUrl = serverRaw.replace(/\/+$/, '');
+  const formatRaw =
+    typeof flags.format === 'string' ? flags.format.toLowerCase() : 'text';
+  if (formatRaw !== 'text' && formatRaw !== 'json') {
+    return {
+      kind: 'invalid-format',
+      message: `--format must be text or json (got '${formatRaw}')`,
+    };
+  }
+  return {
+    kind: 'ok',
+    serverUrl,
+    baseId,
+    targetId,
+    format: formatRaw as 'text' | 'json',
+  };
+}
+
+/**
+ * Tick 22: `clawreview review drift --base <reviewId> --target <reviewId>`
+ *
+ * Two-review compare mode. Fetches both reviews' `/api/reviews/:id/digest`
+ * bodies from `--server` and computes `computeDigestDrift(base.fresh,
+ * target.fresh)`. The drift surfaces as "did the bug fix actually clear
+ * the findings?" / "did this refactor regress the count?".
+ *
+ * Composes with the tick-20 filter flags (`--min-confidence`,
+ * `--severity-threshold`) for a "preview drift at a stricter floor"
+ * pattern: the filter applies to BOTH reviews symmetrically so an
+ * operator can ask "did the fix clear high-confidence high-severity
+ * findings?". The filter is forwarded as `?minConfidence=` /
+ * `?severityThreshold=` query params on each /digest call.
+ *
+ * Exit codes:
+ *   0 -- both reviews fetched, computeDigestDrift returned no drift.
+ *   2 -- config error / fetch failure / shape rejection. Stderr
+ *        carries the precise reason.
+ *   3 -- drift detected (mirrors single-shot's contract for CI
+ *        gateability).
+ *
+ * Injectable fetcher seam mirrors `runReviewDriftWatch` so the test
+ * suite can pin every arm without a real network round-trip.
+ */
+export async function runReviewDriftCompare(
+  args: ParsedArgs,
+  // baseId / targetId pre-extracted by runReviewDrift for the early
+  // branch -- still pass them so the function can be called directly
+  // by tests bypassing the runReviewDrift dispatcher.
+  baseId: string,
+  targetId: string,
+  injected?: { fetcher?: WatchFetcher },
+): Promise<void> {
+  // Validate via the pure parser. The early branch already saw at
+  // least one of base/target set; the parser now sees both AND
+  // checks --server / --format.
+  const config = parseCompareConfig({
+    base: baseId,
+    target: targetId,
+    server: args.flags.server,
+    format: args.flags.format,
+  });
+  if (config.kind !== 'ok') {
+    process.stderr.write(`clawreview review drift: ${config.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+  const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+
+  // Tick 20 filter flags compose: forward them as query knobs on
+  // each /digest call so the server applies them symmetrically.
+  // Same forgiving parsing as the single-shot path (typo'd
+  // --severity-threshold passes through verbatim; server normaliser
+  // treats unknown as no-op).
+  const minConfidenceRaw = args.flags['min-confidence'];
+  const severityThreshold =
+    args.flags['severity-threshold'] === undefined
+      ? undefined
+      : String(args.flags['severity-threshold']);
+  const filterParams: string[] = [];
+  if (minConfidenceRaw !== undefined) {
+    filterParams.push(`minConfidence=${encodeURIComponent(String(minConfidenceRaw))}`);
+  }
+  if (severityThreshold !== undefined) {
+    filterParams.push(`severityThreshold=${encodeURIComponent(severityThreshold)}`);
+  }
+  const qs = filterParams.length > 0 ? `?${filterParams.join('&')}` : '';
+
+  // Fetch both /digest bodies in parallel. The two calls are
+  // independent so a serial fetch would be a needless latency penalty
+  // for a CI gate that's already on the hot path.
+  const baseUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.baseId)}/digest${qs}`;
+  const targetUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.targetId)}/digest${qs}`;
+  let baseBody: DriftReport;
+  let targetBody: DriftReport;
+  try {
+    const [baseRes, targetRes] = await Promise.all([fetcher(baseUrl), fetcher(targetUrl)]);
+    if (!baseRes.ok) {
+      process.stderr.write(
+        `clawreview review drift --base: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    if (!targetRes.ok) {
+      process.stderr.write(
+        `clawreview review drift --target: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const baseText = await baseRes.text();
+    const targetText = await targetRes.text();
+    baseBody = JSON.parse(baseText) as DriftReport;
+    targetBody = JSON.parse(targetText) as DriftReport;
+  } catch (err) {
+    process.stderr.write(
+      `clawreview review drift --base / --target fetch failed: ${(err as Error).message}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  // Resolve each side's fresh digest. Accept both /digest body shape
+  // (carries `fresh`) and /reviews/:id body shape (carries findings
+  // + digest) so an operator can swap endpoints. We deliberately
+  // prefer .fresh when both are present -- the server's /digest
+  // recompute is the source of truth on the server side.
+  const baseFresh = resolveFreshFromBody(baseBody);
+  if (!baseFresh) {
+    process.stderr.write(
+      `clawreview review drift --base: base review body lacks both 'fresh' and 'findings'\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+  const targetFresh = resolveFreshFromBody(targetBody);
+  if (!targetFresh) {
+    process.stderr.write(
+      `clawreview review drift --target: target review body lacks both 'fresh' and 'findings'\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  // The drift here is BETWEEN two reviews, not between a persisted
+  // and a fresh of the same review. The semantics carry over
+  // cleanly: positive deltas = target has MORE of bucket X than
+  // base (regression); negative deltas = target has LESS (the
+  // happy path after a bug fix). hasDrift = "the two reviews
+  // disagreed in at least one bucket".
+  const drift = computeDigestDrift(baseFresh, targetFresh);
+
+  if (config.format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify(
+        {
+          baseReviewId: config.baseId,
+          targetReviewId: config.targetId,
+          base: baseFresh,
+          target: targetFresh,
+          drift,
+          // Echo the resolved filters so a CI gate / jq pipeline
+          // can verify what the CLI sent on the wire.
+          minConfidence: minConfidenceRaw === undefined ? null : Number(String(minConfidenceRaw)),
+          severityThreshold: severityThreshold === undefined ? null : severityThreshold,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  } else {
+    renderCompareText(config.baseId, config.targetId, baseFresh, targetFresh, drift);
+  }
+
+  // Exit 3 on drift mirrors single-shot's CI gateability contract.
+  process.exitCode = drift.hasDrift ? 3 : 0;
+}
+
+/**
+ * Pure helper: pull a fresh digest out of either input body shape.
+ * Returns null when neither shape is present so the caller can
+ * surface a precise error to stderr.
+ *
+ * Order: /digest body (.fresh) wins over /reviews/:id body
+ * (.findings + recompute) because the server's recompute is the
+ * canonical write-once shape.
+ */
+function resolveFreshFromBody(body: DriftReport): FindingDigest | null {
+  if (body.fresh) return body.fresh;
+  if (Array.isArray(body.findings)) {
+    return findingDigest(body.findings, {
+      topCategories: 8,
+      topAgents: 8,
+      hotspots: true,
+    });
+  }
+  return null;
+}
+
+/**
+ * Text renderer for `review drift --base/--target`. Mirrors the
+ * single-shot renderer's banner shape so an operator who knows
+ * single-shot knows compare.
+ */
+function renderCompareText(
+  baseId: string,
+  targetId: string,
+  base: FindingDigest,
+  target: FindingDigest,
+  drift: FindingDigestDrift,
+): void {
+  process.stdout.write(
+    `${kleur.bold('base review')}:   ${baseId} (${base.total} findings)\n` +
+      `${kleur.bold('target review')}: ${targetId} (${target.total} findings)\n` +
+      `${kleur.bold('totalDelta')}:    ${formatDelta(drift.totalDelta)}\n\n`,
+  );
+
+  if (!drift.hasDrift) {
+    process.stdout.write(`${kleur.gray('  (no drift: target matches base)')}\n`);
+    return;
+  }
+
+  const sevEntries = Object.entries(drift.bySeverityDelta).filter(([, d]) => d !== 0);
+  if (sevEntries.length > 0) {
+    process.stdout.write(`${kleur.bold('severity')}:\n`);
+    for (const [sev, d] of sevEntries) {
+      process.stdout.write(`  ${kleur.bold(sev.padEnd(8))} ${formatDelta(d)}\n`);
+    }
+    process.stdout.write('\n');
+  }
+
+  renderSparseCompareBucket('agent', drift.byAgentDelta);
+  renderSparseCompareBucket('category', drift.byCategoryDelta as Record<string, number>);
+  renderSparseCompareBucket('file', drift.byFileDelta);
+  renderSparseCompareBucket('tag', drift.byTagDelta);
+}
+
+function renderSparseCompareBucket(
+  label: string,
+  bucket: Record<string, number>,
+): void {
+  const keys = Object.keys(bucket).sort();
+  if (keys.length === 0) return;
+  process.stdout.write(`${kleur.bold(label)}:\n`);
+  for (const k of keys) {
+    const d = bucket[k] ?? 0;
+    process.stdout.write(`  ${k.padEnd(24)} ${formatDelta(d)}\n`);
+  }
+  process.stdout.write('\n');
 }

@@ -1590,4 +1590,312 @@ describe('parseWatchConfig --on-recover-template (tick 19)', () => {
   });
 });
 
+// Tick 22: --base / --target two-review compare. Fetches both
+// /api/reviews/:id/digest bodies via injectable fetcher, computes
+// drift between their `fresh` digests, exits 3 on drift (mirrors
+// single-shot for CI gateability), 0 when they agree, 2 on
+// fetch / config / shape failure.
+describe('clawreview review drift --base / --target (tick 22)', () => {
+  /**
+   * Drive the compare command with a stub fetcher so the test
+   * doesn't depend on the network. Returns captured stdout/stderr
+   * plus the URLs the fetcher was asked to hit (lets us assert
+   * the filter-flag forwarding contract).
+   */
+  async function runCompare(
+    baseBody: string | { ok: boolean; status: number; body: string },
+    targetBody: string | { ok: boolean; status: number; body: string },
+    flags: Record<string, string | boolean> = {},
+  ): Promise<RunResult & { fetchCalls: string[] }> {
+    const { runReviewDriftCompare } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetchCalls: string[] = [];
+    const baseEntry =
+      typeof baseBody === 'string' ? { ok: true, status: 200, body: baseBody } : baseBody;
+    const targetEntry =
+      typeof targetBody === 'string' ? { ok: true, status: 200, body: targetBody } : targetBody;
+    const fetcher = async (url: string) => {
+      fetchCalls.push(url);
+      // Treat the second URL as the target by URL substring match
+      // -- mirrors the real fetch order. The test IDs convention
+      // uses 'rv_tgt' / 'rv_base' so we can route on that.
+      const entry = url.includes('rv_tgt')
+        ? targetEntry
+        : baseEntry;
+      return { ok: entry.ok, status: entry.status, text: async () => entry.body };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewDriftCompare(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: { 'no-color': true, ...flags },
+        },
+        String(flags.base ?? ''),
+        String(flags.target ?? ''),
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return {
+      stdout: stdout.join(''),
+      stderr: stderr.join(''),
+      exitCode: code,
+      fetchCalls,
+    };
+  }
+
+  function digestBody(reviewId: string, fresh: ReturnType<typeof findingDigest>) {
+    return JSON.stringify({
+      reviewId,
+      persisted: fresh,
+      fresh,
+      drift: { hasDrift: false, totalDelta: 0, bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 }, byAgentDelta: {}, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {} },
+      recompute: 'fresh',
+    });
+  }
+
+  it('exits 0 + reports "no drift" when base.fresh equals target.fresh', async () => {
+    const findings = [f({ severity: 'high', file: 'a.ts' }), f({ severity: 'low', file: 'b.ts' })];
+    const dig = findingDigest(findings as never, { topAgents: 8, topCategories: 8, hotspots: true });
+    const r = await runCompare(
+      digestBody('rv_base', dig),
+      digestBody('rv_tgt', dig),
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt' },
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('(no drift: target matches base)');
+    // Both URLs were hit (compare always fetches both reviews).
+    expect(r.fetchCalls).toHaveLength(2);
+    expect(r.fetchCalls[0]).toContain('/api/reviews/rv_base/digest');
+    expect(r.fetchCalls[1]).toContain('/api/reviews/rv_tgt/digest');
+  });
+
+  it('exits 3 + reports per-severity delta when target has fewer findings (bug fix happy path)', async () => {
+    const baseFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'high', file: 'b.ts' }),
+      f({ severity: 'medium', file: 'c.ts' }),
+    ];
+    const targetFindings = [
+      // bug fix cleared both 'high' findings; medium still there.
+      f({ severity: 'medium', file: 'c.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompare(
+      digestBody('rv_base', baseDig),
+      digestBody('rv_tgt', targetDig),
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt' },
+    );
+    expect(r.exitCode).toBe(3); // drift detected -> CI gate fails
+    expect(r.stdout).toContain('base review');
+    expect(r.stdout).toContain('target review');
+    expect(r.stdout).toContain('high');
+    // totalDelta = target - base = 1 - 3 = -2.
+    expect(r.stdout).toContain('-2');
+  });
+
+  it('--format json emits the structured compare envelope (baseReviewId / targetReviewId / drift)', async () => {
+    const baseFindings = [f({ severity: 'high' })];
+    const targetFindings = [f({ severity: 'high' }), f({ severity: 'low' })];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompare(
+      digestBody('rv_base', baseDig),
+      digestBody('rv_tgt', targetDig),
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt', format: 'json' },
+    );
+    expect(r.exitCode).toBe(3);
+    const body = JSON.parse(r.stdout);
+    expect(body.baseReviewId).toBe('rv_base');
+    expect(body.targetReviewId).toBe('rv_tgt');
+    expect(body.base.total).toBe(1);
+    expect(body.target.total).toBe(2);
+    expect(body.drift.hasDrift).toBe(true);
+    expect(body.drift.totalDelta).toBe(1); // target +1
+    // Filter echoes default to null when flags absent.
+    expect(body.minConfidence).toBeNull();
+    expect(body.severityThreshold).toBeNull();
+  });
+
+  it('forwards --min-confidence / --severity-threshold as query params on BOTH fetches', async () => {
+    const findings = [f({ severity: 'high' })];
+    const dig = findingDigest(findings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompare(
+      digestBody('rv_base', dig),
+      digestBody('rv_tgt', dig),
+      {
+        server: 'http://localhost',
+        base: 'rv_base',
+        target: 'rv_tgt',
+        'min-confidence': '0.5',
+        'severity-threshold': 'medium',
+        format: 'json',
+      },
+    );
+    expect(r.exitCode).toBe(0);
+    // Both URLs carry the same filter knobs (symmetric application).
+    for (const url of r.fetchCalls) {
+      expect(url).toContain('minConfidence=0.5');
+      expect(url).toContain('severityThreshold=medium');
+    }
+    const body = JSON.parse(r.stdout);
+    expect(body.minConfidence).toBe(0.5);
+    expect(body.severityThreshold).toBe('medium');
+  });
+
+  it('exits 2 with stderr when --base is missing', async () => {
+    const r = await runCompare(
+      '{}',
+      '{}',
+      { server: 'http://localhost', target: 'rv_tgt' }, // no --base
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--base');
+  });
+
+  it('exits 2 with stderr when --target is missing', async () => {
+    const r = await runCompare(
+      '{}',
+      '{}',
+      { server: 'http://localhost', base: 'rv_base' }, // no --target
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--target');
+  });
+
+  it('exits 2 with stderr when --server is missing', async () => {
+    const r = await runCompare(
+      '{}',
+      '{}',
+      { base: 'rv_base', target: 'rv_tgt' }, // no --server
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--server');
+  });
+
+  it('exits 2 with stderr when base fetch returns non-2xx', async () => {
+    const r = await runCompare(
+      { ok: false, status: 404, body: '' },
+      '{}',
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt' },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('HTTP 404');
+    expect(r.stderr).toContain('rv_base');
+  });
+
+  it('exits 2 with stderr when target body lacks both fresh and findings', async () => {
+    const dig = findingDigest([f()], { topAgents: 8 });
+    const r = await runCompare(
+      digestBody('rv_base', dig),
+      JSON.stringify({ reviewId: 'rv_tgt' }), // no fresh, no findings
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt' },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--target');
+    expect(r.stderr).toContain("lacks both 'fresh' and 'findings'");
+  });
+
+  it('accepts /api/reviews/:id body shape (findings) on either side', async () => {
+    // Compare must accept the alternate input shape so an operator
+    // who fetches /api/reviews/:id (not /digest) can still use it.
+    const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+    const r = await runCompare(
+      JSON.stringify({ reviewId: 'rv_base', findings: baseFindings }),
+      JSON.stringify({ reviewId: 'rv_tgt', findings: [] }),
+      { server: 'http://localhost', base: 'rv_base', target: 'rv_tgt', format: 'json' },
+    );
+    expect(r.exitCode).toBe(3); // 1 vs 0 = drift
+    const body = JSON.parse(r.stdout);
+    expect(body.base.total).toBe(1);
+    expect(body.target.total).toBe(0);
+  });
+
+  it('strips a trailing slash from --server so URL composition is unambiguous', async () => {
+    const findings = [f()];
+    const dig = findingDigest(findings, { topAgents: 8 });
+    const r = await runCompare(
+      digestBody('rv_base', dig),
+      digestBody('rv_tgt', dig),
+      { server: 'http://localhost///', base: 'rv_base', target: 'rv_tgt' },
+    );
+    expect(r.exitCode).toBe(0);
+    for (const url of r.fetchCalls) {
+      // Single slash between origin and path (no `http://localhost//api`).
+      expect(url).toMatch(/^http:\/\/localhost\/api\//);
+    }
+  });
+
+  describe('parseCompareConfig pure helper', () => {
+    it('returns ok on the happy path with trailing-slash stripped', async () => {
+      const { parseCompareConfig } = await import('../src/commands/review.js');
+      const r = parseCompareConfig({
+        base: 'rv_a',
+        target: 'rv_b',
+        server: 'http://localhost/',
+        format: 'json',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.serverUrl).toBe('http://localhost');
+        expect(r.baseId).toBe('rv_a');
+        expect(r.targetId).toBe('rv_b');
+        expect(r.format).toBe('json');
+      }
+    });
+
+    it('defaults format to text when absent', async () => {
+      const { parseCompareConfig } = await import('../src/commands/review.js');
+      const r = parseCompareConfig({
+        base: 'a', target: 'b', server: 'http://x',
+      });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.format).toBe('text');
+    });
+
+    it('rejects empty / non-string --base', async () => {
+      const { parseCompareConfig } = await import('../src/commands/review.js');
+      expect(parseCompareConfig({ base: '', target: 'b', server: 'http://x' }).kind).toBe('missing-base');
+      expect(parseCompareConfig({ base: '   ', target: 'b', server: 'http://x' }).kind).toBe('missing-base');
+      expect(parseCompareConfig({ target: 'b', server: 'http://x' }).kind).toBe('missing-base');
+      expect(parseCompareConfig({ base: 5 as unknown as string, target: 'b', server: 'http://x' }).kind).toBe('missing-base');
+    });
+
+    it('rejects empty --target / --server', async () => {
+      const { parseCompareConfig } = await import('../src/commands/review.js');
+      expect(parseCompareConfig({ base: 'a', target: '', server: 'http://x' }).kind).toBe('missing-target');
+      expect(parseCompareConfig({ base: 'a', target: 'b', server: '' }).kind).toBe('missing-server');
+    });
+
+    it('rejects unknown --format with a precise sentinel', async () => {
+      const { parseCompareConfig } = await import('../src/commands/review.js');
+      const r = parseCompareConfig({ base: 'a', target: 'b', server: 'http://x', format: 'xml' });
+      expect(r.kind).toBe('invalid-format');
+      if (r.kind === 'invalid-format') {
+        expect(r.message).toContain('xml');
+      }
+    });
+  });
+});
+
 
