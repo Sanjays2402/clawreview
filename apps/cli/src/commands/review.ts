@@ -1884,9 +1884,28 @@ export async function runReviewFilterReport(
 
   if (config.format === 'json') {
     process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
-    return;
+  } else {
+    renderFilterReportText(body);
   }
-  renderFilterReportText(body);
+  // Tick 24: --require-filter gating flag. Exit 3 when the persisted
+  // report's `applied` bit is false. Pairs with the CLI's existing
+  // exit-3-on-drift contract (presets diff / review drift) so a CI
+  // gate that REQUIRES a filter to be in effect can fail loudly:
+  //   `clawreview review filter-report rv_xyz --server <url> --require-filter`
+  // Exit 3 means "filter not applied" (rather than "drift" / "regression");
+  // the message above is what differentiates them.
+  //
+  // Default OFF (back-compat: tick-23 single-shot always exits 0 on
+  // a successful fetch). When set AND body.applied is false, we
+  // write a single-line stderr hint and flip to exit 3.
+  if (args.flags['require-filter'] === true || args.flags['require-filter'] === 'true') {
+    if (!body.applied) {
+      process.stderr.write(
+        `clawreview review filter-report: --require-filter set but persisted report has applied=false\n`,
+      );
+      process.exitCode = 3;
+    }
+  }
 }
 
 /**
@@ -2114,6 +2133,16 @@ export async function runReviewFilterReportWatch(
   };
   process.once('SIGINT', onSigint);
 
+  // Tick 24: --require-filter watch-mode bookkeeping. Tracks the LAST
+  // sample's `applied` bit so the post-loop exit code reflects the
+  // most recent snapshot (matches single-shot semantics: "did the
+  // last poll show a filtered report?"). The default sentinel `true`
+  // means "no sample yet"; if the loop exits with zero polls
+  // (impossible on the happy path but cheap to be safe), the gate
+  // stays inert.
+  const requireFilter =
+    args.flags['require-filter'] === true || args.flags['require-filter'] === 'true';
+  let lastApplied = true;
   let pollCount = 0;
   try {
     while (!stopped) {
@@ -2156,6 +2185,12 @@ export async function runReviewFilterReportWatch(
         renderFilterReportText(body);
       }
 
+      // Tick 24: track the LAST sample's applied bit for the
+      // --require-filter gate. The body's `applied` is the
+      // top-level boolean both slim and full shapes carry, so the
+      // bookkeeping works uniformly across projection modes.
+      lastApplied = Boolean(body.applied);
+
       // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
       // interval between the only sample and the exit.
       if (config.maxPolls > 0 && pollCount >= config.maxPolls) {
@@ -2173,7 +2208,14 @@ export async function runReviewFilterReportWatch(
     process.exitCode = 0;
     return;
   }
-  // Stopped by --max-polls -- exit 0 (no built-in failure mode for
-  // this command; --require-filter is the gating flag).
+  // Stopped by --max-polls -- exit reflects the gate when set,
+  // otherwise 0 (no built-in failure mode for plain watch).
+  if (requireFilter && pollCount > 0 && !lastApplied) {
+    process.stderr.write(
+      `clawreview review filter-report --watch: --require-filter set but last poll showed applied=false\n`,
+    );
+    process.exitCode = 3;
+    return;
+  }
   process.exitCode = 0;
 }

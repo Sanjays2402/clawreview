@@ -2420,6 +2420,71 @@ describe('clawreview review filter-report (tick 23)', () => {
       }
     });
   });
+
+  // Tick 24: --require-filter gating flag. Exit 3 when the persisted
+  // report's applied bit is false. Mirrors `presets diff` /
+  // `review drift` exit-3-on-drift contract for CI gateability.
+  describe('--require-filter (tick 24 gating)', () => {
+    it('exits 0 by default (back-compat with tick 23) when applied=false', async () => {
+      const r = await runFilterReport(fullBody({ applied: false }));
+      expect(r.exitCode).toBe(0);
+      // No stderr hint when the flag is OFF.
+      expect(r.stderr).not.toContain('require-filter');
+    });
+
+    it('exits 0 when --require-filter is set AND applied=true', async () => {
+      const r = await runFilterReport(fullBody({ applied: true }), ['filter-report', 'rv_42_abc'], {
+        server: 'http://localhost',
+        'require-filter': true,
+      });
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).not.toContain('require-filter');
+    });
+
+    it('exits 3 when --require-filter is set AND applied=false (with stderr hint)', async () => {
+      const r = await runFilterReport(fullBody({ applied: false }), ['filter-report', 'rv_42_abc'], {
+        server: 'http://localhost',
+        'require-filter': true,
+      });
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toContain('--require-filter');
+      expect(r.stderr).toContain('applied=false');
+      // The body still rendered (text default) before the gate flipped
+      // the exit code -- the CI step sees both the report and the
+      // failure signal.
+      expect(r.stdout).toContain('rv_42_abc');
+    });
+
+    it('gates on the slim body too (applied is top-level on both shapes)', async () => {
+      const slimBodyFalse = JSON.stringify({
+        reviewId: 'rv_42_abc',
+        inputTotal: 10,
+        droppedTotal: 0,
+        applied: false,
+        slim: true,
+      });
+      const r = await runFilterReport(slimBodyFalse, ['filter-report', 'rv_42_abc'], {
+        server: 'http://localhost',
+        slim: true,
+        'require-filter': true,
+      });
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toContain('applied=false');
+    });
+
+    it('still renders JSON body before flipping to exit 3 (CI gets both the data and the failure signal)', async () => {
+      const r = await runFilterReport(fullBody({ applied: false }), ['filter-report', 'rv_42_abc'], {
+        server: 'http://localhost',
+        format: 'json',
+        'require-filter': true,
+      });
+      expect(r.exitCode).toBe(3);
+      // Stdout still carries the JSON body so jq pipelines have the data.
+      const parsed = JSON.parse(r.stdout);
+      expect(parsed.reviewId).toBe('rv_42_abc');
+      expect(parsed.applied).toBe(false);
+    });
+  });
 });
 
 // Tick 24: `clawreview review filter-report --watch <reviewId>` poll
@@ -2676,6 +2741,44 @@ describe('clawreview review filter-report --watch (tick 24)', () => {
       if (str.kind === 'ok') expect(str.slim).toBe(true);
       const off = parseFilterReportWatchConfig({ server: 'http://x', slim: 'false' });
       if (off.kind === 'ok') expect(off.slim).toBe(false);
+    });
+  });
+
+  // Tick 24: --require-filter watch-mode gating. The LAST sample's
+  // applied bit determines the exit code (matches single-shot's
+  // "last poll wins" contract).
+  describe('--require-filter (tick 24 watch gating)', () => {
+    it('exits 0 by default when last sample has applied=false (back-compat)', async () => {
+      const r = await runWatch('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+      }, [makeFullBody({ applied: false }), makeFullBody({ applied: false })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).not.toContain('require-filter');
+    });
+
+    it('exits 3 when --require-filter is set AND last sample has applied=false', async () => {
+      const r = await runWatch('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+        'require-filter': true,
+      }, [makeFullBody({ applied: false }), makeFullBody({ applied: false })]);
+      expect(r.exitCode).toBe(3);
+      expect(r.stderr).toContain('--require-filter');
+      expect(r.stderr).toContain('applied=false');
+    });
+
+    it('exits 0 when --require-filter is set AND last sample has applied=true (even if earlier samples did not)', async () => {
+      // First sample applied=false, second sample applied=true.
+      // "Last poll wins" -- gate clears even though the watch loop
+      // saw an unfiltered snapshot along the way.
+      const r = await runWatch('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+        'require-filter': true,
+      }, [makeFullBody({ applied: false }), makeFullBody({ applied: true })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).not.toContain('require-filter');
     });
   });
 });
