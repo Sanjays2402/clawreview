@@ -3257,5 +3257,282 @@ describe('clawreview review filter-report --watch (tick 24)', () => {
   });
 });
 
+// Tick 25: `clawreview review filter-report --diff <baseReviewId> <targetReviewId>`
+// two-review compare for the filter-report endpoint.
+describe('clawreview review filter-report --diff (tick 25)', () => {
+  async function runDiff(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+    positional: string[] = ['filter-report'],
+  ): Promise<RunResult & { fetchCalls: string[] }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetchCalls: string[] = [];
+    const fetcher = async (url: string) => {
+      fetchCalls.push(url);
+      if (url.includes('/api/reviews/') && url.includes('/filter-report')) {
+        // Resolve which side by the review id substring.
+        if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+          return { ok: true, status: 200, text: async () => bodies.base };
+        }
+        return { ok: true, status: 200, text: async () => bodies.target };
+      }
+      return { ok: false, status: 404, text: async () => '{}' };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        { command: 'review', positional, flags: { 'no-color': true, ...flags } },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, fetchCalls };
+  }
+
+  function makeFullBody(opts: {
+    reviewId?: string;
+    applied?: boolean;
+    inputTotal?: number;
+    droppedTotal?: number;
+    minConfidence?: { applied: boolean; normalised: number };
+    severityThreshold?: { applied: boolean; normalised: string | null };
+  } = {}): string {
+    return JSON.stringify({
+      reviewId: opts.reviewId ?? 'rv_diff_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: {
+          raw: 0.5,
+          normalised: opts.minConfidence?.normalised ?? 0.5,
+          applied: opts.minConfidence?.applied ?? true,
+        },
+        severityThreshold: {
+          raw: undefined,
+          normalised: opts.severityThreshold?.normalised ?? null,
+          applied: opts.severityThreshold?.applied ?? false,
+        },
+        any: opts.applied ?? true,
+      },
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('rejects --diff without --server', async () => {
+    const r = await runDiff(
+      { diff: 'rv_base_1' },
+      { base: makeFullBody(), target: makeFullBody() },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--diff requires --server');
+  });
+
+  it('rejects --diff without a positional target reviewId', async () => {
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x' },
+      { base: makeFullBody(), target: makeFullBody() },
+      ['filter-report'],
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--diff requires a positional <targetReviewId>');
+  });
+
+  it('exits 0 when both bodies are identical (hasDelta=false)', async () => {
+    const same = makeFullBody({ reviewId: 'X', inputTotal: 10, droppedTotal: 3 });
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x' },
+      { base: same, target: same },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(0);
+    // Text banner mentions both ids.
+    expect(r.stdout).toContain('rv_base_1');
+    expect(r.stdout).toContain('rv_target_1');
+    expect(r.stdout).toContain('hasDelta');
+    // Each axis is unchanged.
+    expect(r.stdout).toContain('unchanged');
+  });
+
+  it('exits 3 with text output when inputTotal differs (CI gate fires)', async () => {
+    const base = makeFullBody({ inputTotal: 10 });
+    const target = makeFullBody({ inputTotal: 15 });
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x' },
+      { base, target },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('inputTotal');
+    expect(r.stdout).toContain('10');
+    expect(r.stdout).toContain('15');
+    expect(r.stdout).toContain('changed');
+  });
+
+  it('exits 3 when min_confidence threshold changes', async () => {
+    const base = makeFullBody({ minConfidence: { applied: true, normalised: 0.5 } });
+    const target = makeFullBody({ minConfidence: { applied: true, normalised: 0.8 } });
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x' },
+      { base, target },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(3);
+    // Text output shows both thresholds.
+    expect(r.stdout).toContain('0.5');
+    expect(r.stdout).toContain('0.8');
+  });
+
+  it('exits 3 with json output and emits structured delta', async () => {
+    const base = makeFullBody({ applied: true });
+    const target = makeFullBody({ applied: false });
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json' },
+      { base, target },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(3);
+    const body = JSON.parse(r.stdout);
+    expect(body.baseId).toBe('rv_base_1');
+    expect(body.targetId).toBe('rv_target_1');
+    expect(body.delta.applied.changed).toBe(true);
+    expect(body.delta.applied.base).toBe(true);
+    expect(body.delta.applied.target).toBe(false);
+    expect(body.delta.hasDelta).toBe(true);
+  });
+
+  it('fetches both /filter-report endpoints in parallel', async () => {
+    const r = await runDiff(
+      { diff: 'rv_base_1', server: 'http://x' },
+      { base: makeFullBody(), target: makeFullBody() },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.fetchCalls).toHaveLength(2);
+    // Both URLs are filter-report endpoints.
+    expect(r.fetchCalls.every((u) => u.includes('/filter-report'))).toBe(true);
+    // Both ids appear in the call set.
+    expect(r.fetchCalls.some((u) => u.includes('rv_base_1'))).toBe(true);
+    expect(r.fetchCalls.some((u) => u.includes('rv_target_1'))).toBe(true);
+  });
+
+  it('parseFilterReportDiffConfig: each error arm has a unique discriminant', async () => {
+    const { parseFilterReportDiffConfig } = await import('../src/commands/review.js');
+    expect(parseFilterReportDiffConfig({}).kind).toBe('missing-base');
+    expect(parseFilterReportDiffConfig({ base: 'b' }).kind).toBe('missing-target');
+    expect(parseFilterReportDiffConfig({ base: 'b', target: 't' }).kind).toBe('missing-server');
+    expect(
+      parseFilterReportDiffConfig({ base: 'b', target: 't', server: 'http://x', format: 'xml' }).kind,
+    ).toBe('invalid-format');
+    const ok = parseFilterReportDiffConfig({
+      base: 'b',
+      target: 't',
+      server: 'http://x/',
+      format: 'json',
+    });
+    expect(ok.kind).toBe('ok');
+    if (ok.kind === 'ok') {
+      expect(ok.serverUrl).toBe('http://x'); // trailing slash stripped
+      expect(ok.format).toBe('json');
+    }
+  });
+
+  it('computeFilterReportDelta: pure no-change pin', async () => {
+    const { computeFilterReportDelta } = await import('../src/commands/review.js');
+    const body = JSON.parse(makeFullBody());
+    const d = computeFilterReportDelta(body, body);
+    expect(d.hasDelta).toBe(false);
+    expect(d.applied.changed).toBe(false);
+    expect(d.inputTotal.delta).toBe(0);
+    expect(d.droppedTotal.delta).toBe(0);
+    expect(d.minConfidence.changed).toBe(false);
+    expect(d.severityThreshold.changed).toBe(false);
+  });
+
+  it('computeFilterReportDelta: tolerates slim bodies (no appliedFilters)', async () => {
+    const { computeFilterReportDelta } = await import('../src/commands/review.js');
+    const slim = JSON.parse(JSON.stringify({
+      reviewId: 'rv_slim', inputTotal: 10, droppedTotal: 3, applied: true, slim: true,
+    }));
+    const d = computeFilterReportDelta(slim, slim);
+    // No appliedFilters on either side -> per-axis fields are
+    // base=null/target=null with changed=false.
+    expect(d.minConfidence.base).toBeNull();
+    expect(d.minConfidence.target).toBeNull();
+    expect(d.minConfidence.changed).toBe(false);
+    expect(d.severityThreshold.changed).toBe(false);
+    expect(d.hasDelta).toBe(false);
+  });
+
+  it('computeFilterReportDelta: dropped count delta surfaces as a signed number', async () => {
+    const { computeFilterReportDelta } = await import('../src/commands/review.js');
+    const base = JSON.parse(makeFullBody({ droppedTotal: 5 }));
+    const target = JSON.parse(makeFullBody({ droppedTotal: 2 }));
+    const d = computeFilterReportDelta(base, target);
+    expect(d.droppedTotal.delta).toBe(-3);
+    expect(d.droppedTotal.changed).toBe(true);
+    expect(d.hasDelta).toBe(true);
+  });
+
+  it('routes HTTP 404 from base review to clear error message', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stderr: string[] = [];
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as never);
+    const fetcher = async (url: string) => {
+      if (url.includes('rv_base_404')) {
+        return { ok: false, status: 404, text: async () => JSON.stringify({ error: 'NotFound' }) };
+      }
+      return { ok: true, status: 200, text: async () => makeFullBody() };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_target_x'],
+          flags: { 'no-color': true, diff: 'rv_base_404', server: 'http://x' },
+        },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    expect(process.exitCode).toBe(2);
+    expect(stderr.join('')).toContain('rv_base_404');
+    expect(stderr.join('')).toContain('HTTP 404');
+    process.exitCode = 0;
+  });
+});
+
 
 

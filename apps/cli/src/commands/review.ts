@@ -2023,6 +2023,22 @@ export async function runReviewFilterReport(
   if (watchReviewId.length > 0) {
     return runReviewFilterReportWatch(args, watchReviewId, injected);
   }
+  // Tick 25: --diff <baseReviewId> opt-in switches to two-review
+  // compare mode. The positional reviewId stays as the TARGET; the
+  // flag's value is the BASE. Mirrors `review drift --base / --target`
+  // ergonomics but with a single --diff flag (filter-report doesn't
+  // need the symmetric --base/--target surface; the positional
+  // already names one of the two sides).
+  //
+  // Use case: "did this CI run land with the new min_confidence
+  // threshold compared to the previous green build?". The compare
+  // fetches both /filter-report bodies and surfaces the delta
+  // (which fields changed, which thresholds drifted).
+  const diffBaseId =
+    typeof args.flags.diff === 'string' ? args.flags.diff.trim() : '';
+  if (diffBaseId.length > 0) {
+    return runReviewFilterReportDiff(args, diffBaseId, reviewIdPositional, injected);
+  }
   const config = parseFilterReportConfig({
     reviewId: reviewIdPositional,
     server: args.flags.server,
@@ -2099,6 +2115,344 @@ export async function runReviewFilterReport(
       process.exitCode = 3;
     }
   }
+}
+
+/**
+ * Tick 25: validation outcome for `runReviewFilterReportDiff`. Either
+ * a fully-resolved config or one of three error sentinels.
+ *
+ * Mirrors `CompareConfigResult` / `FilterReportConfigResult`
+ * discriminated-union shapes so the test surface can pin each error
+ * arm individually without parsing stderr messages.
+ *
+ *   - `'missing-base'`   -- --diff <baseReviewId> was empty or
+ *                           non-string. (The flag's value IS the
+ *                           base; absence is the back-compat path
+ *                           that doesn't reach this parser.)
+ *   - `'missing-target'` -- the positional <reviewId> was empty.
+ *                           The compare needs both sides; we don't
+ *                           guess a default.
+ *   - `'missing-server'` -- --server <url> required to fetch both
+ *                           /filter-report bodies.
+ *   - `'invalid-format'` -- --format must be 'text' or 'json'.
+ */
+export type FilterReportDiffConfigResult =
+  | {
+      kind: 'ok';
+      serverUrl: string;
+      baseId: string;
+      targetId: string;
+      format: 'text' | 'json';
+    }
+  | { kind: 'missing-base'; message: string }
+  | { kind: 'missing-target'; message: string }
+  | { kind: 'missing-server'; message: string }
+  | { kind: 'invalid-format'; message: string };
+
+/**
+ * Tick 25: pure parser for `review filter-report --diff` config.
+ * Mirrors `parseCompareConfig`'s validation contract so the two
+ * two-review-compare modes (drift compare + filter-report diff)
+ * share one mental model.
+ *
+ * Validation:
+ *   - baseId (from --diff value) required (missing -> 'missing-base')
+ *   - targetId (from positional) required (missing -> 'missing-target')
+ *   - serverUrl required (missing -> 'missing-server')
+ *   - format: 'text' | 'json' (default 'text'; anything else ->
+ *     'invalid-format')
+ *
+ * Server URL trailing slashes are stripped so the URL template
+ * compose stays clean.
+ */
+export function parseFilterReportDiffConfig(flags: {
+  base?: unknown;
+  target?: unknown;
+  server?: unknown;
+  format?: unknown;
+}): FilterReportDiffConfigResult {
+  const baseId = typeof flags.base === 'string' ? flags.base.trim() : '';
+  if (baseId.length === 0) {
+    return {
+      kind: 'missing-base',
+      message:
+        '--diff <baseReviewId> requires a non-empty review id (saw empty / non-string value)',
+    };
+  }
+  const targetId = typeof flags.target === 'string' ? flags.target.trim() : '';
+  if (targetId.length === 0) {
+    return {
+      kind: 'missing-target',
+      message:
+        '--diff requires a positional <targetReviewId>: `clawreview review filter-report --diff <baseId> <targetId>`',
+    };
+  }
+  const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
+  if (serverRaw.length === 0) {
+    return {
+      kind: 'missing-server',
+      message: '--diff requires --server <url> so both filter-reports can be fetched',
+    };
+  }
+  const serverUrl = serverRaw.replace(/\/+$/, '');
+  const formatRaw =
+    typeof flags.format === 'string' ? flags.format.toLowerCase() : 'text';
+  if (formatRaw !== 'text' && formatRaw !== 'json') {
+    return {
+      kind: 'invalid-format',
+      message: `--format must be text or json (got '${formatRaw}')`,
+    };
+  }
+  return {
+    kind: 'ok',
+    serverUrl,
+    baseId,
+    targetId,
+    format: formatRaw as 'text' | 'json',
+  };
+}
+
+/**
+ * Tick 25: shape of a per-field delta produced by computeFilterReportDelta.
+ *
+ * Each field tracks WHETHER it changed plus the before/after values so
+ * a downstream consumer can render "min_confidence 0.5 -> 0.8" or
+ * "severity_threshold added: high" without computing the delta itself.
+ *
+ * A bug-fix-only delta (no fields changed) returns hasDelta=false; a
+ * CI gate that wants "did anything change?" reads ONE field.
+ */
+export interface FilterReportDelta {
+  /** Top-level applied bit transition. */
+  applied: { base: boolean; target: boolean; changed: boolean };
+  /** Input total (pre-filter count). */
+  inputTotal: { base: number; target: number; delta: number; changed: boolean };
+  /** Dropped total (count of findings the filter removed). */
+  droppedTotal: { base: number; target: number; delta: number; changed: boolean };
+  /**
+   * Min-confidence axis. Tracks the normalised threshold (the
+   * resolved value the worker applied; the raw input is operator-
+   * controlled and not stable for comparison). Threshold absence
+   * (no filter on that axis) is represented as null.
+   */
+  minConfidence: { base: number | null; target: number | null; changed: boolean };
+  /**
+   * Severity-threshold axis. Same shape as minConfidence; threshold
+   * absent on that axis is null.
+   */
+  severityThreshold: { base: string | null; target: string | null; changed: boolean };
+  /** True if ANY field above carries changed=true. CI gate reads this. */
+  hasDelta: boolean;
+}
+
+/**
+ * Tick 25: compute the per-field delta between two filter-report
+ * bodies. Pure (no IO, no mutation, no side effects) so it can be
+ * tested without driving the HTTP layer.
+ *
+ * Slim bodies (no `appliedFilters`) are tolerated: the per-axis
+ * deltas surface as base=null/target=null with changed=false, since
+ * we can't tell whether a slim consumer ran a filter on those axes.
+ * This keeps the helper symmetric across projection modes.
+ */
+export function computeFilterReportDelta(
+  base: FilterReportBody,
+  target: FilterReportBody,
+): FilterReportDelta {
+  const appliedChanged = base.applied !== target.applied;
+  const inputDelta = target.inputTotal - base.inputTotal;
+  const droppedDelta = target.droppedTotal - base.droppedTotal;
+  // Extract the per-axis thresholds; slim bodies carry no
+  // appliedFilters object, so we read defensively.
+  const baseFull = (base as FilterReportBodyFull).appliedFilters;
+  const targetFull = (target as FilterReportBodyFull).appliedFilters;
+  // Normalised values are the resolved thresholds the worker
+  // actually applied. We compare on those (the raw input is
+  // operator-controlled and not stable for comparison).
+  const baseMinConf = baseFull && baseFull.minConfidence.applied
+    ? baseFull.minConfidence.normalised
+    : null;
+  const targetMinConf = targetFull && targetFull.minConfidence.applied
+    ? targetFull.minConfidence.normalised
+    : null;
+  const baseSev = baseFull && baseFull.severityThreshold.applied
+    ? baseFull.severityThreshold.normalised
+    : null;
+  const targetSev = targetFull && targetFull.severityThreshold.applied
+    ? targetFull.severityThreshold.normalised
+    : null;
+  const minConfChanged = baseMinConf !== targetMinConf;
+  const sevChanged = baseSev !== targetSev;
+  const hasDelta =
+    appliedChanged ||
+    inputDelta !== 0 ||
+    droppedDelta !== 0 ||
+    minConfChanged ||
+    sevChanged;
+  return {
+    applied: { base: base.applied, target: target.applied, changed: appliedChanged },
+    inputTotal: {
+      base: base.inputTotal,
+      target: target.inputTotal,
+      delta: inputDelta,
+      changed: inputDelta !== 0,
+    },
+    droppedTotal: {
+      base: base.droppedTotal,
+      target: target.droppedTotal,
+      delta: droppedDelta,
+      changed: droppedDelta !== 0,
+    },
+    minConfidence: { base: baseMinConf, target: targetMinConf, changed: minConfChanged },
+    severityThreshold: { base: baseSev, target: targetSev, changed: sevChanged },
+    hasDelta,
+  };
+}
+
+/**
+ * Tick 25: `clawreview review filter-report --diff <baseReviewId> <targetReviewId>`
+ *
+ * Two-review compare mode for the filter-report endpoint. Fetches
+ * both reviews' `/api/reviews/:id/filter-report` bodies and surfaces
+ * the per-field delta (which fields changed, which thresholds
+ * drifted).
+ *
+ * Use case: "did this CI run land with the new min_confidence
+ * threshold compared to the previous green build?" -- a CI dashboard
+ * comparing two runs of the same repo wants to see the filter shape
+ * shift, not (just) the finding counts.
+ *
+ * Exit codes (mirrors `review drift --base/--target` for parity):
+ *   0 -- both reviews fetched, computeFilterReportDelta returned no
+ *        delta (hasDelta=false).
+ *   2 -- config error / fetch failure / shape rejection.
+ *   3 -- delta detected (hasDelta=true). Mirrors the CLI's exit-3-
+ *        on-drift contract so a CI dashboard classifying exit codes
+ *        treats filter-report drift the same as digest drift.
+ *
+ * Output:
+ *   - text (default): banner showing each field's before/after with
+ *     a "changed: yes/no" marker. Visually similar to single-shot's
+ *     banner but with two sides per axis.
+ *   - json: `{ baseId, targetId, delta: FilterReportDelta }` so a
+ *     downstream tool can consume the deltas as structured data.
+ *
+ * Injectable fetcher seam mirrors runReviewDriftCompare so the test
+ * suite can pin every arm without a real network round-trip.
+ */
+export async function runReviewFilterReportDiff(
+  args: ParsedArgs,
+  baseId: string,
+  targetIdPositional: string,
+  injected?: { fetcher?: WatchFetcher },
+): Promise<void> {
+  const config = parseFilterReportDiffConfig({
+    base: baseId,
+    target: targetIdPositional,
+    server: args.flags.server,
+    format: args.flags.format,
+  });
+  if (config.kind !== 'ok') {
+    process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+  const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+
+  // Fetch both /filter-report bodies in parallel -- they're
+  // independent so a serial fetch would be a needless latency penalty
+  // for a CI gate.
+  const baseUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.baseId)}/filter-report`;
+  const targetUrl = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.targetId)}/filter-report`;
+  let baseBody: FilterReportBody;
+  let targetBody: FilterReportBody;
+  try {
+    const [baseRes, targetRes] = await Promise.all([fetcher(baseUrl), fetcher(targetUrl)]);
+    if (!baseRes.ok) {
+      process.stderr.write(
+        `clawreview review filter-report --diff: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    if (!targetRes.ok) {
+      process.stderr.write(
+        `clawreview review filter-report --diff: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const baseText = await baseRes.text();
+    const targetText = await targetRes.text();
+    baseBody = JSON.parse(baseText) as FilterReportBody;
+    targetBody = JSON.parse(targetText) as FilterReportBody;
+  } catch (err) {
+    process.stderr.write(
+      `clawreview review filter-report --diff fetch failed: ${(err as Error).message}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  const delta = computeFilterReportDelta(baseBody, targetBody);
+
+  if (config.format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify({ baseId: config.baseId, targetId: config.targetId, delta }, null, 2)}\n`,
+    );
+  } else {
+    renderFilterReportDeltaText(config.baseId, config.targetId, delta);
+  }
+  // Exit 3 on delta -- mirrors the CLI's exit-3-on-drift contract
+  // so a CI gate can `clawreview review filter-report --diff base
+  // target --server <url>` and gate on the exit code.
+  process.exitCode = delta.hasDelta ? 3 : 0;
+}
+
+/**
+ * Tick 25: text renderer for `review filter-report --diff` output.
+ * Walks each field of the delta and prints a "base -> target" line
+ * with a "changed: yes/no" tag. The format mirrors single-shot's
+ * banner so an operator scanning the output sees a familiar shape
+ * (just with two columns per axis).
+ *
+ * Pure-ish (writes to stdout); pulled out as a free function so the
+ * test surface can stub stdout independently of the runner.
+ */
+function renderFilterReportDeltaText(
+  baseId: string,
+  targetId: string,
+  delta: FilterReportDelta,
+): void {
+  process.stdout.write(`${kleur.bold('filter-report diff')}\n`);
+  process.stdout.write(`  ${kleur.bold('base')}:   ${baseId}\n`);
+  process.stdout.write(`  ${kleur.bold('target')}: ${targetId}\n`);
+  process.stdout.write('\n');
+  const tag = (changed: boolean): string =>
+    changed ? kleur.yellow('changed') : kleur.gray('unchanged');
+  process.stdout.write(
+    `  ${kleur.bold('applied')}             ${delta.applied.base} -> ${delta.applied.target}   [${tag(delta.applied.changed)}]\n`,
+  );
+  process.stdout.write(
+    `  ${kleur.bold('inputTotal')}          ${delta.inputTotal.base} -> ${delta.inputTotal.target}   ` +
+      `(delta ${formatDelta(delta.inputTotal.delta)})   [${tag(delta.inputTotal.changed)}]\n`,
+  );
+  process.stdout.write(
+    `  ${kleur.bold('droppedTotal')}        ${delta.droppedTotal.base} -> ${delta.droppedTotal.target}   ` +
+      `(delta ${formatDelta(delta.droppedTotal.delta)})   [${tag(delta.droppedTotal.changed)}]\n`,
+  );
+  process.stdout.write(
+    `  ${kleur.bold('min_confidence')}      ${delta.minConfidence.base ?? '-'} -> ${delta.minConfidence.target ?? '-'}   [${tag(delta.minConfidence.changed)}]\n`,
+  );
+  process.stdout.write(
+    `  ${kleur.bold('severity_threshold')}  ${delta.severityThreshold.base ?? '-'} -> ${delta.severityThreshold.target ?? '-'}   [${tag(delta.severityThreshold.changed)}]\n`,
+  );
+  process.stdout.write('\n');
+  process.stdout.write(
+    `  ${kleur.bold('hasDelta')}            ${delta.hasDelta ? kleur.yellow('yes') : kleur.gray('no')}\n`,
+  );
 }
 
 /**
