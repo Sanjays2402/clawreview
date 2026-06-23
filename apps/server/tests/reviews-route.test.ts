@@ -1581,6 +1581,185 @@ describe('reviews and stats routes', () => {
           expect(countSeries(await metricsText(), 'yes', 'no')).toBe(2);
         });
       });
+
+      // Tick 21: ?normalisedEcho=true opts the consumer into a
+      // second echo of the CLAMPED / NORMALISED filter values
+      // alongside the raw ones. Use case: a dashboard wants to
+      // render "showing findings with confidence >= 1 (clamped
+      // from 1.5)" without re-running the digest's normaliser in
+      // the browser. Default is OFF for back-compat (the tick-20
+      // response shape is unchanged).
+      describe('?normalisedEcho=true filter normalisation echo (tick 21)', () => {
+        async function seedReview(prNumber: number) {
+          const store = getReviewStore();
+          const r = await store.start({
+            installationId: 32, owner: 'o', repo: 'r', prNumber,
+            headSha: `h${prNumber}`, baseSha: `b${prNumber}`,
+          });
+          const findings = [
+            { agent: 'sec', category: 'security' as const, severity: 'high' as const, title: 'A', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+          ];
+          const { findingDigest } = await import('@clawreview/aggregator');
+          const digest = findingDigest(findings, { topAgents: 8, topCategories: 8, hotspots: true });
+          await store.complete(
+            r.id,
+            {
+              pullRequest: { owner: 'o', repo: 'r', number: prNumber, headSha: `h${prNumber}`, baseSha: `b${prNumber}` },
+              status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+              agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+            },
+            findings, { digest },
+          );
+          return r;
+        }
+
+        it('absent ?normalisedEcho: response shape unchanged (back-compat)', async () => {
+          const r = await seedReview(400);
+          const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/digest?minConfidence=0.5` });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          // Raw filter echo from tick 20 still present.
+          expect(body.minConfidence).toBe(0.5);
+          // Normalised fields ABSENT on the default path so a tick-20
+          // consumer that doesn't know about them sees no diff.
+          expect(body.normalisedMinConfidence).toBeUndefined();
+          expect(body.normalisedSeverityThreshold).toBeUndefined();
+        });
+
+        it('?normalisedEcho=true surfaces normalisedMinConfidence + normalisedSeverityThreshold', async () => {
+          const r = await seedReview(401);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?minConfidence=0.5&severityThreshold=high&normalisedEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          // Verbatim (raw) echoes still present.
+          expect(body.minConfidence).toBe(0.5);
+          expect(body.severityThreshold).toBe('high');
+          // Normalised echoes carry the digest-consumed values.
+          expect(body.normalisedMinConfidence).toBe(0.5);
+          expect(body.normalisedSeverityThreshold).toBe('high');
+        });
+
+        it('?normalisedEcho=true with out-of-range raw clamps to 1 in normalised echo', async () => {
+          // The headline use case from the roadmap: ?minConfidence=1.5
+          // echoes raw=1.5 + normalised=1, so a dashboard can render
+          // "confidence >= 1 (clamped from 1.5)" as its panel header.
+          const r = await seedReview(402);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?minConfidence=1.5&normalisedEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.minConfidence).toBe(1.5); // raw echo: as-supplied
+          expect(body.normalisedMinConfidence).toBe(1); // clamped to [0, 1]
+        });
+
+        it('?normalisedEcho=true with mis-cased severityThreshold echoes raw + normalised=null', async () => {
+          // A typo'd severityThreshold normalises to null (no filter)
+          // and the normalised echo surfaces that explicitly so a
+          // dashboard can render "your severityThreshold was ignored
+          // (unknown literal)" rather than silently no-op'ing.
+          const r = await seedReview(403);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?severityThreshold=Critical&normalisedEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.severityThreshold).toBe('Critical'); // raw verbatim
+          expect(body.normalisedSeverityThreshold).toBeNull(); // ignored
+        });
+
+        it('?normalisedEcho=1 / yes / TRUE all opt in (boolean sugar)', async () => {
+          const r = await seedReview(404);
+          for (const v of ['1', 'yes', 'TRUE', 'True']) {
+            const res = await app.inject({
+              method: 'GET',
+              url: `/api/reviews/${r.id}/digest?minConfidence=0.3&normalisedEcho=${encodeURIComponent(v)}`,
+            });
+            expect(res.statusCode).toBe(200);
+            expect(res.json().normalisedMinConfidence).toBe(0.3);
+          }
+        });
+
+        it('?normalisedEcho=false / 0 / no leave the response shape unchanged', async () => {
+          const r = await seedReview(405);
+          for (const v of ['false', '0', 'no', 'False', 'NO']) {
+            const res = await app.inject({
+              method: 'GET',
+              url: `/api/reviews/${r.id}/digest?minConfidence=0.3&normalisedEcho=${encodeURIComponent(v)}`,
+            });
+            expect(res.statusCode).toBe(200);
+            expect(res.json().normalisedMinConfidence).toBeUndefined();
+          }
+        });
+
+        it('?normalisedEcho=true on cached arm echoes resolved-as-if-applied values', async () => {
+          // The cached arm doesn't run the filter, but the normaliser
+          // is pure so we can still surface "what WOULD the clamped
+          // value be?" -- useful when a dashboard wants to show the
+          // operator's intent alongside the cached result.
+          const r = await seedReview(406);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?recompute=cached&minConfidence=1.5&normalisedEcho=true`,
+          });
+          expect(res.statusCode).toBe(200);
+          const body = res.json();
+          expect(body.recompute).toBe('cached');
+          expect(body.fresh).toBeNull();
+          // Persisted unchanged on the cached arm.
+          expect(body.persisted).not.toBeNull();
+          // Normalised echo still present and clamped.
+          expect(body.minConfidence).toBe(1.5);
+          expect(body.normalisedMinConfidence).toBe(1);
+        });
+
+        it('?normalisedEcho=garbage falls back to false (forgiving, no 400)', async () => {
+          // Matches the route's overall "don't 400 the whole panel
+          // because of a dashboard typo" stance. A consumer that
+          // wanted strict validation can check for the absence of
+          // normalisedMinConfidence in the response body.
+          const r = await seedReview(407);
+          const res = await app.inject({
+            method: 'GET',
+            url: `/api/reviews/${r.id}/digest?minConfidence=0.5&normalisedEcho=true!`,
+          });
+          expect(res.statusCode).toBe(200);
+          expect(res.json().normalisedMinConfidence).toBeUndefined();
+        });
+
+        describe('parseNormalisedEchoFlag pure helper', () => {
+          it('returns false for undefined / empty / whitespace', async () => {
+            const { parseNormalisedEchoFlag } = await import('../src/routes/reviews.js');
+            expect(parseNormalisedEchoFlag(undefined)).toBe(false);
+            expect(parseNormalisedEchoFlag('')).toBe(false);
+            expect(parseNormalisedEchoFlag('   ')).toBe(false);
+          });
+          it('returns true for truthy boolean sugar (case-insensitive)', async () => {
+            const { parseNormalisedEchoFlag } = await import('../src/routes/reviews.js');
+            for (const v of ['true', 'True', 'TRUE', '1', 'yes', 'Yes', 'YES']) {
+              expect(parseNormalisedEchoFlag(v)).toBe(true);
+            }
+          });
+          it('returns false for falsey boolean sugar (case-insensitive)', async () => {
+            const { parseNormalisedEchoFlag } = await import('../src/routes/reviews.js');
+            for (const v of ['false', 'False', 'FALSE', '0', 'no', 'No', 'NO']) {
+              expect(parseNormalisedEchoFlag(v)).toBe(false);
+            }
+          });
+          it('returns false for unknown values (forgiving, no throw)', async () => {
+            const { parseNormalisedEchoFlag } = await import('../src/routes/reviews.js');
+            expect(parseNormalisedEchoFlag('garbage')).toBe(false);
+            expect(parseNormalisedEchoFlag('truthy')).toBe(false);
+            expect(parseNormalisedEchoFlag('null')).toBe(false);
+            expect(parseNormalisedEchoFlag('123')).toBe(false);
+          });
+        });
+      });
     });
   });
 

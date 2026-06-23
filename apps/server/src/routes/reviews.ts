@@ -5,6 +5,8 @@ import {
   computeDigestDrift,
   findingDigest,
   findingDigestWithFilterReport,
+  normaliseDigestMinConfidence,
+  normaliseDigestSeverityThreshold,
   toSarif,
   toJUnitXml,
   toCsv,
@@ -169,6 +171,24 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         // so a CI gate can detect the typo.
         minConfidence: z.string().optional(),
         severityThreshold: z.string().optional(),
+        // Tick 21: opt-in echo of the NORMALISED filter values
+        // alongside the raw operator-supplied ones. By default the
+        // route echoes the raw values verbatim (back-compat) so a
+        // CI gate can detect a typo by comparing what was sent vs
+        // what was echoed. The normalised echo is the dashboard's
+        // need: render a "showing findings with confidence >= 1
+        // (clamped from 1.5)" panel header without re-running the
+        // digest's clamping logic in the browser.
+        //
+        // When set to a truthy value (case-insensitive 'true' / '1'
+        // / 'yes'), the response gains two fields:
+        //   - normalisedMinConfidence: number  (clamped value used)
+        //   - normalisedSeverityThreshold: Severity | null
+        //     (null when the raw value was unrecognised / absent)
+        //
+        // When absent / falsey / 'false' / '0' / 'no', the response
+        // shape is unchanged from tick 20.
+        normalisedEcho: z.string().optional(),
       })
       .safeParse(req.query ?? {});
     if (!queryParse.success) {
@@ -194,6 +214,16 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
     const minConfidence =
       rawMinConfidence === undefined ? undefined : Number(rawMinConfidence);
     const severityThreshold = rawSeverityThreshold as Severity | undefined;
+    // Tick 21: ?normalisedEcho=true|1|yes opts the consumer into a
+    // second echo of the NORMALISED filter values alongside the raw
+    // ones. Useful for dashboards that want to render "showing
+    // findings with confidence >= 1 (clamped from 1.5)" without
+    // re-running the digest's normaliser in the browser. Default
+    // (absent / 'false' / '0' / 'no') leaves the response shape
+    // unchanged from tick 20 for back-compat. We use the dedicated
+    // parseNormalisedEchoFlag helper so the same parsing contract
+    // is shared with the test surface.
+    const normalisedEcho = parseNormalisedEchoFlag(queryParse.data.normalisedEcho);
     // Resolve the field set to strip. 'none' -> empty set (no
     // stripping); 'all' -> all four heavy fields; 'fields' -> the
     // explicit user-supplied subset.
@@ -254,6 +284,20 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         minConfidence: minConfidence === undefined ? null : minConfidence,
         severityThreshold:
           rawSeverityThreshold === undefined ? null : rawSeverityThreshold,
+        // Tick 21: opt-in normalised echo. On the cached arm these
+        // are STILL the resolved-as-if-applied values (the digest's
+        // normaliser is pure -- it gives the same answer regardless
+        // of whether the digest actually consumed them). Useful when
+        // a dashboard wants to render "the operator asked for
+        // confidence >= 1.5; we'd clamp to 1 if you used fresh
+        // mode" alongside the cached result.
+        ...(normalisedEcho
+          ? {
+              normalisedMinConfidence: normaliseDigestMinConfidence(minConfidence),
+              normalisedSeverityThreshold:
+                normaliseDigestSeverityThreshold(rawSeverityThreshold),
+            }
+          : {}),
       };
     }
     // Match the worker's tick-12 / tick-13 cap choices so a dashboard
@@ -344,6 +388,20 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       minConfidence: minConfidence === undefined ? null : minConfidence,
       severityThreshold:
         rawSeverityThreshold === undefined ? null : rawSeverityThreshold,
+      // Tick 21: opt-in normalised echo. When ?normalisedEcho=true,
+      // the response carries the clamped / normalised values
+      // alongside the raw ones. A dashboard can render "showing
+      // findings with confidence >= 1 (clamped from 1.5)" without
+      // re-running the digest's normaliser. On the fresh arm these
+      // are the values the digest ACTUALLY used. We re-derive via
+      // the same exported normalisers the digest itself calls so
+      // there's exactly one source of truth.
+      ...(normalisedEcho
+        ? {
+            normalisedMinConfidence: filterReport.appliedFilters.minConfidence.normalised,
+            normalisedSeverityThreshold: filterReport.appliedFilters.severityThreshold.normalised,
+          }
+        : {}),
     };
   });
 
@@ -877,4 +935,36 @@ export function slimDigestFields<T extends Record<string, unknown>>(
     out[k] = v;
   }
   return out;
+}
+
+/**
+ * Tick 21: parse the `?normalisedEcho=<value>` query parameter into
+ * a boolean opt-in for the normalised-filter echo on
+ * /api/reviews/:id/digest.
+ *
+ * Accepted shapes (case-insensitive on the truthy side; mirrors the
+ * boolean sugar that `parseSlimDirective` accepts so a dashboard
+ * pipeline doesn't have to learn two parsing rules for the same
+ * route):
+ *
+ *   - undefined / '' / 'false' / '0' / 'no'  -> false (default)
+ *   - 'true' / '1' / 'yes'                   -> true
+ *   - anything else                          -> false (forgiving)
+ *
+ * Forgiving rather than rejecting because the route's filter-echo
+ * arms (`minConfidence`, `severityThreshold`) are themselves
+ * forgiving on typos -- accepting a typo'd `?normalisedEcho=true!`
+ * as false matches the route's overall "don't 400 the whole panel
+ * because of a dashboard typo" stance. A consumer that wanted strict
+ * validation can spot the failure by checking that
+ * `normalisedMinConfidence` is absent from the response body.
+ *
+ * Pure / exported so the test surface can pin every arm without
+ * driving the Fastify route.
+ */
+export function parseNormalisedEchoFlag(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed.length === 0) return false;
+  return trimmed === 'true' || trimmed === '1' || trimmed === 'yes';
 }
