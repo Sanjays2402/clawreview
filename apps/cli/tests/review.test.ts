@@ -4002,5 +4002,315 @@ describe('clawreview review filter-report --diff --json-stream (tick 26)', () =>
   });
 });
 
+// Tick 26: `clawreview review filter-report --diff --on-delta <cmd>` +
+// `--on-delta-template slack|webhook` hook fires when computeFilterReportDelta
+// surfaces a non-empty delta. Mirror of --on-applied-change for the
+// diff command surface.
+describe('clawreview review filter-report --diff --on-delta hook (tick 26)', () => {
+  async function runDiffWithHook(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+    onDeltaExecer: (cmd: string, payload: string) => Promise<{ exitCode: number | null; stderr: string }>,
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_target_h'],
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher, onDeltaExecer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('fires --on-delta exactly once when delta detected (payload carries baseId/targetId/delta)', async () => {
+    const calls: Array<{ cmd: string; payload: string }> = [];
+    const execer = async (cmd: string, payload: string) => {
+      calls.push({ cmd, payload });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook.example',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+    );
+    expect(r.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.cmd).toBe('curl -X POST https://hook.example');
+    const payload = JSON.parse(calls[0]!.payload);
+    expect(payload.baseId).toBe('rv_base_h');
+    expect(payload.targetId).toBe('rv_target_h');
+    expect(payload.delta.hasDelta).toBe(true);
+    expect(payload.delta.inputTotal.delta).toBe(5);
+  });
+
+  it('does NOT fire --on-delta when bodies are identical (no-delta = no notify)', async () => {
+    const calls: Array<{ cmd: string; payload: string }> = [];
+    const execer = async (cmd: string, payload: string) => {
+      calls.push({ cmd, payload });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook.example',
+      },
+      { base: makeBody(), target: makeBody() },
+      execer,
+    );
+    expect(r.exitCode).toBe(0);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('hook non-zero exit surfaces on stderr but does NOT change the diff exit code', async () => {
+    const execer = async () => ({ exitCode: 7, stderr: 'webhook down' });
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://broken',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+    );
+    // Diff itself succeeded -> exit 3 (delta detected).
+    expect(r.exitCode).toBe(3);
+    // Hook failure surfaced.
+    expect(r.stderr).toContain('--on-delta exited 7');
+    expect(r.stderr).toContain('webhook down');
+  });
+
+  it('hook executor throwing surfaces on stderr but does NOT crash the diff', async () => {
+    const execer = async () => {
+      throw new Error('ENOENT: spawn curl');
+    };
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl -X POST https://x',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('--on-delta failed');
+    expect(r.stderr).toContain('ENOENT');
+  });
+
+  it('--on-delta + --on-delta-template rejects 2 (mutex)', async () => {
+    const execer = async () => ({ exitCode: 0, stderr: '' });
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl ...',
+        'on-delta-template': 'slack',
+      },
+      { base: makeBody(), target: makeBody() },
+      execer,
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+  });
+
+  it('--on-delta empty string rejects 2 (typo guard)', async () => {
+    const execer = async () => ({ exitCode: 0, stderr: '' });
+    const r = await runDiffWithHook(
+      {
+        diff: 'rv_base_h',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': '   ',
+      },
+      { base: makeBody(), target: makeBody() },
+      execer,
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('non-empty command');
+  });
+
+  it('--on-delta-template slack expands using SLACK_DELTA_WEBHOOK_URL (primary)', async () => {
+    const orig = { ...process.env };
+    process.env.SLACK_DELTA_WEBHOOK_URL = 'https://hooks.slack.com/services/T/B/X';
+    delete process.env.SLACK_WEBHOOK_URL;
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    try {
+      const r = await runDiffWithHook(
+        {
+          diff: 'rv_base_h',
+          server: 'http://x',
+          format: 'json',
+          'on-delta-template': 'slack',
+        },
+        { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+        execer,
+      );
+      expect(r.exitCode).toBe(3);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.cmd).toContain('curl');
+      expect(calls[0]!.cmd).toContain('https://hooks.slack.com/services/T/B/X');
+      expect(calls[0]!.cmd).toContain('Content-Type: application/json');
+    } finally {
+      process.env = orig;
+    }
+  });
+
+  it('--on-delta-template falls back from primary to shared env var (SLACK_WEBHOOK_URL)', async () => {
+    const orig = { ...process.env };
+    delete process.env.SLACK_DELTA_WEBHOOK_URL;
+    process.env.SLACK_WEBHOOK_URL = 'https://shared.slack.example/hook';
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    try {
+      const r = await runDiffWithHook(
+        {
+          diff: 'rv_base_h',
+          server: 'http://x',
+          format: 'json',
+          'on-delta-template': 'slack',
+        },
+        { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+        execer,
+      );
+      expect(r.exitCode).toBe(3);
+      expect(calls[0]!.cmd).toContain('https://shared.slack.example/hook');
+    } finally {
+      process.env = orig;
+    }
+  });
+
+  it('--on-delta-template slack with no env vars rejects 2 with hint', async () => {
+    const orig = { ...process.env };
+    delete process.env.SLACK_DELTA_WEBHOOK_URL;
+    delete process.env.SLACK_WEBHOOK_URL;
+    const execer = async () => ({ exitCode: 0, stderr: '' });
+    try {
+      const r = await runDiffWithHook(
+        {
+          diff: 'rv_base_h',
+          server: 'http://x',
+          format: 'json',
+          'on-delta-template': 'slack',
+        },
+        { base: makeBody(), target: makeBody() },
+        execer,
+      );
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain('SLACK_DELTA_WEBHOOK_URL');
+      expect(r.stderr).toContain('SLACK_WEBHOOK_URL');
+    } finally {
+      process.env = orig;
+    }
+  });
+
+  it('expandOnDeltaTemplate: pure helper -- slack arm prefers primary over fallback', async () => {
+    const { expandOnDeltaTemplate } = await import('../src/commands/review.js');
+    const r = expandOnDeltaTemplate('slack', {
+      SLACK_DELTA_WEBHOOK_URL: 'https://primary',
+      SLACK_WEBHOOK_URL: 'https://fallback',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') {
+      expect(r.command).toContain('https://primary');
+    }
+  });
+
+  it('expandOnDeltaTemplate: webhook arm with neither env var rejects with hint', async () => {
+    const { expandOnDeltaTemplate } = await import('../src/commands/review.js');
+    const r = expandOnDeltaTemplate('webhook', {});
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain('WEBHOOK_DELTA_URL');
+      expect(r.message).toContain('WEBHOOK_URL');
+    }
+  });
+
+  it('expandOnDeltaTemplate: unknown name rejects with enumerated list', async () => {
+    const { expandOnDeltaTemplate, ON_DELTA_TEMPLATES } = await import('../src/commands/review.js');
+    const r = expandOnDeltaTemplate('discord', { SLACK_WEBHOOK_URL: 'x' });
+    expect(r.kind).toBe('invalid');
+    if (r.kind === 'invalid') {
+      expect(r.message).toContain('discord');
+      expect(r.message).toContain(ON_DELTA_TEMPLATES.join(', '));
+    }
+  });
+
+  it('parseOnDeltaFlags: absent when neither flag set', async () => {
+    const { parseOnDeltaFlags } = await import('../src/commands/review.js');
+    expect(parseOnDeltaFlags({}, {}).kind).toBe('absent');
+  });
+
+  it('ON_DELTA_TEMPLATES is the closed tuple [slack, webhook]', async () => {
+    const { ON_DELTA_TEMPLATES } = await import('../src/commands/review.js');
+    expect(ON_DELTA_TEMPLATES).toEqual(['slack', 'webhook']);
+  });
+});
+
 
 

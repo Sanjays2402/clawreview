@@ -2493,6 +2493,160 @@ export function renderFilterReportDiffJsonStream(
 }
 
 /**
+ * Tick 26: Closed set of `--on-delta-template` template names for
+ * `review filter-report --diff`. Mirrors ON_DRIFT_TEMPLATES /
+ * ON_RECOVER_TEMPLATES / ON_REGRESSION_TEMPLATES / ON_APPLIED_TEMPLATES
+ * so an operator's mental model carries across all five hook surfaces
+ * (drift, recover, regression, applied-change, delta).
+ *
+ * Re-exported as its own tuple so a future divergence (e.g. one
+ * "delta-on-axis-X-only" template that filters on which axis flipped)
+ * can land without disturbing the other hook surfaces.
+ */
+export const ON_DELTA_TEMPLATES = ['slack', 'webhook'] as const;
+export type OnDeltaTemplate = (typeof ON_DELTA_TEMPLATES)[number];
+
+/**
+ * Tick 26: outcome of expanding `--on-delta-template <name>`.
+ * Identical shape to OnAppliedTemplateExpansion / OnDriftTemplateExpansion.
+ */
+export type OnDeltaTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Tick 26: expand a named `--on-delta-template` into the curl command
+ * the diff command will exec when computeFilterReportDelta surfaces
+ * a non-empty delta.
+ *
+ * Env-var fallback ladder (mirrors expandOnAppliedTemplate /
+ * expandOnRecoverTemplate / expandOnRegressionTemplate's primary->
+ * shared pattern):
+ *   - `slack`   -> $SLACK_DELTA_WEBHOOK_URL, falling back to
+ *                  $SLACK_WEBHOOK_URL. Operators with one Slack
+ *                  channel for all hook events don't need to
+ *                  duplicate the URL into a fifth env var.
+ *   - `webhook` -> $WEBHOOK_DELTA_URL, falling back to $WEBHOOK_URL.
+ *                  Same logic.
+ *
+ * Pure: takes the `env` map as an argument so tests can drive every
+ * arm without mutating `process.env`.
+ */
+export function expandOnDeltaTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): OnDeltaTemplateExpansion {
+  const lower = name.toLowerCase();
+  let primaryVar: string;
+  let fallbackVar: string;
+  switch (lower) {
+    case 'slack':
+      primaryVar = 'SLACK_DELTA_WEBHOOK_URL';
+      fallbackVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      primaryVar = 'WEBHOOK_DELTA_URL';
+      fallbackVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-delta-template '${name}'; valid: ${ON_DELTA_TEMPLATES.join(', ')}`,
+      };
+  }
+  const primary = (env[primaryVar] ?? '').trim();
+  const fallback = (env[fallbackVar] ?? '').trim();
+  const url = primary.length > 0 ? primary : fallback;
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-delta-template ${lower} requires \$${primaryVar} ` +
+        `(or \$${fallbackVar} as fallback) -- set one before running the diff command`,
+    };
+  }
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
+}
+
+/**
+ * Tick 26: parse `--on-delta <cmd>` / `--on-delta-template <name>` flags
+ * for `review filter-report --diff` into a resolved command string (or
+ * a sentinel error).
+ *
+ * Mutually exclusive: both flags together rejects loudly because the
+ * resolution would be ambiguous (does the template take precedence
+ * over the literal command?). The mutex check fires before env-var
+ * expansion so an operator who set BOTH gets a clear "pick one" hint
+ * instead of an env-var-missing error.
+ *
+ * Returns:
+ *   - `{ kind: 'absent' }`   -- neither flag set; hook is opt-out.
+ *   - `{ kind: 'ok', command }` -- resolved curl/shell command.
+ *   - `{ kind: 'invalid', message }` -- mutex hit / typo / missing env var.
+ *
+ * Pure: env injected for testability.
+ */
+export type OnDeltaFlagsResult =
+  | { kind: 'absent' }
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+export function parseOnDeltaFlags(
+  flags: { 'on-delta'?: unknown; 'on-delta-template'?: unknown },
+  env: NodeJS.ProcessEnv,
+): OnDeltaFlagsResult {
+  const hasCmd = flags['on-delta'] !== undefined;
+  const hasTemplate = flags['on-delta-template'] !== undefined;
+  if (hasCmd && hasTemplate) {
+    return {
+      kind: 'invalid',
+      message:
+        '--on-delta and --on-delta-template are mutually exclusive ' +
+        '(pick one: the literal command or a named template)',
+    };
+  }
+  if (hasCmd) {
+    if (typeof flags['on-delta'] !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-delta must be a command string; got ${typeof flags['on-delta']}`,
+      };
+    }
+    const trimmed = flags['on-delta'].trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `--on-delta requires a non-empty command (e.g. --on-delta 'curl -X POST https://...')`,
+      };
+    }
+    return { kind: 'ok', command: trimmed };
+  }
+  if (hasTemplate) {
+    if (typeof flags['on-delta-template'] !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-delta-template must be a template name; got ${typeof flags['on-delta-template']}`,
+      };
+    }
+    const name = flags['on-delta-template'].trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid',
+        message: '--on-delta-template requires a template name (one of: slack, webhook)',
+      };
+    }
+    const expanded = expandOnDeltaTemplate(name, env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid', message: expanded.message };
+    }
+    return { kind: 'ok', command: expanded.command };
+  }
+  return { kind: 'absent' };
+}
+
+/**
  * Tick 25: `clawreview review filter-report --diff <baseReviewId> <targetReviewId>`
  *
  * Two-review compare mode for the filter-report endpoint. Fetches
@@ -2527,7 +2681,18 @@ export async function runReviewFilterReportDiff(
   args: ParsedArgs,
   baseId: string,
   targetIdPositional: string,
-  injected?: { fetcher?: WatchFetcher; metrics?: MetricsBundle },
+  injected?: {
+    fetcher?: WatchFetcher;
+    metrics?: MetricsBundle;
+    /**
+     * Tick 26: hook executor for --on-delta / --on-delta-template.
+     * Reuses the WatchOnDriftExecer shape from runReviewDriftWatch
+     * (same shell-exec contract, same stdin-pipe semantics) so a
+     * CI pipeline can reuse hooks across watch and compare modes.
+     * Tests inject a stub that records invocations.
+     */
+    onDeltaExecer?: WatchOnDriftExecer;
+  },
 ): Promise<void> {
   // Tick 26: start the per-invocation clock at the top so the
   // duration histogram captures the FULL invocation, including
@@ -2577,6 +2742,26 @@ export async function runReviewFilterReportDiff(
     fireExit(false, null);
     return;
   }
+  // Tick 26: parse --on-delta / --on-delta-template flags BEFORE the
+  // network round-trip. A typo in the flag should surface immediately
+  // (exit 2) rather than after a successful HTTP fetch -- both for
+  // CI signal speed and because a misconfigured webhook is a real
+  // operator error worth flagging.
+  const onDeltaParse = parseOnDeltaFlags(
+    {
+      'on-delta': args.flags['on-delta'],
+      'on-delta-template': args.flags['on-delta-template'],
+    },
+    process.env,
+  );
+  if (onDeltaParse.kind === 'invalid') {
+    process.stderr.write(`clawreview review filter-report --diff: ${onDeltaParse.message}\n`);
+    process.exitCode = 2;
+    fireExit(false, null);
+    return;
+  }
+  const onDeltaCommand = onDeltaParse.kind === 'ok' ? onDeltaParse.command : null;
+  const onDeltaExecer = injected?.onDeltaExecer ?? defaultWatchOnDriftExecer;
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
@@ -2698,6 +2883,42 @@ export async function runReviewFilterReportDiff(
   // so a CI gate can `clawreview review filter-report --diff base
   // target --server <url>` and gate on the exit code.
   process.exitCode = delta.hasDelta ? 3 : 0;
+  // Tick 26: --on-delta hook fires AFTER rendering AND exit-code
+  // assignment so a CI consumer reading stdout / the exit code sees
+  // the same state the hook saw. Fires only when delta.hasDelta is
+  // true -- a "no-delta" invocation doesn't notify (matches the
+  // exit-3 contract: the hook is the "something changed" signal,
+  // not a heartbeat).
+  //
+  // Hook receives a JSON payload mirroring the same shape the
+  // --on-applied-change hook uses (deeply-shaped delta object the
+  // webhook can structure-pattern against without re-parsing):
+  //   { baseId, targetId, delta }
+  //
+  // Failures surface on stderr but DON'T change the exit code -- the
+  // operator wired the hook for notification, a misconfigured webhook
+  // shouldn't promote the diff command's exit from 3 to 2. The
+  // tick-25 counter still records the (identical | delta) result
+  // because the diff itself succeeded.
+  if (onDeltaCommand !== null && delta.hasDelta) {
+    const payload = JSON.stringify({
+      baseId: config.baseId,
+      targetId: config.targetId,
+      delta,
+    });
+    try {
+      const result = await onDeltaExecer(onDeltaCommand, payload);
+      if (result.exitCode !== 0) {
+        process.stderr.write(
+          `clawreview review filter-report --diff: --on-delta exited ${result.exitCode}: ${result.stderr.trim()}\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(
+        `clawreview review filter-report --diff: --on-delta failed: ${(err as Error).message}\n`,
+      );
+    }
+  }
   // Tick 25: fire the diff counter with the resolved result label
   // (identical | delta). The error arm is fired on each early-return
   // branch above.
