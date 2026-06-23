@@ -1898,6 +1898,300 @@ describe('clawreview review drift --base / --target (tick 22)', () => {
   });
 });
 
+// Tick 23: `--on-regression <cmd>` hook on the compare command.
+// Fires when target has MORE findings than base in at least one
+// bucket (i.e. positive deltas anywhere = regression). Mirrors the
+// watch-mode --on-drift hook contract: shell-exec with JSON payload
+// piped to stdin.
+describe('clawreview review drift --on-regression (tick 23)', () => {
+  /**
+   * Drive runReviewDriftCompare with stub fetcher + stub regression
+   * executor so the suite doesn't shell out. Returns captured
+   * stdout/stderr plus the captured hook invocations.
+   */
+  async function runCompareWithOnRegression(
+    baseFresh: ReturnType<typeof findingDigest>,
+    targetFresh: ReturnType<typeof findingDigest>,
+    flags: Record<string, string | boolean> = {},
+    execerOpts: { exitCode?: number; throwErr?: Error } = {},
+  ): Promise<RunResult & { hookCalls: Array<{ cmd: string; payload: string }> }> {
+    const { runReviewDriftCompare } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const baseBody = JSON.stringify({
+      reviewId: 'rv_base',
+      persisted: baseFresh,
+      fresh: baseFresh,
+      drift: { hasDrift: false, totalDelta: 0, bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 }, byAgentDelta: {}, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {} },
+      recompute: 'fresh',
+    });
+    const targetBody = JSON.stringify({
+      reviewId: 'rv_tgt',
+      persisted: targetFresh,
+      fresh: targetFresh,
+      drift: { hasDrift: false, totalDelta: 0, bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 }, byAgentDelta: {}, byCategoryDelta: {}, byFileDelta: {}, byTagDelta: {} },
+      recompute: 'fresh',
+    });
+    const fetcher = async (url: string) => {
+      const body = url.includes('rv_tgt') ? targetBody : baseBody;
+      return { ok: true, status: 200, text: async () => body };
+    };
+    const hookCalls: Array<{ cmd: string; payload: string }> = [];
+    const onRegressionExecer = async (cmd: string, payload: string) => {
+      hookCalls.push({ cmd, payload });
+      if (execerOpts.throwErr) throw execerOpts.throwErr;
+      return { exitCode: execerOpts.exitCode ?? 0, stderr: '' };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewDriftCompare(
+        {
+          command: 'review',
+          positional: ['drift'],
+          flags: {
+            'no-color': true,
+            server: 'http://localhost',
+            base: 'rv_base',
+            target: 'rv_tgt',
+            ...flags,
+          },
+        },
+        'rv_base',
+        'rv_tgt',
+        { fetcher, onRegressionExecer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return {
+      stdout: stdout.join(''),
+      stderr: stderr.join(''),
+      exitCode: code,
+      hookCalls,
+    };
+  }
+
+  it('fires the hook with a regression payload when target has MORE findings than base in a bucket', async () => {
+    // base: 1 high, 0 medium. target: 1 high, 2 medium (regression!).
+    const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+    const targetFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'medium', file: 'b.ts' }),
+      f({ severity: 'medium', file: 'c.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(baseDig, targetDig, {
+      'on-regression': 'echo regressed',
+    });
+    expect(r.exitCode).toBe(3); // drift detected
+    expect(r.hookCalls).toHaveLength(1);
+    expect(r.hookCalls[0]!.cmd).toBe('echo regressed');
+    // Payload describes the regression slice.
+    const payload = JSON.parse(r.hookCalls[0]!.payload);
+    expect(payload.kind).toBe('regression');
+    expect(payload.baseReviewId).toBe('rv_base');
+    expect(payload.targetReviewId).toBe('rv_tgt');
+    // bySeverity: medium went from 0 -> 2, so the slice has medium=2.
+    expect(payload.bySeverityRegression.medium).toBe(2);
+    // No high delta (1 vs 1) so high is absent from the slice.
+    expect(payload.bySeverityRegression.high).toBeUndefined();
+    // byFile: b.ts and c.ts are new.
+    expect(payload.byFileRegression['b.ts']).toBe(1);
+    expect(payload.byFileRegression['c.ts']).toBe(1);
+    // totalDelta sums the severity axis (2 new findings).
+    expect(payload.totalDelta).toBe(2);
+  });
+
+  it('does NOT fire the hook when target has FEWER findings (bug fix - negative deltas only)', async () => {
+    // base: 3 findings. target: 1 finding (bug fix cleared 2).
+    const baseFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'high', file: 'b.ts' }),
+      f({ severity: 'medium', file: 'c.ts' }),
+    ];
+    const targetFindings = [f({ severity: 'medium', file: 'c.ts' })];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(baseDig, targetDig, {
+      'on-regression': 'echo would-fire-if-regressed',
+    });
+    expect(r.exitCode).toBe(3); // drift still detected
+    // Hook NOT fired because every per-bucket delta is <= 0.
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('does NOT fire the hook when there is no drift at all', async () => {
+    const findings = [f({ severity: 'high', file: 'a.ts' })];
+    const dig = findingDigest(findings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(dig, dig, {
+      'on-regression': 'echo would-fire',
+    });
+    expect(r.exitCode).toBe(0);
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('fires the hook even on mixed deltas (regression in one file + fix in another)', async () => {
+    // base: 1 high in a.ts, 1 medium in b.ts.
+    // target: 1 high in a.ts (unchanged), 0 medium in b.ts (fixed!), 1 NEW low in c.ts.
+    // -> mixed: c.ts is a regression (positive delta), b.ts is a fix (negative).
+    // Hook should fire because there IS a positive delta in the byFile axis.
+    const baseFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'medium', file: 'b.ts' }),
+    ];
+    const targetFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'low', file: 'c.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(baseDig, targetDig, {
+      'on-regression': 'echo regressed-on-mix',
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.hookCalls).toHaveLength(1);
+    const payload = JSON.parse(r.hookCalls[0]!.payload);
+    // c.ts is the regression file; b.ts (-1) is omitted from the slice.
+    expect(payload.byFileRegression['c.ts']).toBe(1);
+    expect(payload.byFileRegression['b.ts']).toBeUndefined();
+    // bySeverity: low went 0 -> 1 (regression); medium went 1 -> 0 (omitted).
+    expect(payload.bySeverityRegression.low).toBe(1);
+    expect(payload.bySeverityRegression.medium).toBeUndefined();
+  });
+
+  it('does NOT fire when --on-regression flag is absent (default back-compat)', async () => {
+    const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+    const targetFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'medium', file: 'b.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(baseDig, targetDig, {
+      // no --on-regression
+    });
+    expect(r.exitCode).toBe(3);
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('rejects empty --on-regression with exit 2 (typo guard)', async () => {
+    const dig = findingDigest([f({ severity: 'high' })] as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(dig, dig, {
+      'on-regression': '',
+    });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--on-regression');
+    expect(r.hookCalls).toHaveLength(0);
+  });
+
+  it('surfaces hook non-zero exit on stderr but does NOT change compare exit code', async () => {
+    const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+    const targetFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'medium', file: 'b.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(
+      baseDig, targetDig,
+      { 'on-regression': 'broken-cmd' },
+      { exitCode: 17 },
+    );
+    expect(r.exitCode).toBe(3); // drift exit code preserved
+    expect(r.stderr).toContain('--on-regression hook exited 17');
+    expect(r.hookCalls).toHaveLength(1);
+  });
+
+  it('surfaces hook throw on stderr but does NOT change compare exit code', async () => {
+    const baseFindings = [f({ severity: 'high', file: 'a.ts' })];
+    const targetFindings = [
+      f({ severity: 'high', file: 'a.ts' }),
+      f({ severity: 'medium', file: 'b.ts' }),
+    ];
+    const baseDig = findingDigest(baseFindings as never, { topAgents: 8, topCategories: 8 });
+    const targetDig = findingDigest(targetFindings as never, { topAgents: 8, topCategories: 8 });
+    const r = await runCompareWithOnRegression(
+      baseDig, targetDig,
+      { 'on-regression': 'broken-cmd' },
+      { throwErr: new Error('ENOENT: cmd not found') },
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('--on-regression hook threw');
+    expect(r.stderr).toContain('ENOENT');
+  });
+
+  // Pure helper coverage so the regression slice predicate has a
+  // regression pin independent of the wire / fetch / shell paths.
+  describe('computeRegressionSlice (pure)', () => {
+    it('returns null when no bucket has a positive delta', async () => {
+      const { computeRegressionSlice } = await import('../src/commands/review.js');
+      const drift = {
+        totalDelta: -5, hasDrift: true,
+        bySeverityDelta: { critical: 0, high: -2, medium: -3, low: 0, nit: 0 },
+        byAgentDelta: { security: -5 },
+        byCategoryDelta: { security: -5 },
+        byFileDelta: { 'a.ts': -5 },
+        byTagDelta: {},
+      };
+      expect(computeRegressionSlice(drift as never)).toBeNull();
+    });
+
+    it('returns a slice with positive bucket deltas only when at least one is > 0', async () => {
+      const { computeRegressionSlice } = await import('../src/commands/review.js');
+      const drift = {
+        totalDelta: 3, hasDrift: true,
+        bySeverityDelta: { critical: 1, high: 0, medium: 2, low: -1, nit: 0 },
+        byAgentDelta: { security: 3, style: -1 },
+        byCategoryDelta: { security: 3 },
+        byFileDelta: { 'a.ts': 2, 'b.ts': -1, 'c.ts': 1 },
+        byTagDelta: { 'owasp:a01': 2 },
+      };
+      const slice = computeRegressionSlice(drift as never);
+      expect(slice).not.toBeNull();
+      expect(slice!.totalDelta).toBe(3); // sum of severity axis (1 + 2)
+      // Negative entries omitted; zeros omitted.
+      expect(slice!.bySeverityRegression).toEqual({ critical: 1, medium: 2 });
+      expect(slice!.byAgentRegression).toEqual({ security: 3 });
+      expect(slice!.byFileRegression).toEqual({ 'a.ts': 2, 'c.ts': 1 });
+      expect(slice!.byFileRegression['b.ts']).toBeUndefined();
+      expect(slice!.byTagRegression).toEqual({ 'owasp:a01': 2 });
+    });
+
+    it('returns a slice when only one non-severity axis has a positive delta', async () => {
+      // Edge case: a regression where a single new tag appeared but
+      // severity counts net out. Slice should still trigger.
+      const { computeRegressionSlice } = await import('../src/commands/review.js');
+      const drift = {
+        totalDelta: 0, hasDrift: true,
+        bySeverityDelta: { critical: 0, high: 0, medium: 0, low: 0, nit: 0 },
+        byAgentDelta: {},
+        byCategoryDelta: {},
+        byFileDelta: {},
+        byTagDelta: { 'new-tag': 1 },
+      };
+      const slice = computeRegressionSlice(drift as never);
+      expect(slice).not.toBeNull();
+      expect(slice!.totalDelta).toBe(0); // severity sum is 0 here
+      expect(slice!.byTagRegression['new-tag']).toBe(1);
+    });
+  });
+});
 // Tick 23: `clawreview review filter-report <reviewId> --server <url>`
 // Single-shot CLI face of the new /api/reviews/:id/filter-report
 // endpoint. Mirrors the runReviewDriftCompare test pattern: stub

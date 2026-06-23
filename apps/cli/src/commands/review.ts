@@ -1285,7 +1285,16 @@ export async function runReviewDriftCompare(
   // by tests bypassing the runReviewDrift dispatcher.
   baseId: string,
   targetId: string,
-  injected?: { fetcher?: WatchFetcher },
+  injected?: {
+    fetcher?: WatchFetcher;
+    /**
+     * Tick 23: hook executor for --on-regression. Defaults to the
+     * watch-mode WatchOnDriftExecer (same shell-exec contract, same
+     * stdin piping) so a CI pipeline can reuse hooks across watch
+     * and compare modes. Tests inject a stub that records invocations.
+     */
+    onRegressionExecer?: WatchOnDriftExecer;
+  },
 ): Promise<void> {
   // Validate via the pure parser. The early branch already saw at
   // least one of base/target set; the parser now sees both AND
@@ -1301,9 +1310,29 @@ export async function runReviewDriftCompare(
     process.exitCode = 2;
     return;
   }
+  // Tick 23: parse the --on-regression hook flag. Pure parser so a
+  // typo (e.g. --on-regression='') rejects early with exit 2 rather
+  // than firing a no-op hook downstream. Empty / non-string value
+  // means "no hook" (back-compat: existing compare calls don't fire).
+  const onRegressionRaw = args.flags['on-regression'];
+  const onRegression =
+    typeof onRegressionRaw === 'string' && onRegressionRaw.trim().length > 0
+      ? onRegressionRaw.trim()
+      : undefined;
+  if (onRegressionRaw !== undefined && onRegression === undefined) {
+    // Distinguish "flag passed but empty" (user error) from "flag
+    // not passed" (default). The former should reject loudly; the
+    // latter is the happy default.
+    process.stderr.write(
+      `clawreview review drift --on-regression: empty / non-string value (pass a shell command)\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+  const onRegressionExecer = injected?.onRegressionExecer ?? defaultWatchOnDriftExecer;
 
   // Tick 20 filter flags compose: forward them as query knobs on
   // each /digest call so the server applies them symmetrically.
@@ -1411,8 +1440,149 @@ export async function runReviewDriftCompare(
     renderCompareText(config.baseId, config.targetId, baseFresh, targetFresh, drift);
   }
 
+  // Tick 23: --on-regression hook. Fires when the target has MORE
+  // findings than the base in at least one bucket -- i.e. a refactor
+  // / "bug fix" regressed the per-bucket count somewhere. This is
+  // strictly NARROWER than `drift.hasDrift`: a bug-fix that cleared
+  // findings (negative deltas only) fires NO hook even though
+  // hasDrift=true, while a fix that cleared 3 bugs and accidentally
+  // added 1 new one DOES fire (the +1 in some bucket is the
+  // regression signal).
+  //
+  // Use case: a CI pipeline that auto-files a JIRA ticket when a
+  // landed PR added new findings in another file, OR posts a Slack
+  // alert with the regression buckets so the on-call sees what
+  // actually got worse.
+  //
+  // Hook contract mirrors --watch --on-drift exactly: the shell
+  // command receives a JSON payload on stdin describing the
+  // regression slice (per-bucket positive deltas only).
+  //
+  // Payload shape:
+  //   { kind: 'regression',
+  //     baseReviewId, targetReviewId,
+  //     totalDelta,            -- always positive (regression total)
+  //     bySeverityRegression,  -- per-severity positive deltas only
+  //     byAgentRegression,     -- ditto, sparse
+  //     byCategoryRegression,  -- ditto, sparse
+  //     byFileRegression,      -- ditto, sparse
+  //     byTagRegression }      -- ditto, sparse
+  //
+  // The hook is fire-and-await: we wait for the executor to resolve
+  // before returning so an operator on a CI step can rely on the
+  // hook completing before the next step runs. Failures surface on
+  // stderr (matching the watch-mode --on-drift contract) but do NOT
+  // change the compare command's exit code -- the exit code stays
+  // tied to drift.hasDrift so a CI gate that already exits 3 on
+  // drift doesn't get a DIFFERENT exit code on regression.
+  const regressionSlice = computeRegressionSlice(drift);
+  if (onRegression !== undefined && regressionSlice !== null) {
+    const payload = JSON.stringify({
+      kind: 'regression',
+      baseReviewId: config.baseId,
+      targetReviewId: config.targetId,
+      ...regressionSlice,
+    });
+    try {
+      const result = await onRegressionExecer(onRegression, payload);
+      if (result.exitCode !== 0) {
+        process.stderr.write(
+          `clawreview review drift --on-regression hook exited ${result.exitCode}` +
+            (result.stderr ? `: ${result.stderr.trim()}` : '') +
+            '\n',
+        );
+      }
+    } catch (err) {
+      process.stderr.write(
+        `clawreview review drift --on-regression hook threw: ${(err as Error).message}\n`,
+      );
+    }
+  }
+
   // Exit 3 on drift mirrors single-shot's CI gateability contract.
   process.exitCode = drift.hasDrift ? 3 : 0;
+}
+
+/**
+ * Tick 23: extract the "regression slice" from a drift report --
+ * i.e. the subset of per-bucket positive deltas (target has MORE
+ * than base) that constitute a regression.
+ *
+ * Returns null when NO bucket has a positive delta (no regression
+ * to attribute). The caller uses null as the trigger predicate for
+ * the --on-regression hook fire decision.
+ *
+ * Pure: never mutates the input drift; iterates each bucket once.
+ *
+ * Exported so the test surface can pin every arm without driving
+ * the whole compare command pipeline.
+ */
+export interface RegressionSlice {
+  /** Sum of positive deltas across all bucket axes. Always > 0 when slice is non-null. */
+  totalDelta: number;
+  /** Per-severity positive deltas. Sparse: severity keys with delta <= 0 omitted. */
+  bySeverityRegression: Record<string, number>;
+  /** Per-agent positive deltas. Sparse. */
+  byAgentRegression: Record<string, number>;
+  /** Per-category positive deltas. Sparse. */
+  byCategoryRegression: Record<string, number>;
+  /** Per-file positive deltas. Sparse. */
+  byFileRegression: Record<string, number>;
+  /** Per-tag positive deltas. Sparse. */
+  byTagRegression: Record<string, number>;
+}
+
+export function computeRegressionSlice(drift: FindingDigestDrift): RegressionSlice | null {
+  // sumPositives + filterPositive walk each bucket once. Sparse maps
+  // mean keys we omit can never contribute, so the predicate is
+  // "any positive delta anywhere" -- a single bucket value > 0.
+  const bySeverityRegression = filterPositive(drift.bySeverityDelta);
+  const byAgentRegression = filterPositive(drift.byAgentDelta);
+  const byCategoryRegression = filterPositive(
+    drift.byCategoryDelta as Record<string, number>,
+  );
+  const byFileRegression = filterPositive(drift.byFileDelta);
+  const byTagRegression = filterPositive(drift.byTagDelta);
+  // totalDelta on RegressionSlice is the SUM of positive bucket
+  // deltas (not drift.totalDelta itself, which can be negative when
+  // a regression in one file is offset by a fix in another). We
+  // sum the severity axis specifically because each finding lands
+  // in exactly one severity bucket -- the sum equals the number
+  // of NEWLY-ADDED findings on the regressing axes. The other
+  // axes can have overlapping keys (one finding contributes to
+  // a file AND an agent AND a category), so summing them would
+  // double-count.
+  const sevSum = Object.values(bySeverityRegression).reduce((s, n) => s + n, 0);
+  if (
+    sevSum === 0 &&
+    Object.keys(byAgentRegression).length === 0 &&
+    Object.keys(byCategoryRegression).length === 0 &&
+    Object.keys(byFileRegression).length === 0 &&
+    Object.keys(byTagRegression).length === 0
+  ) {
+    return null;
+  }
+  return {
+    totalDelta: sevSum,
+    bySeverityRegression,
+    byAgentRegression,
+    byCategoryRegression,
+    byFileRegression,
+    byTagRegression,
+  };
+}
+
+/**
+ * Internal: walk a sparse string-keyed delta map and return a copy
+ * containing only entries with strictly positive values. Used by
+ * computeRegressionSlice to project the per-bucket regression view.
+ */
+function filterPositive(bucket: Record<string, number>): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(bucket)) {
+    if (v > 0) out[k] = v;
+  }
+  return out;
 }
 
 /**
