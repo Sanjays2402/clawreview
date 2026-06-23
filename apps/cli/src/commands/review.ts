@@ -10,6 +10,7 @@ import {
 import {
   observeReviewDriftWatchPoll,
   observeReviewFilterReportDiff,
+  observeReviewFilterReportDiffDuration,
   type MetricsBundle,
 } from '@clawreview/telemetry';
 import type { Finding, Severity } from '@clawreview/types';
@@ -2347,6 +2348,33 @@ export async function runReviewFilterReportDiff(
   targetIdPositional: string,
   injected?: { fetcher?: WatchFetcher; metrics?: MetricsBundle },
 ): Promise<void> {
+  // Tick 26: start the per-invocation clock at the top so the
+  // duration histogram captures the FULL invocation, including
+  // config parse / fetch / compute. Same `result` label as the
+  // tick-25 counter so a PromQL join-on-result lines up cleanly.
+  // Use performance.now() not Date.now() so a mid-invocation clock
+  // adjustment (NTP sync) doesn't poison the observation.
+  const startedAt = performance.now();
+  const metricsForDuration = injected?.metrics;
+  // Helper closure: fire BOTH the counter and the duration histogram
+  // with the SAME (fetchOk, delta) tuple so a downstream consumer
+  // never sees a count-without-duration / duration-without-count
+  // mismatch. The counter is always fired (back-compat with tick 25);
+  // the histogram only fires when a metrics bundle was injected.
+  const fireExit = (
+    fetchOk: boolean,
+    delta: { hasDelta: boolean } | null,
+  ): void => {
+    if (metricsForDuration) {
+      observeReviewFilterReportDiff(metricsForDuration, fetchOk, delta);
+      observeReviewFilterReportDiffDuration(
+        metricsForDuration,
+        fetchOk,
+        delta,
+        (performance.now() - startedAt) / 1000,
+      );
+    }
+  };
   const config = parseFilterReportDiffConfig({
     base: baseId,
     target: targetIdPositional,
@@ -2361,15 +2389,16 @@ export async function runReviewFilterReportDiff(
     // rate alongside the fetch-error / shape-rejection rate. The
     // metrics bundle is optional -- callers that didn't wire one
     // simply skip the fire.
-    if (injected?.metrics) {
-      observeReviewFilterReportDiff(injected.metrics, false, null);
-    }
+    // Tick 26: fireExit also records the per-invocation latency so
+    // the "how long did the misconfig take to surface?" question
+    // has a numeric answer (typically sub-millisecond -- this arm's
+    // latency captures the config-parse cost only).
+    fireExit(false, null);
     return;
   }
   const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
   if (noColor) kleur.enabled = false;
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
-  const metrics = injected?.metrics;
 
   // Fetch both /filter-report bodies in parallel -- they're
   // independent so a serial fetch would be a needless latency penalty
@@ -2385,7 +2414,7 @@ export async function runReviewFilterReportDiff(
         `clawreview review filter-report --diff: HTTP ${baseRes.status} fetching base review '${config.baseId}'\n`,
       );
       process.exitCode = 2;
-      if (metrics) observeReviewFilterReportDiff(metrics, false, null);
+      fireExit(false, null);
       return;
     }
     if (!targetRes.ok) {
@@ -2393,7 +2422,7 @@ export async function runReviewFilterReportDiff(
         `clawreview review filter-report --diff: HTTP ${targetRes.status} fetching target review '${config.targetId}'\n`,
       );
       process.exitCode = 2;
-      if (metrics) observeReviewFilterReportDiff(metrics, false, null);
+      fireExit(false, null);
       return;
     }
     const baseText = await baseRes.text();
@@ -2405,7 +2434,7 @@ export async function runReviewFilterReportDiff(
       `clawreview review filter-report --diff fetch failed: ${(err as Error).message}\n`,
     );
     process.exitCode = 2;
-    if (metrics) observeReviewFilterReportDiff(metrics, false, null);
+    fireExit(false, null);
     return;
   }
 
@@ -2425,7 +2454,10 @@ export async function runReviewFilterReportDiff(
   // Tick 25: fire the diff counter with the resolved result label
   // (identical | delta). The error arm is fired on each early-return
   // branch above.
-  if (metrics) observeReviewFilterReportDiff(metrics, true, delta);
+  // Tick 26: fireExit ALSO records the per-invocation latency in
+  // lock-step with the counter so the (count, sum, bucket) tuples
+  // come out of one invocation each.
+  fireExit(true, delta);
 }
 
 /**

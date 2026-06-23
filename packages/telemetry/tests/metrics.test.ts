@@ -1536,3 +1536,113 @@ describe('observeReviewFilterReportDiff (tick 25)', () => {
   });
 });
 
+// Tick 26: per-invocation latency histogram for `review filter-report
+// --diff`. Pairs with the tick-25 counter under the same closed
+// `result` label so a PromQL join-on-result lines up.
+describe('observeReviewFilterReportDiffDuration (tick 26)', () => {
+  it('records a sample under the identical bucket and the count goes up', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiffDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, 0.05);
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, 0.12);
+    const text = await metrics.registry.metrics();
+    // Prometheus's text format emits _count / _sum for each label set.
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="identical"[^}]*\}\s*2/,
+    );
+  });
+
+  it('records under the delta bucket when fetchOk=true + hasDelta=true', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiffDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: true }, 0.4);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="delta"[^}]*\}\s*1/,
+    );
+  });
+
+  it('records under the error bucket when fetchOk=false (delta=null does not crash)', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiffDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiffDuration(metrics, false, null, 0.02);
+    observeReviewFilterReportDiffDuration(metrics, false, { hasDelta: true }, 0.03);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="error"[^}]*\}\s*2/,
+    );
+  });
+
+  it('clamps non-finite / negative durations to 0 so a clock-skew bug cannot poison the histogram', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiffDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, -1);
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, NaN);
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, Infinity);
+    const text = await metrics.registry.metrics();
+    // All three samples land in the smallest bucket (0.01s); the
+    // sum should be exactly 0 (three zero observations).
+    const sumMatch = text.match(
+      /clawreview_review_filter_report_diff_duration_seconds_sum\{[^}]*result="identical"[^}]*\}\s*([\d.eE+-]+)/,
+    );
+    expect(sumMatch).not.toBeNull();
+    expect(Number(sumMatch?.[1] ?? 'NaN')).toBe(0);
+  });
+
+  it('joins cleanly with the tick-25 counter on the same `result` label (parallel fire reconciles)', async () => {
+    // The whole point of the duration histogram is that a dashboard
+    // can read (count, sum) per result label and divide them with
+    // the tick-25 counter's series to derive avg-latency-per-outcome.
+    // This test pins that the two share an identical result label
+    // alphabet so a PromQL `on (result)` join works without rewrites.
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiff, observeReviewFilterReportDiffDuration } =
+      await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    // Mirror a real diff invocation: fire counter + duration with the
+    // same (fetchOk, delta) tuple. The CLI does this through fireExit;
+    // here we exercise the pair directly.
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: true });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: true }, 0.2);
+    observeReviewFilterReportDiff(metrics, true, { hasDelta: false });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, 0.05);
+    observeReviewFilterReportDiff(metrics, false, null);
+    observeReviewFilterReportDiffDuration(metrics, false, null, 0.02);
+    const text = await metrics.registry.metrics();
+    // The label values appearing on the histogram match the counter's.
+    for (const result of ['identical', 'delta', 'error']) {
+      expect(text).toContain(`result="${result}"`);
+    }
+    // Histogram _count tuples reconcile per result.
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="identical"[^}]*\}\s*1/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="delta"[^}]*\}\s*1/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_filter_report_diff_duration_seconds_count\{[^}]*result="error"[^}]*\}\s*1/,
+    );
+  });
+
+  it('histogram bucket boundaries cover sub-25ms through 5s (CI runner range)', async () => {
+    // Pin the bucket definition so a future tweak that drops the
+    // 0.01s lower bound (which would mean fast invocations all stack
+    // in `le=0.025`) or the 5s upper bound (which would mean slow
+    // ones land in `+Inf` and we lose visibility) regresses the test.
+    resetMetricsForTests();
+    const { observeReviewFilterReportDiffDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewFilterReportDiffDuration(metrics, true, { hasDelta: false }, 0.005);
+    const text = await metrics.registry.metrics();
+    // The smallest bucket should exist as `le="0.01"` (sub-25ms work
+    // happens locally on a hot path); the largest finite as `le="5"`.
+    expect(text).toContain('le="0.01"');
+    expect(text).toContain('le="5"');
+  });
+});
+

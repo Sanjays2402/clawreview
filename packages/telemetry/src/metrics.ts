@@ -435,6 +435,36 @@ export interface MetricsBundle {
    * health: watch covers the live signal, diff covers the gated signal.
    */
   reviewFilterReportDiffTotal: Counter<string>;
+  /**
+   * Tick 26: `clawreview_review_filter_report_diff_duration_seconds{result}`
+   * -- per-invocation latency for the CLI `review filter-report --diff`
+   * command, labelled by the SAME closed result label as
+   * `reviewFilterReportDiffTotal` (identical | delta | error).
+   *
+   * Pairs with the tick-25 counter: the counter answers "how often
+   * did each result class fire?", this histogram answers "and how
+   * long did each result class take?". A dashboard can compute
+   *   sum(rate(clawreview_review_filter_report_diff_duration_seconds_sum[5m]))
+   *   / sum(rate(clawreview_review_filter_report_diff_duration_seconds_count[5m]))
+   * for the average latency per result, and bucket-slice for tail
+   * quantiles.
+   *
+   * Cardinality bounded at 3 (the result tuple) -- same as the
+   * counter, so a PromQL join on `result` stays cheap.
+   *
+   * Fires once per CLI invocation, on every exit arm (config /
+   * fetch / parse failure included). The `error` arm's latency
+   * captures how long the failing invocation ran before giving up
+   * (useful for spotting a fetch-timeout regression). The
+   * `identical` / `delta` arms capture the happy-path latency.
+   *
+   * Distinct from `reviewFilterReportReadDurationSeconds` because
+   * the read histogram is per-route on the server (single HTTP
+   * round-trip); this one is per-CLI-invocation and covers TWO
+   * fetches plus the local compute. The two together give the
+   * client + server views of the same gated workflow.
+   */
+  reviewFilterReportDiffDurationSeconds: Histogram<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -715,6 +745,26 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewFilterReportDiffDurationSeconds = new Histogram({
+    name: 'clawreview_review_filter_report_diff_duration_seconds',
+    help:
+      'Tick 26: per-invocation latency in seconds for the CLI review ' +
+      'filter-report --diff command, labelled by the same closed result ' +
+      'tuple (identical | delta | error) as reviewFilterReportDiffTotal. ' +
+      'Pair the two via PromQL join-on-result for average / quantile ' +
+      'latency per outcome class. Fires once per CLI invocation, on every ' +
+      'exit arm (the error arm captures how long a failing invocation ran ' +
+      'before giving up -- useful for spotting fetch-timeout regressions).',
+    labelNames: ['result'],
+    // CLI diff covers TWO HTTP fetches + local compute, so the bottom
+    // of the distribution sits a bit higher than the per-route read
+    // histogram (sub-25ms instead of sub-ms). The 5s top bucket
+    // catches pathologically slow CI runners (laptops behind a VPN);
+    // most invocations land under 1s.
+    buckets: [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -783,6 +833,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewFilterReportReadsTotal,
     reviewFilterReportReadDurationSeconds,
     reviewFilterReportDiffTotal,
+    reviewFilterReportDiffDurationSeconds,
     queueDepth,
     queueInflight,
   };
@@ -1565,6 +1616,40 @@ export function observeReviewFilterReportDiff(
 ): void {
   const result = deriveReviewFilterReportDiffResult(fetchOk, delta);
   metrics.reviewFilterReportDiffTotal.inc({ result });
+}
+
+/**
+ * Tick 26: record the per-invocation latency of a `review filter-report
+ * --diff` call on the
+ * `clawreview_review_filter_report_diff_duration_seconds{result}`
+ * histogram.
+ *
+ * Same fire discipline as `observeReviewFilterReportDiff`: called
+ * exactly once per CLI invocation, on every exit arm. The `result`
+ * label matches the counter's so a PromQL join (or a Grafana
+ * `multi-metric per-label` panel) lines up cleanly.
+ *
+ * Non-finite / negative values are silently clamped to 0 so a clock-
+ * skew bug (mid-invocation system clock adjustment) doesn't poison
+ * quantile estimates with an enormous negative observation.
+ *
+ * Cheap to call: a single histogram observation with one short label.
+ * The metrics bundle is injected so a CLI consumer that doesn't want
+ * a telemetry dep can skip the fire entirely (the diff command's
+ * happy path keeps working without it).
+ */
+export function observeReviewFilterReportDiffDuration(
+  metrics: MetricsBundle,
+  fetchOk: boolean,
+  delta: { hasDelta: boolean } | null,
+  durationSeconds: number,
+): void {
+  const result = deriveReviewFilterReportDiffResult(fetchOk, delta);
+  const safe =
+    Number.isFinite(durationSeconds) && durationSeconds >= 0
+      ? durationSeconds
+      : 0;
+  metrics.reviewFilterReportDiffDurationSeconds.observe({ result }, safe);
 }
 
 /**
