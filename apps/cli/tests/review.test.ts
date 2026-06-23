@@ -2422,4 +2422,263 @@ describe('clawreview review filter-report (tick 23)', () => {
   });
 });
 
+// Tick 24: `clawreview review filter-report --watch <reviewId>` poll
+// mode. Mirrors the runReviewDriftWatch test pattern: stub fetcher +
+// sleeper, capture stdout/stderr, drive the loop with canned bodies.
+describe('clawreview review filter-report --watch (tick 24)', () => {
+  async function runWatch(
+    reviewId: string,
+    flags: Record<string, string | boolean>,
+    bodies: Array<string | { ok: boolean; status: number; body: string }>,
+  ): Promise<RunResult & { fetchCalls: string[] }> {
+    const { runReviewFilterReportWatch } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetchCalls: string[] = [];
+    let bodyIdx = 0;
+    const fetcher = async (url: string) => {
+      fetchCalls.push(url);
+      const entry = bodies[bodyIdx] ?? bodies[bodies.length - 1]!;
+      bodyIdx += 1;
+      if (typeof entry === 'string') {
+        return { ok: true, status: 200, text: async () => entry };
+      }
+      return { ok: entry.ok, status: entry.status, text: async () => entry.body };
+    };
+    const sleeper = async () => undefined;
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReportWatch(
+        {
+          command: 'review',
+          positional: ['filter-report'],
+          flags: { 'no-color': true, watch: reviewId, ...flags },
+        },
+        reviewId,
+        { fetcher, sleeper },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, fetchCalls };
+  }
+
+  function makeFullBody(opts: { applied?: boolean; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_w_1',
+      inputTotal: 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: opts.applied ?? true,
+      },
+    });
+  }
+
+  function makeSlimBody(opts: { applied?: boolean } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_w_1',
+      inputTotal: 10,
+      droppedTotal: 3,
+      applied: opts.applied ?? true,
+      slim: true,
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('rejects when --server is missing', async () => {
+    const r = await runWatch('rv_w_1', {}, []);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--server');
+    expect(r.stderr).toContain('--watch');
+    expect(r.fetchCalls).toEqual([]);
+  });
+
+  it('rejects an invalid --interval (below WATCH_MIN_INTERVAL_MS)', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      interval: '50',
+    }, []);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--interval');
+    expect(r.stderr).toMatch(/>= 250/);
+  });
+
+  it('rejects an invalid --max-polls (negative integer)', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      'max-polls': '-1',
+    }, []);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--max-polls');
+  });
+
+  it('rejects an invalid --format', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      format: 'sarif',
+    }, []);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--format');
+  });
+
+  it('polls /api/reviews/:id/filter-report with --max-polls 2 (two text samples + watch-stopped message)', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      'max-polls': '2',
+    }, [makeFullBody(), makeFullBody()]);
+    expect(r.exitCode).toBe(0);
+    // Two fetches in order; both hit the filter-report endpoint.
+    expect(r.fetchCalls).toHaveLength(2);
+    expect(r.fetchCalls[0]).toContain('/api/reviews/rv_w_1/filter-report');
+    expect(r.fetchCalls[1]).toContain('/api/reviews/rv_w_1/filter-report');
+    // Two `--- poll N at <iso> ---` separators -- one per sample.
+    expect((r.stdout.match(/--- poll \d+ at/g) ?? []).length).toBe(2);
+    // Full text banner shows up between separators.
+    expect(r.stdout).toContain('rv_w_1');
+    expect(r.stdout).toContain('appliedFilters');
+  });
+
+  it('emits JSONL with --format json (one JSON object per poll)', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      format: 'json',
+    }, [makeFullBody(), makeFullBody({ droppedTotal: 5 })]);
+    expect(r.exitCode).toBe(0);
+    // Two newline-delimited JSON objects.
+    const lines = r.stdout.trim().split('\n');
+    expect(lines).toHaveLength(2);
+    const p0 = JSON.parse(lines[0]!);
+    const p1 = JSON.parse(lines[1]!);
+    expect(p0.poll).toBe(1);
+    expect(p1.poll).toBe(2);
+    expect(p0.reviewId).toBe('rv_w_1');
+    expect(p0.body.droppedTotal).toBe(3);
+    expect(p1.body.droppedTotal).toBe(5);
+  });
+
+  it('forwards --slim as ?slim=true on every poll', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      'max-polls': '2',
+      slim: true,
+    }, [makeSlimBody(), makeSlimBody()]);
+    expect(r.exitCode).toBe(0);
+    // Both URLs carry ?slim=true.
+    for (const url of r.fetchCalls) {
+      expect(url).toContain('?slim=true');
+    }
+    // Slim banner reads "slim mode" inline.
+    expect(r.stdout).toContain('slim mode');
+  });
+
+  it('aborts with exit 2 on HTTP non-2xx (poll N got HTTP <status>)', async () => {
+    const r = await runWatch('rv_w_1', {
+      server: 'https://test.local',
+      'max-polls': '3',
+    }, [
+      makeFullBody(),
+      { ok: false, status: 503, body: 'gone' },
+    ]);
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toMatch(/poll 2 got HTTP 503/);
+    // We did not poll a third time after the error.
+    expect(r.fetchCalls).toHaveLength(2);
+  });
+
+  it('aborts with exit 2 on fetcher throw (ECONNREFUSED style)', async () => {
+    const { runReviewFilterReportWatch } = await import('../src/commands/review.js');
+    const stderr: string[] = [];
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true as never);
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReportWatch(
+        {
+          command: 'review',
+          positional: ['filter-report'],
+          flags: { 'no-color': true, watch: 'rv_w_1', server: 'http://x', 'max-polls': '1' },
+        },
+        'rv_w_1',
+        {
+          fetcher: async () => { throw new Error('ECONNREFUSED'); },
+          sleeper: async () => undefined,
+        },
+      );
+    } finally {
+      writeStderr.mockRestore();
+      writeStdout.mockRestore();
+    }
+    expect(process.exitCode).toBe(2);
+    expect(stderr.join('')).toContain('poll 1 failed');
+    expect(stderr.join('')).toContain('ECONNREFUSED');
+    process.exitCode = 0;
+  });
+
+  // Pure parseFilterReportWatchConfig coverage so each discriminant
+  // has a regression pin.
+  describe('parseFilterReportWatchConfig (pure)', () => {
+    it('resolves the happy path with all defaults', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      const r = parseFilterReportWatchConfig({ server: 'http://x/' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        // Trailing slash stripped.
+        expect(r.serverUrl).toBe('http://x');
+        expect(r.intervalMs).toBe(5000);
+        expect(r.maxPolls).toBe(0);
+        expect(r.format).toBe('text');
+        expect(r.slim).toBe(false);
+      }
+    });
+
+    it('rejects each invalid arm individually', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      expect(parseFilterReportWatchConfig({}).kind).toBe('missing-server');
+      expect(parseFilterReportWatchConfig({ server: 'http://x', interval: '50' }).kind).toBe('invalid-interval');
+      expect(parseFilterReportWatchConfig({ server: 'http://x', 'max-polls': '-1' }).kind).toBe('invalid-max-polls');
+      expect(parseFilterReportWatchConfig({ server: 'http://x', format: 'xml' }).kind).toBe('invalid-format');
+    });
+
+    it('accepts --slim as boolean or string truthy', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      const bool = parseFilterReportWatchConfig({ server: 'http://x', slim: true });
+      expect(bool.kind).toBe('ok');
+      if (bool.kind === 'ok') expect(bool.slim).toBe(true);
+      const str = parseFilterReportWatchConfig({ server: 'http://x', slim: '1' });
+      if (str.kind === 'ok') expect(str.slim).toBe(true);
+      const off = parseFilterReportWatchConfig({ server: 'http://x', slim: 'false' });
+      if (off.kind === 'ok') expect(off.slim).toBe(false);
+    });
+  });
+});
+
+
 

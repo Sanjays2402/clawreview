@@ -15,6 +15,7 @@ Usage:
   clawreview review drift --base <reviewId> --target <reviewId> --server <url> [--min-confidence <n>] [--severity-threshold <sev>] [--on-regression <cmd>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
   clawreview review filter-report <reviewId> --server <url> [--format text|json] [--slim]
+  clawreview review filter-report --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--slim]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]

@@ -1809,12 +1809,27 @@ export type FilterReportBody = FilterReportBodyFull | FilterReportBodySlim;
  */
 export async function runReviewFilterReport(
   args: ParsedArgs,
-  injected?: { fetcher?: WatchFetcher },
+  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper },
 ): Promise<void> {
   // Positional shape: `clawreview review filter-report <reviewId>`.
   // args.positional[0] is the subcommand name 'filter-report';
   // [1] is the reviewId positional arg.
   const reviewIdPositional = args.positional[1] ?? '';
+  // Tick 24: --watch <reviewId> opt-in switches to poll mode. When
+  // present, we route to runReviewFilterReportWatch which polls the
+  // /filter-report endpoint on a configurable interval and re-renders
+  // the persisted shape per sample. Single-shot mode is the default
+  // (and the back-compat path for the tick-23 command).
+  //
+  // The flag's VALUE is the reviewId (mirrors `review drift --watch
+  // <reviewId>` ergonomics). When set, the positional reviewId is
+  // ignored -- we'd rather have ONE source of truth than negotiate
+  // precedence between two.
+  const watchReviewId =
+    typeof args.flags.watch === 'string' ? args.flags.watch.trim() : '';
+  if (watchReviewId.length > 0) {
+    return runReviewFilterReportWatch(args, watchReviewId, injected);
+  }
   const config = parseFilterReportConfig({
     reviewId: reviewIdPositional,
     server: args.flags.server,
@@ -1909,4 +1924,256 @@ function renderFilterReportText(body: FilterReportBody): void {
     `  ${kleur.bold('severity_threshold')}    applied=${f.severityThreshold.applied} ` +
       `raw=${f.severityThreshold.raw ?? '-'} normalised=${f.severityThreshold.normalised ?? '-'}\n`,
   );
+}
+
+/**
+ * Tick 24: validation outcome for `runReviewFilterReportWatch`. Either
+ * a fully-resolved config or one of the error sentinels.
+ *
+ * Mirrors `WatchConfigResult`'s discriminated-union shape so the test
+ * surface can pin each error arm individually. Distinct from
+ * `WatchConfigResult` because the filter-report watch loop has a
+ * smaller config surface (no --on-drift / --on-recover hooks; the
+ * persisted filter report doesn't have a notion of "drift" the way
+ * the digest does -- it's a write-once snapshot from the worker).
+ */
+export type FilterReportWatchConfigResult =
+  | {
+      kind: 'ok';
+      serverUrl: string;
+      intervalMs: number;
+      maxPolls: number;
+      format: 'text' | 'json';
+      slim: boolean;
+    }
+  | { kind: 'missing-server'; message: string }
+  | { kind: 'invalid-interval'; message: string }
+  | { kind: 'invalid-max-polls'; message: string }
+  | { kind: 'invalid-format'; message: string };
+
+/**
+ * Tick 24: pure parser for `review filter-report --watch` config.
+ *
+ * Exported so the same shape (defaults, error sentinels) has one
+ * test surface. Mirrors `parseWatchConfig` defaults so an operator
+ * who knows `review drift --watch` ergonomics doesn't have to learn
+ * a second set:
+ *   - interval: WATCH_DEFAULT_INTERVAL_MS (5000ms)
+ *   - max-polls: 0 (unlimited)
+ *   - format: 'text'
+ *   - slim: false (default to the verbose shape so the watch banner
+ *     shows the per-axis applied detail; an operator wanting the
+ *     terse "applied?" line can pass --slim)
+ *
+ * Validation rules:
+ *   - serverUrl required (missing/empty -> 'missing-server')
+ *   - intervalMs: must be a finite number >= WATCH_MIN_INTERVAL_MS
+ *   - maxPolls: must be a non-negative integer (0 = unlimited)
+ *   - format: 'text' | 'json'
+ *
+ * Server URL is normalised: trailing slashes stripped so callers can
+ * compose `${serverUrl}/api/reviews/${id}/filter-report` cleanly.
+ */
+export function parseFilterReportWatchConfig(flags: {
+  server?: unknown;
+  interval?: unknown;
+  'max-polls'?: unknown;
+  format?: unknown;
+  slim?: unknown;
+}): FilterReportWatchConfigResult {
+  const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
+  if (serverRaw.length === 0) {
+    return {
+      kind: 'missing-server',
+      message:
+        '--watch requires --server <url> (the CLI polls <server>/api/reviews/<id>/filter-report)',
+    };
+  }
+  const serverUrl = serverRaw.replace(/\/+$/, '');
+
+  let intervalMs = WATCH_DEFAULT_INTERVAL_MS;
+  if (flags.interval !== undefined) {
+    const raw = String(flags.interval).trim();
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < WATCH_MIN_INTERVAL_MS) {
+      return {
+        kind: 'invalid-interval',
+        message: `--interval must be a number >= ${WATCH_MIN_INTERVAL_MS} (ms); got '${raw}'`,
+      };
+    }
+    intervalMs = Math.floor(parsed);
+  }
+
+  let maxPolls = 0;
+  if (flags['max-polls'] !== undefined) {
+    const raw = String(flags['max-polls']).trim();
+    const parsed = Number(raw);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return {
+        kind: 'invalid-max-polls',
+        message: `--max-polls must be a non-negative integer (0 = unlimited); got '${raw}'`,
+      };
+    }
+    maxPolls = parsed;
+  }
+
+  let format: 'text' | 'json' = 'text';
+  if (flags.format !== undefined) {
+    const raw = String(flags.format).trim().toLowerCase();
+    if (raw !== 'text' && raw !== 'json') {
+      return {
+        kind: 'invalid-format',
+        message: `--format must be text or json (got '${flags.format}')`,
+      };
+    }
+    format = raw;
+  }
+
+  // Mirror parseFilterReportConfig's slim parser: boolean true OR
+  // string 'true'/'1'/'yes' resolves to slim=true; everything else
+  // resolves to slim=false.
+  const slimRaw = flags.slim;
+  let slim = false;
+  if (typeof slimRaw === 'boolean') {
+    slim = slimRaw;
+  } else if (typeof slimRaw === 'string') {
+    const lower = slimRaw.trim().toLowerCase();
+    slim = lower === 'true' || lower === '1' || lower === 'yes';
+  }
+
+  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, slim };
+}
+
+/**
+ * Tick 24: `clawreview review filter-report --watch <reviewId>`
+ *
+ * Watch-mode equivalent of the tick-23 single-shot `review filter-
+ * report`. Polls `<server>/api/reviews/<id>/filter-report` on a
+ * configurable interval and re-renders the persisted shape per
+ * sample. Designed for on-calls watching a config rollout land:
+ * the persisted filter report is the write-time snapshot the worker
+ * produced, so polling it answers "did the new min_confidence
+ * threshold land on this review's worker run yet?" without manual
+ * curl loops.
+ *
+ * Stops when:
+ *   - SIGINT (Ctrl-C) -- exit 0 regardless of last sample state.
+ *   - --max-polls reached -- exit 0 (no built-in failure mode for
+ *     the filter-report watch; an operator who wants exit-3 on
+ *     "filter not applied" can pair with --require-filter).
+ *   - Fatal error (network / server / parse) -- exit 2.
+ *
+ * Output (mirrors `review drift --watch` to keep the visual surface
+ * uniform):
+ *   - text (default): same banner as single-shot, with a `--- poll N
+ *     at <ISO> ---` separator between samples.
+ *   - json (JSONL): one JSON object per poll, newline-delimited so
+ *     a downstream consumer can pipe through `jq -c .`.
+ *
+ * Single-shot's --slim flag composes: the watch loop forwards
+ * ?slim=true on every poll so the operator gets the slim banner per
+ * sample.
+ *
+ * Injectable fetcher / sleeper seams mirror runReviewDriftWatch so
+ * the test suite can pin every arm without a real network round-trip
+ * or real sleep.
+ */
+export async function runReviewFilterReportWatch(
+  args: ParsedArgs,
+  reviewId: string,
+  injected?: {
+    fetcher?: WatchFetcher;
+    sleeper?: WatchSleeper;
+  },
+): Promise<void> {
+  const config = parseFilterReportWatchConfig({
+    server: args.flags.server,
+    interval: args.flags.interval,
+    'max-polls': args.flags['max-polls'],
+    format: args.flags.format,
+    slim: args.flags.slim,
+  });
+  if (config.kind !== 'ok') {
+    process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+
+  const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+  const sleeper = injected?.sleeper ?? defaultWatchSleeper;
+  const slimQs = config.slim ? '?slim=true' : '';
+  const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(reviewId)}/filter-report${slimQs}`;
+
+  // SIGINT handling: flip a flag, finish the current iteration, exit
+  // 0. Same pattern as runReviewDriftWatch.
+  let stopped = false;
+  const onSigint = (): void => {
+    stopped = true;
+  };
+  process.once('SIGINT', onSigint);
+
+  let pollCount = 0;
+  try {
+    while (!stopped) {
+      pollCount += 1;
+      let body: FilterReportBody;
+      try {
+        const res = await fetcher(url);
+        if (!res.ok) {
+          process.stderr.write(
+            `clawreview review filter-report --watch: poll ${pollCount} got HTTP ${res.status}; aborting\n`,
+          );
+          process.exitCode = 2;
+          return;
+        }
+        const text = await res.text();
+        body = JSON.parse(text) as FilterReportBody;
+      } catch (err) {
+        process.stderr.write(
+          `clawreview review filter-report --watch: poll ${pollCount} failed: ${(err as Error).message}\n`,
+        );
+        process.exitCode = 2;
+        return;
+      }
+
+      if (config.format === 'json') {
+        // JSONL: one object per poll, newline-delimited.
+        process.stdout.write(
+          `${JSON.stringify({
+            reviewId,
+            poll: pollCount,
+            body,
+          })}\n`,
+        );
+      } else {
+        // Text: prefix each sample with a `--- poll N at <ISO> ---`
+        // header (matches runReviewDriftWatch).
+        process.stdout.write(
+          `${kleur.gray(`--- poll ${pollCount} at ${new Date().toISOString()} ---`)}\n`,
+        );
+        renderFilterReportText(body);
+      }
+
+      // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
+      // interval between the only sample and the exit.
+      if (config.maxPolls > 0 && pollCount >= config.maxPolls) {
+        break;
+      }
+      if (stopped) break;
+      await sleeper(config.intervalMs);
+    }
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+  }
+
+  if (stopped) {
+    process.stdout.write(`${kleur.gray('watch stopped')}\n`);
+    process.exitCode = 0;
+    return;
+  }
+  // Stopped by --max-polls -- exit 0 (no built-in failure mode for
+  // this command; --require-filter is the gating flag).
+  process.exitCode = 0;
 }
