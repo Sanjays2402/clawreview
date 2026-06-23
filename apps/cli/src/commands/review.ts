@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { dirname, isAbsolute, resolve } from 'node:path';
 
 import kleur from 'kleur';
 import {
@@ -2312,6 +2313,75 @@ export function computeFilterReportDelta(
 }
 
 /**
+ * Tick 26: stdout sentinel for `review filter-report --diff --output -`.
+ * Same shape as `presets diff`'s STDOUT_SENTINEL (Symbol.for keyed
+ * registry so module duplication in the test surface doesn't break
+ * identity compares). Kept in a distinct registry key from presets
+ * diff's so a future divergence (e.g. one command gaining --output
+ * '+' for stdout-and-also-write) doesn't have to coordinate two
+ * commands' sentinel semantics in lockstep.
+ */
+export const FILTER_REPORT_DIFF_STDOUT_SENTINEL: unique symbol = Symbol.for(
+  'clawreview.review.filter-report.diff.output.stdout',
+);
+export type FilterReportDiffOutputTarget = string | typeof FILTER_REPORT_DIFF_STDOUT_SENTINEL;
+
+/**
+ * Tick 26: resolve a user-provided `--output <path>` value into either
+ * the stdout sentinel (when literally `-`) or an absolute filesystem
+ * path. Relative paths land under `cwd` -- a CLI consumer that wants
+ * a different root can resolve themselves and pass an absolute path.
+ *
+ * Pure: no IO, no mutation. The path math mirrors `presets diff`'s
+ * resolver so an operator who learned one command's --output contract
+ * (mkdir -p + relative-to-root + `-` for stdout) knows this one too.
+ *
+ * The literal `-` is mapped to the stdout sentinel here so a downstream
+ * consumer can compare via Symbol identity (`=== FILTER_REPORT_DIFF_STDOUT_SENTINEL`)
+ * without the ambiguity of a magic string (a file literally named
+ * `-` is still resolvable by Node).
+ */
+export function resolveFilterReportDiffOutputPath(
+  outputPath: string,
+  cwd: string,
+): FilterReportDiffOutputTarget {
+  if (outputPath === '-') return FILTER_REPORT_DIFF_STDOUT_SENTINEL;
+  return isAbsolute(outputPath) ? outputPath : resolve(cwd, outputPath);
+}
+
+/**
+ * Tick 26: write the rendered JSON delta body to either stdout (when
+ * `outputTarget` is the sentinel) or a file on disk.
+ *
+ * For file writes: mkdir -p the target directory first (harmless when
+ * it already exists; matches presets diff's contract). Surfaces a
+ * single stderr "wrote N bytes to <path>" confirmation so a CI log
+ * has a breadcrumb without polluting stdout (which holds the actual
+ * artifact when --output - / pure mode is in play).
+ *
+ * For stdout writes: pure-mode write -- no preamble, no stderr
+ * banner. The body already carries a trailing newline from
+ * JSON.stringify+`\n` so the bytes match what a file-write would
+ * have produced. A downstream `jq` / file redirect gets exactly the
+ * artifact bytes.
+ */
+async function writeFilterReportDiffOutput(
+  outputTarget: FilterReportDiffOutputTarget,
+  body: string,
+): Promise<void> {
+  if (outputTarget === FILTER_REPORT_DIFF_STDOUT_SENTINEL) {
+    process.stdout.write(body);
+    return;
+  }
+  const targetDir = dirname(outputTarget);
+  await mkdir(targetDir, { recursive: true });
+  await writeFile(outputTarget, body, 'utf8');
+  process.stderr.write(
+    `clawreview review filter-report --diff: wrote ${body.length} bytes to ${outputTarget}\n`,
+  );
+}
+
+/**
  * Tick 25: `clawreview review filter-report --diff <baseReviewId> <targetReviewId>`
  *
  * Two-review compare mode for the filter-report endpoint. Fetches
@@ -2440,7 +2510,47 @@ export async function runReviewFilterReportDiff(
 
   const delta = computeFilterReportDelta(baseBody, targetBody);
 
-  if (config.format === 'json') {
+  // Tick 26: --output <path> writes the JSON delta body to a file
+  // (or stdout when --output -) instead of printing it directly.
+  // Mirrors `presets diff --output` so a migration-ticket / CI flow
+  // that wants the delta body to land on disk for a follow-up commit
+  // can use one command. The literal `-` is the stdout sentinel; when
+  // set, the body lands on stdout in "pure mode" with no banner /
+  // stderr noise.
+  //
+  // --output + --format text rejects 2 (text is color-tagged and for
+  // terminal display, not artifacts) -- mirrors the presets diff
+  // command's contract so the operator's mental model carries over.
+  const outputRaw = args.flags.output;
+  const outputTarget =
+    typeof outputRaw === 'string' && outputRaw.length > 0
+      ? resolveFilterReportDiffOutputPath(outputRaw, process.cwd())
+      : null;
+  if (outputTarget !== null && config.format === 'text') {
+    process.stderr.write(
+      `clawreview review filter-report --diff: --output is incompatible with --format text ` +
+        `(text is color-tagged and intended for terminal display; use --format json ` +
+        `for artifact writes)\n`,
+    );
+    process.exitCode = 2;
+    fireExit(false, null);
+    return;
+  }
+
+  if (outputTarget !== null) {
+    // --output path: serialise the delta as JSON regardless of any
+    // text-mode color tags (the format check above already rejected
+    // --format text + --output). The body shape matches stdout's
+    // JSON output so a downstream consumer can swap "redirect stdout
+    // to file" for "--output <path>" without changing the parsing
+    // code.
+    const body = `${JSON.stringify(
+      { baseId: config.baseId, targetId: config.targetId, delta },
+      null,
+      2,
+    )}\n`;
+    await writeFilterReportDiffOutput(outputTarget, body);
+  } else if (config.format === 'json') {
     process.stdout.write(
       `${JSON.stringify({ baseId: config.baseId, targetId: config.targetId, delta }, null, 2)}\n`,
     );

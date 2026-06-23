@@ -3637,5 +3637,194 @@ describe('clawreview review filter-report --diff (tick 25)', () => {
   });
 });
 
+// Tick 26: `clawreview review filter-report --diff --output <path|->`
+// writes the JSON delta body to a file (or stdout when --output -)
+// instead of printing it directly. Mirrors `presets diff --output`.
+describe('clawreview review filter-report --diff --output (tick 26)', () => {
+  async function runDiffWithOutput(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+    positional: string[],
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        { command: 'review', positional, flags: { 'no-color': true, ...flags } },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('--output <file> writes the JSON delta body to disk (no stdout output, stderr breadcrumb)', async () => {
+    const dir = await tmpDir();
+    const path = join(dir, 'delta.json');
+    const base = makeBody({ inputTotal: 10 });
+    const target = makeBody({ inputTotal: 15 });
+    const r = await runDiffWithOutput(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', output: path },
+      { base, target },
+      ['filter-report', 'rv_target_1'],
+    );
+    // Delta detected -> exit 3.
+    expect(r.exitCode).toBe(3);
+    // Stdout has NO JSON body (the artifact landed on disk).
+    expect(r.stdout).toBe('');
+    // Stderr surfaces the wrote-bytes breadcrumb so a CI log can confirm.
+    expect(r.stderr).toContain('wrote ');
+    expect(r.stderr).toContain('delta.json');
+    // The file on disk holds the JSON body with both ids and the delta.
+    const { readFile } = await import('node:fs/promises');
+    const written = await readFile(path, 'utf8');
+    const parsed = JSON.parse(written);
+    expect(parsed.baseId).toBe('rv_base_1');
+    expect(parsed.targetId).toBe('rv_target_1');
+    expect(parsed.delta.hasDelta).toBe(true);
+    expect(parsed.delta.inputTotal.delta).toBe(5);
+  });
+
+  it('--output - writes the body to stdout in pure mode (no banner, no stderr)', async () => {
+    const r = await runDiffWithOutput(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', output: '-' },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 12 }) },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(3);
+    // Stdout holds the JSON body (pure mode -- no preamble).
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.delta.inputTotal.delta).toBe(2);
+    // No stderr breadcrumb on the stdout sentinel path.
+    expect(r.stderr).not.toContain('wrote ');
+  });
+
+  it('--output with --format text rejects with exit 2 (text is for terminals, not artifacts)', async () => {
+    const dir = await tmpDir();
+    const path = join(dir, 'delta.txt');
+    const r = await runDiffWithOutput(
+      { diff: 'rv_base_1', server: 'http://x', format: 'text', output: path },
+      { base: makeBody(), target: makeBody() },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--output is incompatible with --format text');
+    // No file written.
+    const { stat } = await import('node:fs/promises');
+    await expect(stat(path)).rejects.toThrow();
+  });
+
+  it('--output creates parent directories (mkdir -p)', async () => {
+    const dir = await tmpDir();
+    const path = join(dir, 'nested', 'a', 'b', 'delta.json');
+    const r = await runDiffWithOutput(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', output: path },
+      { base: makeBody(), target: makeBody() },
+      ['filter-report', 'rv_target_1'],
+    );
+    // identical bodies -> exit 0, no delta.
+    expect(r.exitCode).toBe(0);
+    const { readFile } = await import('node:fs/promises');
+    const written = await readFile(path, 'utf8');
+    expect(JSON.parse(written).delta.hasDelta).toBe(false);
+  });
+
+  it('--output empty-delta still writes the file (carries hasDelta:false body)', async () => {
+    const dir = await tmpDir();
+    const path = join(dir, 'empty.json');
+    const r = await runDiffWithOutput(
+      { diff: 'rv_base_1', server: 'http://x', format: 'json', output: path },
+      { base: makeBody(), target: makeBody() },
+      ['filter-report', 'rv_target_1'],
+    );
+    expect(r.exitCode).toBe(0);
+    const { readFile } = await import('node:fs/promises');
+    const written = await readFile(path, 'utf8');
+    const parsed = JSON.parse(written);
+    expect(parsed.delta.hasDelta).toBe(false);
+  });
+
+  it('resolveFilterReportDiffOutputPath: pure helper -- absolute paths pass through, relative resolved against cwd, "-" maps to sentinel', async () => {
+    const { resolveFilterReportDiffOutputPath, FILTER_REPORT_DIFF_STDOUT_SENTINEL } = await import(
+      '../src/commands/review.js'
+    );
+    // Absolute pass-through.
+    expect(resolveFilterReportDiffOutputPath('/tmp/x.json', '/etc')).toBe('/tmp/x.json');
+    // Relative resolves against cwd arg.
+    expect(resolveFilterReportDiffOutputPath('x.json', '/home/sanjay')).toBe('/home/sanjay/x.json');
+    // Sentinel.
+    expect(resolveFilterReportDiffOutputPath('-', '/anywhere')).toBe(
+      FILTER_REPORT_DIFF_STDOUT_SENTINEL,
+    );
+  });
+
+  it('--output sentinel byte-identical to file-write body (matches contract)', async () => {
+    // The whole point of having a sentinel + path mode is that a
+    // CI consumer can swap one for the other without changing the
+    // parsing code. Pin that the bytes are identical (modulo path).
+    const dir = await tmpDir();
+    const path = join(dir, 'identity.json');
+    const base = makeBody({ inputTotal: 10 });
+    const target = makeBody({ inputTotal: 15 });
+    const stdoutMode = await runDiffWithOutput(
+      { diff: 'rv_a', server: 'http://x', format: 'json', output: '-' },
+      { base, target },
+      ['filter-report', 'rv_b'],
+    );
+    await runDiffWithOutput(
+      { diff: 'rv_a', server: 'http://x', format: 'json', output: path },
+      { base, target },
+      ['filter-report', 'rv_b'],
+    );
+    const { readFile } = await import('node:fs/promises');
+    const fileContent = await readFile(path, 'utf8');
+    // Stdout body == file body (byte-identical).
+    expect(stdoutMode.stdout).toBe(fileContent);
+  });
+});
+
 
 
