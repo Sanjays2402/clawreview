@@ -1112,3 +1112,116 @@ describe('observeReviewDigestFilterApplied (tick 21)', () => {
   });
 });
 
+// Tick 22: worker-side filter coverage counter. Fires twice per
+// completed review (once per phase: aggregate, worker_post). The
+// applied axis is a closed yes|no set so the cross-product
+// cardinality is exactly 4. Mirrors the tick-21 read-side counter
+// shape so a dashboard can join the two by axis.
+describe('observeFindingsFilterPreApplied (tick 22)', () => {
+  it('exposes FINDINGS_FILTER_PHASES as the closed phase tuple', async () => {
+    const { FINDINGS_FILTER_PHASES } = await import('../src/metrics.js');
+    // Frozen membership so a typo'd phase literal (e.g. 'aggregator')
+    // at a worker call site cannot silently fragment the series.
+    expect([...FINDINGS_FILTER_PHASES]).toEqual(['aggregate', 'worker_post']);
+  });
+
+  it('bumps phase=aggregate, applied=yes when the worker filter is active', async () => {
+    resetMetricsForTests();
+    const { observeFindingsFilterPreApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-fp-1', defaultMetrics: false });
+    observeFindingsFilterPreApplied(metrics, 'aggregate', true);
+    const text = await metrics.registry.metrics();
+    expect(text).toContain('# TYPE clawreview_findings_filter_pre_applied_total counter');
+    expect(text).toMatch(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="aggregate"[^}]*applied="yes"[^}]*\}\s*1/,
+    );
+  });
+
+  it('bumps phase=worker_post, applied=no on the default no-filter call', async () => {
+    resetMetricsForTests();
+    const { observeFindingsFilterPreApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-fp-2', defaultMetrics: false });
+    observeFindingsFilterPreApplied(metrics, 'worker_post', false);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', false);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="worker_post"[^}]*applied="no"[^}]*\}\s*2/,
+    );
+  });
+
+  it('keeps aggregate and worker_post phases in independent buckets', async () => {
+    // Three calls; per-phase totals must NOT bleed into each other.
+    // Worker pattern is to fire BOTH phases per review with the same
+    // applied bit so a dashboard joining on applied="yes" gets 2x
+    // the review count.
+    resetMetricsForTests();
+    const { observeFindingsFilterPreApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-fp-3', defaultMetrics: false });
+    observeFindingsFilterPreApplied(metrics, 'aggregate', true);
+    observeFindingsFilterPreApplied(metrics, 'aggregate', true);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', true);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="aggregate"[^}]*applied="yes"[^}]*\}\s*2/,
+    );
+    expect(text).toMatch(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="worker_post"[^}]*applied="yes"[^}]*\}\s*1/,
+    );
+  });
+
+  it('cardinality stays exactly 4 across the phase x applied cross-product', async () => {
+    // Hit every cell. The closed phase x yes|no shape is a hard
+    // 4-series ceiling. A future widening of either axis (e.g. a
+    // third phase or a yes|no|maybe tri-state) would surface here.
+    resetMetricsForTests();
+    const { observeFindingsFilterPreApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-fp-4', defaultMetrics: false });
+    observeFindingsFilterPreApplied(metrics, 'aggregate', true);
+    observeFindingsFilterPreApplied(metrics, 'aggregate', false);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', true);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', false);
+    const text = await metrics.registry.metrics();
+    const seriesLines = text
+      .split('\n')
+      .filter((l) => l.startsWith('clawreview_findings_filter_pre_applied_total{'));
+    expect(seriesLines).toHaveLength(4);
+    for (const line of seriesLines) {
+      expect(line).toMatch(/\}\s*1$/);
+    }
+  });
+
+  it('reconciles per-axis cumulative count with the worker fire pattern (BOTH phases share applied)', async () => {
+    // Workflow contract: the worker fires `aggregate` AND
+    // `worker_post` with the SAME `applied` bit per review. A
+    // dashboard query rate(...{applied="yes"}[5m]) should therefore
+    // return 2x the per-minute rate of filtered reviews. Pin that
+    // ratio here so a future refactor that decouples the bits
+    // breaks visibly.
+    resetMetricsForTests();
+    const { observeFindingsFilterPreApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-fp-5', defaultMetrics: false });
+    // 3 reviews: 2 with filter applied, 1 without. Each review fires
+    // both phases.
+    for (let i = 0; i < 2; i++) {
+      observeFindingsFilterPreApplied(metrics, 'aggregate', true);
+      observeFindingsFilterPreApplied(metrics, 'worker_post', true);
+    }
+    observeFindingsFilterPreApplied(metrics, 'aggregate', false);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', false);
+    const text = await metrics.registry.metrics();
+    const aggYes = text.match(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="aggregate"[^}]*applied="yes"[^}]*\}\s*(\d+)/,
+    );
+    const postYes = text.match(
+      /clawreview_findings_filter_pre_applied_total\{[^}]*phase="worker_post"[^}]*applied="yes"[^}]*\}\s*(\d+)/,
+    );
+    expect(aggYes).toBeTruthy();
+    expect(postYes).toBeTruthy();
+    // Worker fires both phases in lockstep -> per-phase totals must match.
+    expect(Number(aggYes![1])).toBe(2);
+    expect(Number(postYes![1])).toBe(2);
+    // Sum across both phases is 2x the filtered-review count.
+    expect(Number(aggYes![1]) + Number(postYes![1])).toBe(4);
+  });
+});
+

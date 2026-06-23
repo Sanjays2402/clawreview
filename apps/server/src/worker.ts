@@ -24,7 +24,7 @@ import {
 } from '@clawreview/aggregator';
 import { preflightBudget, runPipeline } from '@clawreview/agents';
 import { ClawReviewConfigSchema, DEFAULT_CONFIG } from '@clawreview/types';
-import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeReviewDigestPersistedDrift, observeSimilarityMerges, deriveReviewDigestPersistedDriftKind, deriveReviewDigestPersistedDriftLogLevel } from '@clawreview/telemetry';
+import { getMetrics, observeAgentExecutions, observeFindingsDropped, observeFindingsFilterPreApplied, observeReviewDigestPersistedDrift, observeSimilarityMerges, deriveReviewDigestPersistedDriftKind, deriveReviewDigestPersistedDriftLogLevel } from '@clawreview/telemetry';
 
 import { env } from './env.js';
 import { REVIEW_JOB, getQueue, type ReviewJobData } from './queue.js';
@@ -369,6 +369,22 @@ export async function startWorker(logger: Logger): Promise<void> {
       severityThreshold: cfg.severity_threshold,
     });
     const reviewDigest = reviewFilterReport.digest;
+
+    // Tick 22: worker-side filter-coverage telemetry. Fires twice
+    // per completed review (once per phase) so an operator can chart
+    // "writes that filter" alongside the tick-21 read-side counter.
+    // Both phases see the SAME `applied` bit because cfg.min_confidence
+    // and cfg.severity_threshold are the source of truth at BOTH
+    // call sites (the aggregate() call at line 266 above + the
+    // findingDigestWithFilterReport call here). The `.any` boolean
+    // collapses both axes -- a future drill-down (which axis fired?)
+    // reads ReviewRecord.filterReport.appliedFilters from the store.
+    // The per-phase fire pattern lets a future refactor that decouples
+    // the two filters surface where the divergence is without changing
+    // the counter surface.
+    const filterApplied = reviewFilterReport.appliedFilters.any;
+    observeFindingsFilterPreApplied(metrics, 'aggregate', filterApplied);
+    observeFindingsFilterPreApplied(metrics, 'worker_post', filterApplied);
 
     // Tick 15: WRITE-side persisted-drift counter. Compare the digest we
     // JUST built against the previously-persisted digest for this review

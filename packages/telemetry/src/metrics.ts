@@ -327,6 +327,35 @@ export interface MetricsBundle {
    * any time window.
    */
   reviewDigestFilterAppliedTotal: Counter<string>;
+  /**
+   * Tick 22: `clawreview_findings_filter_pre_applied_total{phase,applied}`
+   * -- worker-side counter that fires when the worker BUILDS the
+   * persisted digest. Captures whether the pre-bucket filter was
+   * active at each of two phases of the worker pipeline:
+   *
+   *   - `aggregate`    -- the filter that runs INSIDE aggregate()
+   *                       (cfg.min_confidence + cfg.severity_threshold
+   *                       fed to aggregate's `minConfidence` /
+   *                       `threshold` opts; pre-dedupe / pre-rank).
+   *   - `worker_post`  -- the filter that runs in the worker's
+   *                       findingDigestWithFilterReport pass AFTER
+   *                       aggregate(). Defence-in-depth on the
+   *                       happy path; reflects the contract of the
+   *                       persisted digest.
+   *
+   * The `applied` axis is a closed `yes`/`no` set just like the
+   * tick-21 read-side counter. Cross-product cardinality is bounded
+   * at 4 (two phases x two yes/no values).
+   *
+   * Pairs with tick 21's read-side
+   * `clawreview_review_digest_filter_applied_total`: read-side is
+   * "how often did a dashboard fresh-recompute apply a filter?";
+   * this write-side is "how often did the worker build a filtered
+   * snapshot?". A dashboard that subtracts the two rates gets a
+   * "filter coverage drift" signal (writes per minute that filter
+   * vs reads per minute that filter, by axis).
+   */
+  findingsFilterPreAppliedTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -550,6 +579,18 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const findingsFilterPreAppliedTotal = new Counter({
+    name: 'clawreview_findings_filter_pre_applied_total',
+    help:
+      'Tick 22: worker-side filter coverage. Fires twice per completed ' +
+      'review (once per phase: aggregate, worker_post). The applied axis ' +
+      'is a closed yes|no set; cross-product cardinality is 4. Pairs ' +
+      'with the read-side clawreview_review_digest_filter_applied_total ' +
+      'to surface "writes that filter" vs "reads that filter" drift.',
+    labelNames: ['phase', 'applied'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -614,6 +655,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDigestPersistedDriftTotal,
     reviewDriftWatchPollsTotal,
     reviewDigestFilterAppliedTotal,
+    findingsFilterPreAppliedTotal,
     queueDepth,
     queueInflight,
   };
@@ -1413,6 +1455,66 @@ export function observeReviewDigestFilterApplied(
   metrics.reviewDigestFilterAppliedTotal.inc({
     min_confidence: deriveReviewDigestFilterAppliedLabel(minConfidenceApplied),
     severity_threshold: deriveReviewDigestFilterAppliedLabel(severityThresholdApplied),
+  });
+}
+
+/**
+ * Tick 22: closed set of pipeline phases the worker-side filter-
+ * coverage counter (`findingsFilterPreAppliedTotal`) attributes
+ * each fire to:
+ *
+ *   - `aggregate`   -- the filter applied INSIDE aggregate() via
+ *                      cfg.min_confidence + cfg.severity_threshold
+ *                      mapping to aggregate's `minConfidence` /
+ *                      `threshold` opts. Runs before dedupe / rank.
+ *   - `worker_post` -- the filter applied in the worker's
+ *                      findingDigestWithFilterReport pass AFTER
+ *                      aggregate(). Defence-in-depth on the happy
+ *                      path; reflects the contract of the
+ *                      persisted digest.
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal (e.g. 'aggregator' or 'worker' alone) would
+ * silently fragment the counter series across label values that
+ * look correct in code review. A grep for FINDINGS_FILTER_PHASES
+ * is the one source of truth.
+ */
+export const FINDINGS_FILTER_PHASES = ['aggregate', 'worker_post'] as const;
+export type FindingsFilterPhase = (typeof FINDINGS_FILTER_PHASES)[number];
+
+/**
+ * Tick 22: record one filter-coverage observation on the
+ * `clawreview_findings_filter_pre_applied_total{phase,applied}`
+ * counter.
+ *
+ * Fires from two call sites in the worker -- once per phase per
+ * completed review. The worker passes the SAME `applied` bit to
+ * both phases (cfg.min_confidence / cfg.severity_threshold are
+ * the source of truth for both); the per-phase fire lets a
+ * dashboard separate "aggregate filter active" from "post-aggregate
+ * filter active" if a future refactor decouples the two.
+ *
+ * `applied` is intentionally a single boolean here rather than
+ * the two-axis (min_confidence, severity_threshold) shape the
+ * read-side counter uses. Rationale: the worker call sites
+ * already know whether the filter "did anything" via the
+ * FindingDigestFilterReport.appliedFilters.any bit (which
+ * collapses both axes to a single OR). For drill-down on which
+ * axis fired, the persisted ReviewRecord.filterReport carries
+ * the per-axis bits; consumers needing per-axis attribution read
+ * that field. Keeping the counter to a single axis caps cardinality
+ * at 4 (2 phases x 2 applied values).
+ *
+ * Cheap: a single counter increment per fire.
+ */
+export function observeFindingsFilterPreApplied(
+  metrics: MetricsBundle,
+  phase: FindingsFilterPhase,
+  applied: boolean,
+): void {
+  metrics.findingsFilterPreAppliedTotal.inc({
+    phase,
+    applied: deriveReviewDigestFilterAppliedLabel(applied),
   });
 }
 
