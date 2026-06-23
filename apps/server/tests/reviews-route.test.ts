@@ -2423,5 +2423,165 @@ describe('reviews and stats routes', () => {
       const afterFull = afterFullMatch ? Number(afterFullMatch[1]) : 0;
       expect(afterFull).toBe(beforeFull);
     });
+
+    // Tick 24: ?fields=appliedFilters,inputTotal,droppedTotal,applied
+    // allowlist projection.
+    describe('?fields= allowlist (tick 24)', () => {
+      it('projects to only the requested fields (full path)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 242, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=inputTotal,droppedTotal`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // reviewId + slim always preserved.
+        expect(body.reviewId).toBe(reviewId);
+        expect(body.slim).toBe(false);
+        // Requested fields present.
+        expect(body.inputTotal).toBe(3);
+        expect(body.droppedTotal).toBe(1);
+        // Non-requested data fields stripped.
+        expect(body.appliedFilters).toBeUndefined();
+        expect(body.applied).toBeUndefined();
+        // fields echo confirms what arrived.
+        expect(body.fields).toEqual(['inputTotal', 'droppedTotal']);
+      });
+
+      it('canonicalises field order regardless of input order (sorted by declaration)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 243, minConfidence: 0.5 });
+        // Reverse the input order; the echo MUST come back in declaration order
+        // so a dashboard that caches on the echo string doesn't see spurious
+        // changes when an operator reorders the query.
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=applied,droppedTotal,inputTotal,appliedFilters`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // FILTER_REPORT_FIELDS order: appliedFilters, inputTotal, droppedTotal, applied
+        expect(body.fields).toEqual([
+          'appliedFilters',
+          'inputTotal',
+          'droppedTotal',
+          'applied',
+        ]);
+      });
+
+      it('rejects ?fields with an empty intermediate entry (typo guard)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 244, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=inputTotal,,droppedTotal`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+      });
+
+      it('rejects ?fields with an unknown name (enumerates valid set)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 245, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=inputTotal,notARealField`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(String(res.json().issues)).toContain('notARealField');
+        // Error message enumerates the valid set so the operator sees the fix.
+        expect(String(res.json().issues)).toContain('appliedFilters');
+      });
+
+      it('accepts case-insensitive field names (canonical echo is camelCase)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 246, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=APPLIEDFILTERS,inputtotal`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // Echo is the canonical camelCase form regardless of input case.
+        expect(body.fields).toEqual(['appliedFilters', 'inputTotal']);
+        expect(body.appliedFilters).toBeDefined();
+        expect(body.inputTotal).toBe(3);
+      });
+
+      it('rejects ?slim and ?fields together (mutually exclusive projection modes)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 247, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?slim=true&fields=inputTotal`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(String(res.json().issues)).toContain('mutually exclusive');
+      });
+
+      it('absent ?fields returns the full body (back-compat with tick 23)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 248, minConfidence: 0.5 });
+        const res = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // No fields echo when absent (back-compat).
+        expect(body.fields).toBeUndefined();
+        // Full body fields all present.
+        expect(body.appliedFilters).toBeDefined();
+        expect(body.inputTotal).toBe(3);
+        expect(body.droppedTotal).toBe(1);
+        expect(body.applied).toBe(true);
+      });
+    });
+
+    // Tick 24: pure parseFilterReportFields / projectFilterReportFields
+    // coverage so each helper has a regression pin without driving
+    // the Fastify route.
+    describe('parseFilterReportFields / projectFilterReportFields (tick 24 pure)', () => {
+      it('treats undefined / empty / whitespace as absent', async () => {
+        const { parseFilterReportFields } = await import('../src/routes/reviews.js');
+        expect(parseFilterReportFields(undefined).kind).toBe('absent');
+        expect(parseFilterReportFields('').kind).toBe('absent');
+        expect(parseFilterReportFields('   ').kind).toBe('absent');
+      });
+
+      it('resolves a comma-separated allowlist into the canonical-order array', async () => {
+        const { parseFilterReportFields } = await import('../src/routes/reviews.js');
+        const r = parseFilterReportFields('droppedTotal,inputTotal');
+        expect(r.kind).toBe('ok');
+        if (r.kind === 'ok') {
+          expect(r.fields).toEqual(['inputTotal', 'droppedTotal']);
+        }
+      });
+
+      it('dedupes duplicate names silently', async () => {
+        const { parseFilterReportFields } = await import('../src/routes/reviews.js');
+        const r = parseFilterReportFields('inputTotal,inputTotal,droppedTotal,InputTotal');
+        if (r.kind === 'ok') {
+          expect(r.fields).toEqual(['inputTotal', 'droppedTotal']);
+        }
+      });
+
+      it('preserves reviewId / slim under projection regardless of allowlist', async () => {
+        const { projectFilterReportFields } = await import('../src/routes/reviews.js');
+        const projected = projectFilterReportFields(
+          {
+            reviewId: 'rv_xyz',
+            slim: false,
+            inputTotal: 10,
+            droppedTotal: 3,
+            applied: true,
+            appliedFilters: { any: true },
+          },
+          ['inputTotal'],
+        );
+        // Identifiers preserved.
+        expect(projected.reviewId).toBe('rv_xyz');
+        expect(projected.slim).toBe(false);
+        // Allowlisted field present.
+        expect(projected.inputTotal).toBe(10);
+        // Non-allowlisted data fields stripped.
+        expect(projected.droppedTotal).toBeUndefined();
+        expect(projected.applied).toBeUndefined();
+        expect(projected.appliedFilters).toBeUndefined();
+      });
+    });
   });
 });

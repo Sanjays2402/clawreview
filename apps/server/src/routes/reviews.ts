@@ -701,18 +701,42 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       }
       // Reuse parseNormalisedEchoFlag's boolean-sugar contract so this
       // endpoint accepts the same `?slim=true|1|yes` / `?slim=false|0|no`
-      // shapes a consumer already knows from the digest route. We do
-      // NOT accept the comma-list / minus-prefix forms here because
-      // this shape only has ONE strippable field (appliedFilters) and
-      // a list would be over-engineering for a single bit.
+      // shapes a consumer already knows from the digest route.
+      //
+      // Tick 24: `?fields=appliedFilters,inputTotal,droppedTotal,applied`
+      // ALLOWLIST projection -- mirrors /digest's ?slim field-list. A
+      // dashboard panel that only needs `droppedTotal` can request
+      // JUST that field and ship the smallest possible payload. The
+      // allowlist is mutually exclusive with ?slim because the two
+      // projection modes target different use cases (?slim = collapse
+      // the verbose appliedFilters; ?fields = arbitrary subset). A
+      // request that sets both rejects 400 with a clear hint.
       const queryParse = z
-        .object({ slim: z.string().optional() })
+        .object({ slim: z.string().optional(), fields: z.string().optional() })
         .safeParse(req.query ?? {});
       if (!queryParse.success) {
         reply.code(400);
         return { error: 'BadQuery', issues: queryParse.error.flatten() };
       }
       const slim = parseNormalisedEchoFlag(queryParse.data.slim);
+      const fieldsParse = parseFilterReportFields(queryParse.data.fields);
+      if (fieldsParse.kind === 'invalid') {
+        reply.code(400);
+        return { error: 'BadQuery', issues: fieldsParse.message };
+      }
+      const fields = fieldsParse.kind === 'ok' ? fieldsParse.fields : null;
+      // Mutex: ?slim + ?fields targets two different projection modes;
+      // combining them would force the route to negotiate semantics
+      // ("which wins?") that have no clean answer. Reject loudly so
+      // an operator picks one mode.
+      if (slim && fields !== null) {
+        reply.code(400);
+        return {
+          error: 'BadQuery',
+          issues:
+            '?slim and ?fields are mutually exclusive (pick one projection mode)',
+        };
+      }
       const rec = await store.get(params.data.id);
       if (!rec) {
         reply.code(404);
@@ -733,6 +757,11 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       // exception doesn't leak a phantom count -- but the inc is
       // safe to fire even if we return early (the body shape is
       // pre-determined by the slim bit).
+      //
+      // Note: when ?fields is in play the shape label is still
+      // 'full' (the field-list projection is a sub-selection of the
+      // full shape, not a separate projection mode). This keeps the
+      // counter / histogram cardinality at 2.
       const metricsBundle = getMetrics({ service: 'clawreview-server' });
       observeReviewFilterReportRead(metricsBundle, slim);
       let body: Record<string, unknown>;
@@ -748,7 +777,7 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
           slim: true,
         };
       } else {
-        body = {
+        const fullBody: Record<string, unknown> = {
           reviewId: rec.id,
           inputTotal: fr.inputTotal,
           droppedTotal: fr.droppedTotal,
@@ -760,6 +789,17 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
           applied: fr.appliedFilters.any,
           slim: false,
         };
+        // Tick 24: apply the ?fields allowlist if present. reviewId
+        // and slim are ALWAYS preserved (they're consumer-facing
+        // identifiers, not data fields); the projection only governs
+        // the data fields. fields echo on the response so a consumer
+        // can audit what arrived.
+        if (fields !== null) {
+          body = projectFilterReportFields(fullBody, fields);
+          body['fields'] = fields;
+        } else {
+          body = fullBody;
+        }
       }
       // Tick 24: observe the per-shape latency right before returning
       // so the histogram captures the full request->response path.
@@ -1183,4 +1223,134 @@ export function parseNormalisedEchoFlag(raw: string | undefined): boolean {
   const trimmed = raw.trim().toLowerCase();
   if (trimmed.length === 0) return false;
   return trimmed === 'true' || trimmed === '1' || trimmed === 'yes';
+}
+
+/**
+ * Tick 24: closed set of allowlistable field names for the
+ * `/api/reviews/:id/filter-report?fields=` query parameter.
+ *
+ * Single source of truth for the field names a consumer can request.
+ * Adding a new field here is a one-line change; forgetting to add it
+ * to the helper would surface as a parse error at runtime so the
+ * route never silently returns a partially-projected body.
+ *
+ * Note: `reviewId`, `slim`, and `fields` are NEVER controllable via
+ * the allowlist -- they're consumer-facing identifiers and projection
+ * metadata that the route always preserves. Only the data fields
+ * listed here are subject to the allowlist.
+ */
+export const FILTER_REPORT_FIELDS = [
+  'appliedFilters',
+  'inputTotal',
+  'droppedTotal',
+  'applied',
+] as const;
+export type FilterReportField = (typeof FILTER_REPORT_FIELDS)[number];
+
+/**
+ * Tick 24: outcome of parsing `?fields=<csv>` for the filter-report
+ * route. Mirrors `SlimDirective`'s discriminated-union shape so the
+ * route can decide between "absent / use full body", "apply
+ * projection", and "reject with 400" without ambiguity.
+ *
+ *   - `'absent'`  -- the query param wasn't present (or was empty
+ *                    after trim). Route returns the full body.
+ *   - `'ok'`      -- a valid comma-separated subset. `fields` carries
+ *                    the resolved canonical field names (sorted /
+ *                    deduped) so the route's echo on the response is
+ *                    stable across input orderings.
+ *   - `'invalid'` -- typo / empty entry / unknown name. Route 400s
+ *                    with `message` so the operator can fix it.
+ */
+export type FilterReportFieldsDirective =
+  | { kind: 'absent' }
+  | { kind: 'ok'; fields: FilterReportField[] }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Tick 24: parse `?fields=appliedFilters,inputTotal,droppedTotal,applied`
+ * into a `FilterReportFieldsDirective`.
+ *
+ * Validation rules (mirrors `parseSlimDirective`'s field-list arm so
+ * an operator who knows /digest's projection contract knows this one
+ * too):
+ *   - undefined / empty / pure-whitespace  -> 'absent'
+ *   - case-insensitive matching against FILTER_REPORT_FIELDS so URL-
+ *     case mangling tools (some browsers normalise) still work.
+ *   - duplicate names dedupe silently.
+ *   - an unknown field name rejects with an enumerated 'invalid'
+ *     message listing the valid set.
+ *   - an empty intermediate entry (`?fields=appliedFilters,,inputTotal`)
+ *     rejects -- a stray comma is almost always a forgotten name and
+ *     silently widening the projection would mask the typo.
+ *   - whitespace around names is trimmed.
+ *   - the resolved `fields` array is sorted (canonical-order) so the
+ *     response echo is stable regardless of input ordering -- a
+ *     dashboard that depends on the echo for caching doesn't get
+ *     spurious cache busts because of input reordering.
+ *
+ * Pure: no mutation, no side effects.
+ */
+export function parseFilterReportFields(raw: string | undefined): FilterReportFieldsDirective {
+  if (raw === undefined) return { kind: 'absent' };
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return { kind: 'absent' };
+  const parts = trimmed.split(',').map((s) => s.trim());
+  if (parts.some((p) => p.length === 0)) {
+    return {
+      kind: 'invalid',
+      message: `?fields has an empty entry (likely a stray comma); got '${trimmed}'`,
+    };
+  }
+  // Build a canonical-by-lower lookup so URL-case mangling still
+  // resolves to the camelCase form the response body uses.
+  const canonicalByLower = new Map<string, FilterReportField>();
+  for (const f of FILTER_REPORT_FIELDS) canonicalByLower.set(f.toLowerCase(), f);
+  const resolved = new Set<FilterReportField>();
+  for (const part of parts) {
+    const canonical = canonicalByLower.get(part.toLowerCase());
+    if (!canonical) {
+      return {
+        kind: 'invalid',
+        message: `?fields has unknown field '${part}'; valid: ${FILTER_REPORT_FIELDS.join(', ')}`,
+      };
+    }
+    resolved.add(canonical);
+  }
+  // Stable canonical ordering so the response echo doesn't depend
+  // on input order. We sort by the FILTER_REPORT_FIELDS declaration
+  // order (which matches the body field order) so the array reads
+  // naturally for an operator skimming the JSON.
+  const fields = FILTER_REPORT_FIELDS.filter((f) => resolved.has(f));
+  return { kind: 'ok', fields };
+}
+
+/**
+ * Tick 24: project a full filter-report body to ONLY the named
+ * fields. Always preserves `reviewId` and `slim` (consumer-facing
+ * identifiers that the route metadata depends on) regardless of the
+ * allowlist -- the projection only governs data fields.
+ *
+ * Returns a fresh object; never mutates the input. The route adds
+ * the `fields` echo on top of this projection so the caller can
+ * audit what was actually returned.
+ *
+ * Pure: callers can rely on input immutability and deterministic
+ * field ordering (matches `FILTER_REPORT_FIELDS` declaration order).
+ */
+export function projectFilterReportFields(
+  body: Record<string, unknown>,
+  fields: FilterReportField[],
+): Record<string, unknown> {
+  const allow = new Set<string>(fields);
+  const out: Record<string, unknown> = {};
+  // Always-preserved identifiers come first so dashboards binding to
+  // `body.reviewId` keep working under projection.
+  if ('reviewId' in body) out['reviewId'] = body['reviewId'];
+  if ('slim' in body) out['slim'] = body['slim'];
+  for (const field of FILTER_REPORT_FIELDS) {
+    if (!allow.has(field)) continue;
+    if (field in body) out[field] = body[field];
+  }
+  return out;
 }
