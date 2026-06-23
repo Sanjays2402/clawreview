@@ -940,5 +940,164 @@ describe('runStats', () => {
       expect(parsed.minConfidence).toBe(0.5);
       expect(out()).not.toContain('Showing');
     });
+
+    // Tick 22: --json-header opts the JSON mode into emitting a
+    // one-line JSON envelope BEFORE the multi-line report body so
+    // a CI pipeline can `head -1 | jq` to short-circuit without
+    // parsing the whole report. Requires --filter-summary so the
+    // flag composes the existing opt-in. Default OFF for back-
+    // compat -- existing JSON consumers see no diff.
+    describe('--json-header JSON envelope (tick 22)', () => {
+      it('absent flag: JSON output shape unchanged (back-compat)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // No header line: the whole stdout MUST parse as a single
+        // JSON object (no leading envelope to break consumers that
+        // do `JSON.parse(stdout)` directly).
+        const parsed = JSON.parse(out());
+        expect(parsed.totals).toBeDefined();
+        expect(parsed.minConfidence).toBe(0.5);
+      });
+
+      it('--filter-summary + --json-header + json: emits envelope first, then report body', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // First line: one-line JSON envelope.
+        const stdout = out();
+        const lines = stdout.trim().split('\n');
+        const header = JSON.parse(lines[0]!);
+        expect(header.kind).toBe('filterSummary');
+        expect(header.showing).toBe(1);
+        expect(header.inputTotal).toBe(3);
+        expect(header.droppedTotal).toBe(2);
+        expect(header.minConfidence.normalised).toBe(0.5);
+        expect(header.minConfidence.applied).toBe(true);
+        expect(header.severityThreshold.applied).toBe(false);
+        expect(header.any).toBe(true);
+        // Remaining lines: the existing JSON report body (parses
+        // independently of the header).
+        const body = JSON.parse(lines.slice(1).join('\n'));
+        expect(body.totals).toBeDefined();
+        expect(body.minConfidence).toBe(0.5);
+      });
+
+      it('--json-header with NO filters echoes a no-filter envelope (kind still filterSummary)', async () => {
+        // A CI gate that always reads the first line expects the
+        // discriminator to be stable regardless of whether a filter
+        // ran. Pin that here.
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'filter-summary': true,
+            'json-header': true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        const lines = out().trim().split('\n');
+        const header = JSON.parse(lines[0]!);
+        expect(header.kind).toBe('filterSummary');
+        expect(header.showing).toBe(3);
+        expect(header.droppedTotal).toBe(0);
+        expect(header.any).toBe(false);
+        expect(header.minConfidence.applied).toBe(false);
+        expect(header.severityThreshold.applied).toBe(false);
+      });
+
+      it('--json-header WITHOUT --filter-summary is a no-op (composition requires both)', async () => {
+        // The flag has no meaning without --filter-summary because
+        // there's no summary to emit. We intentionally don't 400 --
+        // a CI pipeline that pre-bakes a fleet of flags can pass
+        // both unconditionally; the header only fires when the
+        // summary opt-in is set.
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'json-header': true, // <-- without filter-summary
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // No header on stdout: the whole output is a single JSON
+        // object (the report body).
+        const parsed = JSON.parse(out());
+        expect(parsed.minConfidence).toBe(0.5);
+      });
+
+      it('--json-header in text mode is a no-op (text already prints the summary line)', async () => {
+        // The flag is JSON-mode specific. In text mode we don't
+        // want a duplicate header AND the existing "Showing N"
+        // line; we leave the text output alone.
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            // format: 'text' (default)
+            'no-color': true,
+          },
+        });
+        // Text output unchanged: still has the "Showing 1 finding"
+        // line (the text summary), no JSON envelope.
+        const stdout = out();
+        expect(stdout).toContain('Showing 1 finding');
+        expect(stdout).not.toContain('"kind":"filterSummary"');
+      });
+
+      it('renderFilterSummaryJson pure helper builds the envelope shape', async () => {
+        const { renderFilterSummaryJson } = await import('../src/commands/stats.js');
+        const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+        const findings = FILTER_REPORT.aggregated.findings;
+        const report = findingDigestWithFilterReport(findings as never, { minConfidence: 0.5 });
+        const env = renderFilterSummaryJson(report);
+        expect(env.kind).toBe('filterSummary');
+        expect(env.showing).toBe(1);
+        expect(env.inputTotal).toBe(3);
+        expect(env.droppedTotal).toBe(2);
+        expect(env.minConfidence.raw).toBe(0.5);
+        expect(env.minConfidence.normalised).toBe(0.5);
+        expect(env.minConfidence.applied).toBe(true);
+        expect(env.severityThreshold.raw).toBeUndefined();
+        expect(env.severityThreshold.applied).toBe(false);
+        expect(env.any).toBe(true);
+      });
+    });
   });
 });

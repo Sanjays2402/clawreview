@@ -229,8 +229,37 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // dashboard-style "you're seeing 1 finding (filtered 2 of 3 by
   // min_confidence >= 0.5)" line is the natural UX.
   const showFilterSummary = Boolean(args.flags['filter-summary']);
+  // Tick 22: --json-header. When set AND --format json AND
+  // --filter-summary is also set, emit a one-line JSON envelope
+  // on stdout BEFORE the multi-line JSON report body. The
+  // envelope shape is:
+  //   { kind: "filterSummary",
+  //     showing, inputTotal, droppedTotal,
+  //     minConfidence: { raw, normalised, applied },
+  //     severityThreshold: { raw, normalised, applied },
+  //     any }
+  // A downstream tool can `head -1 | jq '.droppedTotal > 0'`
+  // to short-circuit without parsing the full report. Default
+  // OFF for back-compat -- existing JSON consumers see no diff.
+  // Requires --filter-summary so the flag composes the existing
+  // opt-in (rather than emitting a header on every JSON call).
+  // In text mode the flag is a no-op (the existing text header
+  // is already there); we don't error because composition with
+  // unrelated text-mode flags should be benign.
+  const wantJsonHeader = Boolean(args.flags['json-header']);
 
   if (format === 'json') {
+    // Tick 22: opt-in JSON-header line. When --json-header AND
+    // --filter-summary are BOTH set, emit a single-line JSON
+    // envelope BEFORE the report body so a downstream consumer
+    // can `head -1 | jq` to short-circuit on the filter shape.
+    // The envelope is byte-identical to renderFilterSummaryJson()
+    // so a CI gate that parses it never sees a multi-line JSON
+    // object straddling two layers.
+    if (wantJsonHeader && showFilterSummary) {
+      const header = renderFilterSummaryJson(filterReport);
+      process.stdout.write(`${JSON.stringify(header)}\n`);
+    }
     process.stdout.write(
       `${JSON.stringify(
         {
@@ -597,4 +626,79 @@ export function renderFilterSummaryLine(
     ? `${dropped}; no filters applied`
     : `${dropped} by ${parts.join(' + ')}`;
   return c.cyan(`Showing ${showing} (${detail})`);
+}
+
+/**
+ * Tick 22: build the machine-readable JSON envelope for
+ * `--filter-summary --json-header`.
+ *
+ * Use case: a CI pipeline that consumes `clawreview stats --format
+ * json --filter-summary --json-header` wants to read JUST the
+ * filter summary on the FIRST line of stdout, decide whether to
+ * short-circuit (e.g. fail the build immediately if any filter
+ * was applied), and only parse the multi-line report body when
+ * required. The envelope shape mirrors the text-mode renderer
+ * (`renderFilterSummaryLine`) but in a structured form so a `jq`
+ * filter never has to scrape "Showing N findings (...)" with a
+ * regex.
+ *
+ * Shape:
+ *   - `kind`            -- discriminator string `"filterSummary"`.
+ *                          Pinned so a future header variant
+ *                          (e.g. `kind: "schemaVersion"`) doesn't
+ *                          collide; consumers gate on this string
+ *                          before reading the rest.
+ *   - `showing`         -- post-filter `digest.total`.
+ *   - `inputTotal`      -- pre-filter total (length of findings).
+ *   - `droppedTotal`    -- inputTotal - showing. Always >= 0.
+ *   - `minConfidence`   -- `{ raw, normalised, applied }` mirror
+ *                          of `FindingDigestFilterReport.
+ *                          appliedFilters.minConfidence`.
+ *   - `severityThreshold` -- same shape for the severity axis.
+ *   - `any`             -- true iff EITHER filter applied
+ *                          (mirror of appliedFilters.any).
+ *
+ * Pure / exported so the test surface can pin every arm. The
+ * field names are stable; a new field added in a future tick
+ * extends the envelope but never renames existing ones (existing
+ * consumers stay correct).
+ */
+export interface StatsFilterSummaryEnvelope {
+  kind: 'filterSummary';
+  showing: number;
+  inputTotal: number;
+  droppedTotal: number;
+  minConfidence: {
+    raw: number | undefined;
+    normalised: number;
+    applied: boolean;
+  };
+  severityThreshold: {
+    raw: string | undefined;
+    normalised: string | null;
+    applied: boolean;
+  };
+  any: boolean;
+}
+
+export function renderFilterSummaryJson(
+  report: FindingDigestFilterReport,
+): StatsFilterSummaryEnvelope {
+  return {
+    kind: 'filterSummary',
+    showing: report.digest.total,
+    inputTotal: report.inputTotal,
+    droppedTotal: report.droppedTotal,
+    minConfidence: {
+      raw: report.appliedFilters.minConfidence.raw,
+      normalised: report.appliedFilters.minConfidence.normalised,
+      applied: report.appliedFilters.minConfidence.applied,
+    },
+    severityThreshold: {
+      raw: report.appliedFilters.severityThreshold.raw,
+      normalised: report.appliedFilters.severityThreshold.normalised,
+      applied: report.appliedFilters.severityThreshold.applied,
+    },
+    any: report.appliedFilters.any,
+  };
 }
