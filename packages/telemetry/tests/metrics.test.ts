@@ -1225,3 +1225,91 @@ describe('observeFindingsFilterPreApplied (tick 22)', () => {
   });
 });
 
+// Tick 23: /api/reviews/:id/filter-report read counter (full | slim
+// shape attribution). Bounded at 2 series total.
+describe('deriveReviewFilterReportShape (tick 23)', () => {
+  it('returns slim when slim=true', async () => {
+    const { deriveReviewFilterReportShape } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportShape(true)).toBe('slim');
+  });
+  it('returns full when slim=false', async () => {
+    const { deriveReviewFilterReportShape } = await import('../src/metrics.js');
+    expect(deriveReviewFilterReportShape(false)).toBe('full');
+  });
+  it('REVIEW_FILTER_REPORT_SHAPES is the closed full|slim tuple', async () => {
+    const { REVIEW_FILTER_REPORT_SHAPES } = await import('../src/metrics.js');
+    // Frozen membership so a typo'd literal at a call site cannot
+    // silently fragment the series.
+    expect([...REVIEW_FILTER_REPORT_SHAPES]).toEqual(['full', 'slim']);
+  });
+});
+
+describe('observeReviewFilterReportRead (tick 23)', () => {
+  it('bumps the full series when slim=false', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportRead } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frr-1', defaultMetrics: false });
+    observeReviewFilterReportRead(metrics, false);
+    observeReviewFilterReportRead(metrics, false);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*2/,
+    );
+  });
+
+  it('bumps the slim series when slim=true', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportRead } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frr-2', defaultMetrics: false });
+    observeReviewFilterReportRead(metrics, true);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*1/,
+    );
+  });
+
+  it('keeps full and slim independent (cardinality is exactly 2)', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportRead } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frr-3', defaultMetrics: false });
+    observeReviewFilterReportRead(metrics, false); // full
+    observeReviewFilterReportRead(metrics, true);  // slim
+    observeReviewFilterReportRead(metrics, true);  // slim
+    const text = await metrics.registry.metrics();
+    const seriesLines = text
+      .split('\n')
+      .filter((l) => l.startsWith('clawreview_review_filter_report_reads_total{'));
+    expect(seriesLines).toHaveLength(2);
+    expect(text).toMatch(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*1/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*2/,
+    );
+  });
+
+  it('reconciles full + slim counts with the total read count', async () => {
+    // Workflow contract: each read fires exactly once with one shape
+    // label, so summing the two series gives the total read count.
+    // Pin the invariant so a future refactor that double-fires
+    // breaks visibly.
+    resetMetricsForTests();
+    const { observeReviewFilterReportRead } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frr-4', defaultMetrics: false });
+    for (let i = 0; i < 5; i++) observeReviewFilterReportRead(metrics, false);
+    for (let i = 0; i < 3; i++) observeReviewFilterReportRead(metrics, true);
+    const text = await metrics.registry.metrics();
+    const full = text.match(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*(\d+)/,
+    );
+    const slim = text.match(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*(\d+)/,
+    );
+    expect(full).toBeTruthy();
+    expect(slim).toBeTruthy();
+    expect(Number(full![1])).toBe(5);
+    expect(Number(slim![1])).toBe(3);
+    expect(Number(full![1]) + Number(slim![1])).toBe(8); // 5 + 3 reads
+  });
+});
+

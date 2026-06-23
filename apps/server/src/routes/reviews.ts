@@ -12,7 +12,7 @@ import {
   toCsv,
   renderReviewReport,
 } from '@clawreview/aggregator';
-import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied } from '@clawreview/telemetry';
+import { getMetrics, observeReviewDigestDrift, observeReviewDigestFilterApplied, observeReviewFilterReportRead } from '@clawreview/telemetry';
 import type { Severity } from '@clawreview/types';
 
 import { getReviewStore } from '../services/review-store.js';
@@ -720,6 +720,14 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
         return { error: 'NoFilterReport', reviewId: rec.id };
       }
       const fr = rec.filterReport;
+      // Tick 23: fire the read counter so a dashboard can see "how
+      // often does each filter-report consumer use slim vs full?".
+      // We fire BEFORE building the response body so a mid-render
+      // exception doesn't leak a phantom count -- but the inc is
+      // safe to fire even if we return early (the body shape is
+      // pre-determined by the slim bit).
+      const metricsBundle = getMetrics({ service: 'clawreview-server' });
+      observeReviewFilterReportRead(metricsBundle, slim);
       if (slim) {
         return {
           reviewId: rec.id,

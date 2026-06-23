@@ -356,6 +356,34 @@ export interface MetricsBundle {
    * vs reads per minute that filter, by axis).
    */
   findingsFilterPreAppliedTotal: Counter<string>;
+  /**
+   * Tick 23: `clawreview_review_filter_report_reads_total{shape}`
+   * -- how often does each /api/reviews/:id/filter-report read
+   * land on the full vs slim response shape?
+   *
+   * Fired once per accepted read (200 status; 404 reads do NOT fire
+   * because they didn't actually consume the persisted filter report).
+   *
+   * Single label, closed two-value set:
+   *   - `full` -- the response carried the verbose appliedFilters
+   *                object (default `?slim=false` / absent).
+   *   - `slim` -- the response stripped appliedFilters and carried
+   *                only the single `applied: boolean` (`?slim=true|1|yes`).
+   *
+   * Cardinality is bounded at 2. Pairs with the tick-23 standalone
+   * endpoint: a dashboard can graph
+   *   rate(clawreview_review_filter_report_reads_total{shape="slim"}[5m])
+   * / rate(clawreview_review_filter_report_reads_total[5m])
+   * to see "what fraction of filter-report consumers opt into the
+   * slim projection?" -- useful for sizing future projection knobs.
+   *
+   * Use case: when most consumers use slim, the dashboard team has
+   * data to consider making slim the default (or vice versa). The
+   * NotFound / NoFilterReport 404 arms are deliberately excluded
+   * from the counter: counting them would inflate the read rate
+   * with traffic that didn't actually touch the persisted shape.
+   */
+  reviewFilterReportReadsTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -591,6 +619,17 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewFilterReportReadsTotal = new Counter({
+    name: 'clawreview_review_filter_report_reads_total',
+    help:
+      'Tick 23: /api/reviews/:id/filter-report reads, labelled by the ' +
+      'projection shape returned (full | slim). Fires once per 200; ' +
+      '404 arms (NotFound, NoFilterReport) do NOT fire because they ' +
+      'did not actually consume the persisted shape. Cardinality 2.',
+    labelNames: ['shape'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -656,6 +695,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDriftWatchPollsTotal,
     reviewDigestFilterAppliedTotal,
     findingsFilterPreAppliedTotal,
+    reviewFilterReportReadsTotal,
     queueDepth,
     queueInflight,
   };
@@ -1515,6 +1555,58 @@ export function observeFindingsFilterPreApplied(
   metrics.findingsFilterPreAppliedTotal.inc({
     phase,
     applied: deriveReviewDigestFilterAppliedLabel(applied),
+  });
+}
+
+/**
+ * Tick 23: closed set of response shapes for the
+ * `/api/reviews/:id/filter-report` endpoint -- the `shape` label on
+ * the `reviewFilterReportReadsTotal` counter.
+ *
+ *   - `full` -- the response carried the verbose appliedFilters
+ *                object (default `?slim=false` / absent).
+ *   - `slim` -- the response stripped appliedFilters and carried
+ *                only the single `applied: boolean` (`?slim=true|1|yes`).
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series across
+ * label values that both look correct in code review. A grep for
+ * REVIEW_FILTER_REPORT_SHAPES is the one source of truth.
+ */
+export const REVIEW_FILTER_REPORT_SHAPES = ['full', 'slim'] as const;
+export type ReviewFilterReportShape = (typeof REVIEW_FILTER_REPORT_SHAPES)[number];
+
+/**
+ * Tick 23: derive a `full`/`slim` shape label from the slim-projection
+ * boolean (the `slim` query knob's resolved value).
+ *
+ * Pure: a 3-line helper that exists only so the route layer cannot
+ * accidentally pass a string like 'true'/'false'/'compact' that
+ * would fragment the counter series.
+ */
+export function deriveReviewFilterReportShape(slim: boolean): ReviewFilterReportShape {
+  return slim ? 'slim' : 'full';
+}
+
+/**
+ * Tick 23: record one accepted `/api/reviews/:id/filter-report` read
+ * on the `clawreview_review_filter_report_reads_total{shape}` counter.
+ *
+ * Fires once per 200 response (404 NotFound / NoFilterReport are
+ * deliberately excluded -- they didn't actually consume the
+ * persisted shape, so counting them would inflate the read rate
+ * with traffic that didn't touch the data). The route layer fires
+ * this AFTER deciding the response body but BEFORE returning, so a
+ * mid-render exception doesn't leak a phantom count.
+ *
+ * Cheap: a single counter increment with one short label.
+ */
+export function observeReviewFilterReportRead(
+  metrics: MetricsBundle,
+  slim: boolean,
+): void {
+  metrics.reviewFilterReportReadsTotal.inc({
+    shape: deriveReviewFilterReportShape(slim),
   });
 }
 
