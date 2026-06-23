@@ -548,6 +548,139 @@ export function findingDigest(
 }
 
 /**
+ * Tick 21: explicit filter-application report.
+ *
+ * `findingDigest()` silently drops findings that fail the pre-bucket
+ * filters (`minConfidence`, `severityThreshold`). For most callers
+ * that's the desired contract -- the digest IS the post-filter
+ * snapshot. But three new consumers want the explicit count:
+ *
+ *   - Telemetry: a Prometheus counter `clawreview_review_digest_
+ *     filter_applied_total{min_confidence,severity_threshold}` wants
+ *     to know whether each /digest request actually applied a filter
+ *     (so dashboards can chart "filtered fresh recomputes by minute").
+ *   - CLI `stats --filter-summary`: a text-mode header wants to print
+ *     "Showing N findings (filtered M of N+M by min_confidence>=0.6)"
+ *     so the operator sees the filter is in effect.
+ *   - Server `?normalisedEcho=true`: a dashboard wants to render
+ *     "showing findings with confidence >= 1 (clamped from 1.5)" so
+ *     the panel header reflects the actual applied threshold rather
+ *     than the operator's raw query value.
+ *
+ * Shape:
+ *   - `digest`            -- the same FindingDigest findingDigest()
+ *                            would return for the same inputs.
+ *   - `inputTotal`        -- length of the input findings array
+ *                            BEFORE filtering. Useful when the
+ *                            caller doesn't have the original array
+ *                            on hand.
+ *   - `droppedTotal`      -- inputTotal - digest.total. Always >= 0.
+ *                            0 when no filter applied (and also 0
+ *                            when filters applied but no findings
+ *                            were below the floor).
+ *   - `appliedFilters`    -- which filters actually applied, with
+ *                            both the raw operator-supplied value
+ *                            AND the normalised / clamped value the
+ *                            digest used. The `applied` boolean flips
+ *                            when the normalised value is not the
+ *                            no-op (filterThreshold > 0 for
+ *                            minConfidence; severityFloor !== null
+ *                            for severityThreshold).
+ *
+ * Pure: never mutates the input array or its findings.
+ *
+ * Why a SEPARATE helper rather than extending `FindingDigest` with a
+ * `dropped: number` field: most consumers don't care and want the
+ * minimal shape. Adding a field to the persisted-on-the-wire `digest`
+ * object would balloon legacy review records on disk. Keeping the
+ * filter report a separate computed value lets the dashboard / CLI /
+ * telemetry consumers opt in without changing the storage layer or
+ * forcing every caller to handle a new field.
+ */
+export interface FindingDigestFilterReport {
+  /** The post-filter digest (same shape findingDigest() returns). */
+  digest: FindingDigest;
+  /** Number of findings in the input array BEFORE filtering. */
+  inputTotal: number;
+  /** Number of findings dropped by the pre-bucket filters. Always >= 0. */
+  droppedTotal: number;
+  /** Filter-application detail; useful for echo-back in CLI / server responses. */
+  appliedFilters: {
+    minConfidence: {
+      /** Raw operator-supplied value (verbatim; undefined when absent). */
+      raw: number | undefined;
+      /**
+       * Normalised / clamped value the digest actually used. 0 when
+       * no filter applied (back-compat: a 0 floor accepts every
+       * finding); a finite value in (0, 1] when a real filter
+       * applied. The clamping policy matches
+       * `normaliseDigestMinConfidence`.
+       */
+      normalised: number;
+      /** True iff the normalised threshold actually filtered anything (> 0). */
+      applied: boolean;
+    };
+    severityThreshold: {
+      /** Raw operator-supplied value (verbatim; undefined when absent). */
+      raw: string | undefined;
+      /**
+       * Normalised severity literal the digest used (null when no
+       * filter applied or the input was unrecognised). Matches
+       * `normaliseDigestSeverityThreshold`.
+       */
+      normalised: Severity | null;
+      /** True iff the normalised threshold actually filtered anything (!== null). */
+      applied: boolean;
+    };
+    /** Convenience: true iff ANY filter applied (minConfidence OR severityThreshold). */
+    any: boolean;
+  };
+}
+
+/**
+ * Compute `findingDigest()` PLUS an explicit filter-application
+ * report so callers can attribute drops to filters / surface the
+ * applied threshold in a UI / fire telemetry on whether a filter
+ * was active.
+ *
+ * Functionally identical to `findingDigest()` for the digest output;
+ * the surrounding `inputTotal` / `droppedTotal` / `appliedFilters`
+ * are computed in constant time relative to the input length (just
+ * the two normaliser calls + a subtraction).
+ */
+export function findingDigestWithFilterReport(
+  findings: Finding[],
+  opts: FindingDigestOptions = {},
+): FindingDigestFilterReport {
+  const inputTotal = findings.length;
+  const digest = findingDigest(findings, opts);
+  const rawMinConfidence = typeof opts.minConfidence === 'number' ? opts.minConfidence : undefined;
+  const normalisedMinConfidence = normaliseDigestMinConfidence(opts.minConfidence);
+  const minConfidenceApplied = normalisedMinConfidence > 0;
+  const rawSeverityThreshold = typeof opts.severityThreshold === 'string' ? opts.severityThreshold : undefined;
+  const normalisedSeverityThreshold = normaliseDigestSeverityThreshold(opts.severityThreshold);
+  const severityThresholdApplied = normalisedSeverityThreshold !== null;
+  return {
+    digest,
+    inputTotal,
+    droppedTotal: inputTotal - digest.total,
+    appliedFilters: {
+      minConfidence: {
+        raw: rawMinConfidence,
+        normalised: normalisedMinConfidence,
+        applied: minConfidenceApplied,
+      },
+      severityThreshold: {
+        raw: rawSeverityThreshold,
+        normalised: normalisedSeverityThreshold,
+        applied: severityThresholdApplied,
+      },
+      any: minConfidenceApplied || severityThresholdApplied,
+    },
+  };
+}
+
+/**
  * Compare two severity buckets so consumers can render in canonical
  * order (critical first) without re-importing the severity constants.
  *

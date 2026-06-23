@@ -1091,3 +1091,128 @@ describe('normaliseDigestSeverityThreshold (tick 20, pure helper)', () => {
   });
 });
 
+// Tick 21: explicit filter-application report alongside the digest.
+// Wraps findingDigest() with input/dropped counts + applied-filter
+// metadata so telemetry / CLI text headers / dashboard echo panels
+// can attribute drops without re-running the filter.
+describe('findingDigestWithFilterReport (tick 21)', () => {
+  it('returns inputTotal + droppedTotal alongside the digest', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [
+      f({ confidence: 0.9, severity: 'critical' }),
+      f({ confidence: 0.4, severity: 'medium' }),
+      f({ confidence: 0.2, severity: 'low' }),
+    ];
+    const report = findingDigestWithFilterReport(findings, { minConfidence: 0.5 });
+    expect(report.digest.total).toBe(1);
+    expect(report.inputTotal).toBe(3);
+    expect(report.droppedTotal).toBe(2);
+  });
+
+  it('appliedFilters.minConfidence carries raw + normalised + applied bit', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({ confidence: 0.9 })];
+    // Out-of-range raw clamps to 1; the normalised value is what the
+    // digest actually used. applied=true because normalised>0 is the
+    // not-no-op signal.
+    const report = findingDigestWithFilterReport(findings, { minConfidence: 1.5 });
+    expect(report.appliedFilters.minConfidence.raw).toBe(1.5);
+    expect(report.appliedFilters.minConfidence.normalised).toBe(1);
+    expect(report.appliedFilters.minConfidence.applied).toBe(true);
+  });
+
+  it('appliedFilters.severityThreshold carries raw + normalised + applied bit', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({ severity: 'critical' })];
+    const report = findingDigestWithFilterReport(findings, { severityThreshold: 'high' });
+    expect(report.appliedFilters.severityThreshold.raw).toBe('high');
+    expect(report.appliedFilters.severityThreshold.normalised).toBe('high');
+    expect(report.appliedFilters.severityThreshold.applied).toBe(true);
+  });
+
+  it('mis-cased severityThreshold echoes raw but normalised is null (applied=false)', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({ severity: 'critical' }), f({ severity: 'nit' })];
+    // The raw operator value round-trips so a CI gate can spot the
+    // typo; the digest itself counts every finding because the
+    // filter no-op'd. Cast through `any` because the public type
+    // refuses unknown strings -- the normaliser is the forgiving
+    // surface that tolerates them, which is exactly what we're
+    // pinning here.
+    const report = findingDigestWithFilterReport(findings, {
+      severityThreshold: 'Critical' as never,
+    });
+    expect(report.appliedFilters.severityThreshold.raw).toBe('Critical');
+    expect(report.appliedFilters.severityThreshold.normalised).toBeNull();
+    expect(report.appliedFilters.severityThreshold.applied).toBe(false);
+    expect(report.digest.total).toBe(2);
+    expect(report.droppedTotal).toBe(0);
+  });
+
+  it('absent filters: raw=undefined, normalised=0/null, applied=false, any=false', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({})];
+    const report = findingDigestWithFilterReport(findings);
+    expect(report.appliedFilters.minConfidence.raw).toBeUndefined();
+    expect(report.appliedFilters.minConfidence.normalised).toBe(0);
+    expect(report.appliedFilters.minConfidence.applied).toBe(false);
+    expect(report.appliedFilters.severityThreshold.raw).toBeUndefined();
+    expect(report.appliedFilters.severityThreshold.normalised).toBeNull();
+    expect(report.appliedFilters.severityThreshold.applied).toBe(false);
+    expect(report.appliedFilters.any).toBe(false);
+    expect(report.droppedTotal).toBe(0);
+  });
+
+  it('any=true when either arm applies (OR semantics)', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({})];
+    const onlyMin = findingDigestWithFilterReport(findings, { minConfidence: 0.5 });
+    const onlySev = findingDigestWithFilterReport(findings, { severityThreshold: 'medium' });
+    const both = findingDigestWithFilterReport(findings, { minConfidence: 0.5, severityThreshold: 'medium' });
+    expect(onlyMin.appliedFilters.any).toBe(true);
+    expect(onlySev.appliedFilters.any).toBe(true);
+    expect(both.appliedFilters.any).toBe(true);
+  });
+
+  it('digest body byte-identical to findingDigest() for the same opts', async () => {
+    const { findingDigest, findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [
+      f({ agent: 'A', category: 'security', severity: 'critical', confidence: 0.9, file: 'a.ts' }),
+      f({ agent: 'B', category: 'style', severity: 'nit', confidence: 0.1, file: 'b.ts' }),
+    ];
+    const opts = { minConfidence: 0.5, topAgents: 3, topFiles: 3, topCategories: 3 };
+    const plain = findingDigest(findings, opts);
+    const wrapped = findingDigestWithFilterReport(findings, opts);
+    expect(wrapped.digest).toEqual(plain);
+  });
+
+  it('droppedTotal is 0 when filter applied but no findings fell below the floor', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({ confidence: 0.9 }), f({ confidence: 0.8 })];
+    const report = findingDigestWithFilterReport(findings, { minConfidence: 0.5 });
+    expect(report.appliedFilters.minConfidence.applied).toBe(true);
+    expect(report.droppedTotal).toBe(0);
+    expect(report.digest.total).toBe(2);
+  });
+
+  it('does not mutate the input array', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({ confidence: 0.1 }), f({ confidence: 0.9 })];
+    const before = findings.slice();
+    findingDigestWithFilterReport(findings, { minConfidence: 0.5 });
+    expect(findings).toEqual(before);
+    expect(findings).toHaveLength(2);
+  });
+
+  it('numeric minConfidence raw=0 still echoes 0 verbatim (applied=false)', async () => {
+    const { findingDigestWithFilterReport } = await import('../src/digest.js');
+    const findings = [f({})];
+    const report = findingDigestWithFilterReport(findings, { minConfidence: 0 });
+    // A bare 0 floor is the back-compat no-op; the raw value is
+    // preserved so a dashboard can show "user explicitly set 0".
+    expect(report.appliedFilters.minConfidence.raw).toBe(0);
+    expect(report.appliedFilters.minConfidence.normalised).toBe(0);
+    expect(report.appliedFilters.minConfidence.applied).toBe(false);
+  });
+});
+
