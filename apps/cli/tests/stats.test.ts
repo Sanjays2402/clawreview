@@ -1099,5 +1099,178 @@ describe('runStats', () => {
         expect(env.any).toBe(true);
       });
     });
+
+    // Tick 23: --jsonl streams the report as line-delimited JSON
+    // (header + per-severity + footer) so a log-aggregator pipeline
+    // can ingest each line independently. Requires the full opt-in
+    // chain (--filter-summary + --json-header + --jsonl) so existing
+    // JSON consumers see no diff.
+    describe('--jsonl line-delimited stream (tick 23)', () => {
+      it('emits header + 5 severity buckets + footer when the full opt-in chain is set', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        const stdout = out();
+        const lines = stdout.trim().split('\n');
+        // 1 header + 5 severity + 1 footer = 7 lines exactly.
+        expect(lines).toHaveLength(7);
+        // Header still has kind=filterSummary.
+        const header = JSON.parse(lines[0]!);
+        expect(header.kind).toBe('filterSummary');
+        expect(header.showing).toBe(1);
+        expect(header.droppedTotal).toBe(2);
+        // Lines 2-6: one per severity, canonical order.
+        const expectedOrder = ['critical', 'high', 'medium', 'low', 'nit'];
+        for (let i = 0; i < 5; i += 1) {
+          const bucket = JSON.parse(lines[1 + i]!);
+          expect(bucket.kind).toBe('severityBucket');
+          expect(bucket.severity).toBe(expectedOrder[i]);
+        }
+        // The 0.5 floor leaves only the 0.9 critical finding.
+        const critical = JSON.parse(lines[1]!);
+        expect(critical.severity).toBe('critical');
+        expect(critical.count).toBe(1);
+        const medium = JSON.parse(lines[3]!);
+        expect(medium.severity).toBe('medium');
+        expect(medium.count).toBe(0);
+        // Footer line: kind=reportFooter carries the rest of the
+        // payload (byAgent / byCategory / topFiles / etc).
+        const footer = JSON.parse(lines[6]!);
+        expect(footer.kind).toBe('reportFooter');
+        expect(footer.minConfidence).toBe(0.5);
+        expect(footer.groupBy).toBe('severity');
+        expect(footer.byAgent).toBeDefined();
+        expect(footer.topFiles).toBeDefined();
+      });
+
+      it('falls back to the pretty-printed body when --jsonl is set but --json-header is not', async () => {
+        // --jsonl is a no-op without --json-header. We don't 400 the
+        // composition because a CI pipeline pre-baking flags should
+        // be able to pass both unconditionally; the JSONL stream
+        // only fires when the full chain is set.
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            jsonl: true, // --json-header missing
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // Output parses as a single JSON object (legacy body),
+        // NOT as line-delimited JSON.
+        const parsed = JSON.parse(out());
+        expect(parsed.totals).toBeDefined();
+        expect(parsed.minConfidence).toBe(0.5);
+        // No severityBucket kind in the output.
+        expect(out()).not.toContain('"kind":"severityBucket"');
+      });
+
+      it('--jsonl in text mode is a silent no-op (no JSONL stream, text body unchanged)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'min-confidence': '0.5',
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            // format: text (default)
+            'no-color': true,
+          },
+        });
+        const stdout = out();
+        // Text output unchanged: still has the Showing line + the
+        // severity block, NOT the JSON envelope.
+        expect(stdout).toContain('Showing 1 finding');
+        expect(stdout).not.toContain('"kind":"severityBucket"');
+        expect(stdout).not.toContain('"kind":"filterSummary"');
+      });
+
+      it('--jsonl with NO filter still emits the 5 severity lines + a no-filter header', async () => {
+        // The shape stays consistent: a downstream consumer always
+        // sees header (kind=filterSummary, any=false) + 5 buckets
+        // + footer, regardless of whether a filter actually ran.
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        const lines = out().trim().split('\n');
+        expect(lines).toHaveLength(7);
+        const header = JSON.parse(lines[0]!);
+        expect(header.any).toBe(false);
+        expect(header.droppedTotal).toBe(0);
+        // All 5 buckets land at their unfiltered counts.
+        const critical = JSON.parse(lines[1]!);
+        expect(critical.count).toBe(1);
+        const nit = JSON.parse(lines[5]!);
+        expect(nit.count).toBe(1);
+      });
+
+      it('--jsonl honours --fail-on (CI gate exits non-zero when bucket lands at or above threshold)', async () => {
+        const file = join(dir, 'r.json');
+        await writeFile(file, JSON.stringify(FILTER_REPORT));
+        await runStats({
+          command: 'stats',
+          positional: [],
+          flags: {
+            input: file,
+            'filter-summary': true,
+            'json-header': true,
+            jsonl: true,
+            'fail-on': 'high',
+            format: 'json',
+            'no-color': true,
+          },
+        });
+        // The unfiltered FILTER_REPORT has 1 critical -> fail-on high triggers.
+        expect(process.exitCode).toBe(1);
+        process.exitCode = 0;
+        // But the JSONL stream is STILL fully emitted so a consumer
+        // can inspect the report even on a fail.
+        const lines = out().trim().split('\n');
+        expect(lines).toHaveLength(7);
+      });
+
+      it('renderSeverityBucketLine pure helper builds the bucket shape', async () => {
+        const { renderSeverityBucketLine } = await import('../src/commands/stats.js');
+        const line = renderSeverityBucketLine('critical', 5);
+        expect(line).toEqual({ kind: 'severityBucket', severity: 'critical', count: 5 });
+        // Zero count is preserved (fixed-shape histogram contract).
+        const zero = renderSeverityBucketLine('nit', 0);
+        expect(zero.count).toBe(0);
+        expect(zero.kind).toBe('severityBucket');
+      });
+    });
   });
 });

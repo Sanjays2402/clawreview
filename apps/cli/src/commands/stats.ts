@@ -247,6 +247,34 @@ export async function runStats(args: ParsedArgs): Promise<void> {
   // is already there); we don't error because composition with
   // unrelated text-mode flags should be benign.
   const wantJsonHeader = Boolean(args.flags['json-header']);
+  // Tick 23: --jsonl. When set AND --format json AND --json-header
+  // is also set, REPLACE the single multi-line report body with a
+  // line-delimited stream:
+  //   line 1   : { kind: "filterSummary", ... }                (header)
+  //   lines 2-6: { kind: "severityBucket", severity, count }   (one per severity)
+  //   line 7   : { kind: "reportFooter", totalCostUsd, byAgent,
+  //                byCategory, topFiles, topAgents,
+  //                topCategories, byFile, groupBy,
+  //                minConfidence, severityThreshold }          (catch-all)
+  //
+  // Use case: a CI pipeline that streams `clawreview stats` through
+  // a log aggregator wants ONE JSON object per line (not a multi-line
+  // pretty-printed body) so each line can be ingested independently
+  // and queries like "show me all severity buckets where count>0"
+  // become `jq 'select(.kind=="severityBucket" and .count>0)'`.
+  //
+  // The severity bucket stream walks the canonical SEVERITY_ORDER
+  // (critical, high, medium, low, nit) so a downstream consumer can
+  // rely on stable ordering. We emit ALL FIVE buckets regardless of
+  // count so a consumer that wants a fixed-shape histogram doesn't
+  // have to fill in zeros itself.
+  //
+  // Requires --json-header (which itself requires --filter-summary)
+  // so the flag composes the existing opt-in chain. In text mode
+  // it's a silent no-op (same back-compat stance as --json-header).
+  // When set WITHOUT --json-header, it's also a no-op -- the body
+  // shape only makes sense paired with the header.
+  const wantJsonl = Boolean(args.flags['jsonl']);
 
   if (format === 'json') {
     // Tick 22: opt-in JSON-header line. When --json-header AND
@@ -259,6 +287,49 @@ export async function runStats(args: ParsedArgs): Promise<void> {
     if (wantJsonHeader && showFilterSummary) {
       const header = renderFilterSummaryJson(filterReport);
       process.stdout.write(`${JSON.stringify(header)}\n`);
+    }
+    // Tick 23: --jsonl line-delimited stream replaces the multi-line
+    // body. The header line was already emitted above; we follow it
+    // with one severity-bucket line per severity (canonical order)
+    // and then a single report-footer line carrying the rest of the
+    // payload. Requires the full opt-in chain (--filter-summary +
+    // --json-header + --jsonl) so existing JSON consumers see no
+    // diff unless they explicitly opt in. When the chain isn't
+    // satisfied (any of the three flags absent), fall through to
+    // the existing pretty-printed body (back-compat).
+    if (wantJsonl && wantJsonHeader && showFilterSummary) {
+      // Severity bucket lines: walk SEVERITY_ORDER's canonical
+      // ordering (critical..nit) so a downstream consumer relying on
+      // line order gets stable results. The renderSeverityBucketLine
+      // pure helper is exported for symmetry with renderFilterSummaryJson.
+      for (const sev of ['critical', 'high', 'medium', 'low', 'nit'] as const) {
+        const line = renderSeverityBucketLine(sev, totals[sev]);
+        process.stdout.write(`${JSON.stringify(line)}\n`);
+      }
+      // Footer: everything that wasn't on the header or per-severity
+      // lines. Mirrors the existing multi-line body's shape minus the
+      // `totals` field (already conveyed via the severity-bucket
+      // lines) -- consumers that just want the per-bucket counts
+      // don't have to parse the footer.
+      const footer: StatsReportFooter = {
+        kind: 'reportFooter',
+        byAgent: digest.byAgent,
+        byCategory: digest.byCategory,
+        byFile: digest.byFile,
+        topFiles: digest.topFiles,
+        topAgents: digest.topAgents,
+        topCategories: digest.topCategories,
+        totalCostUsd: parsed.summary?.totalCostUsd,
+        groupBy,
+        minConfidence: minConfidence === undefined ? null : minConfidence,
+        severityThreshold: severityThreshold === undefined ? null : severityThreshold,
+      };
+      process.stdout.write(`${JSON.stringify(footer)}\n`);
+      // --fail-on still applies on JSONL output for the same
+      // reason it applies on the legacy body: CI gates expect
+      // a non-zero exit code when the gate fails.
+      applyFailOn(failOn, totals);
+      return;
     }
     process.stdout.write(
       `${JSON.stringify(
@@ -701,4 +772,60 @@ export function renderFilterSummaryJson(
     },
     any: report.appliedFilters.any,
   };
+}
+
+/**
+ * Tick 23: per-severity-bucket line emitted on the `--jsonl` stream.
+ *
+ * Shape:
+ *   - `kind`     -- discriminator `"severityBucket"`. A downstream
+ *                   tool gates on this before reading the rest:
+ *                   `jq 'select(.kind=="severityBucket")'`.
+ *   - `severity` -- closed enum: critical|high|medium|low|nit.
+ *   - `count`    -- post-filter count for the bucket. ALWAYS present
+ *                   (zero when no findings landed in that severity)
+ *                   so consumers get a fixed-shape histogram without
+ *                   filling in zeros themselves.
+ *
+ * Pure / exported so the test surface can pin every arm.
+ */
+export interface StatsSeverityBucketLine {
+  kind: 'severityBucket';
+  severity: Severity;
+  count: number;
+}
+
+export function renderSeverityBucketLine(
+  severity: Severity,
+  count: number,
+): StatsSeverityBucketLine {
+  return { kind: 'severityBucket', severity, count };
+}
+
+/**
+ * Tick 23: footer line emitted on the `--jsonl` stream after the
+ * header + per-severity bucket lines. Carries everything else from
+ * the legacy multi-line JSON body minus the `totals` field (already
+ * conveyed via the severity bucket stream).
+ *
+ * Shape: discriminator `"reportFooter"` + the same fields the
+ * legacy body had (byAgent/byCategory/byFile/topFiles/topAgents/
+ * topCategories/totalCostUsd/groupBy/minConfidence/severityThreshold).
+ *
+ * Exported as an interface so a test can pin the catch-all field set
+ * -- adding a field to the legacy body should ALSO surface here so
+ * a JSONL consumer sees the same envelope.
+ */
+export interface StatsReportFooter {
+  kind: 'reportFooter';
+  byAgent: Record<string, number>;
+  byCategory: Record<string, number>;
+  byFile: Record<string, number>;
+  topFiles: Array<{ file: string; count: number }>;
+  topAgents: Array<{ agent: string; count: number }>;
+  topCategories: Array<{ category: string; count: number }>;
+  totalCostUsd: number | undefined;
+  groupBy: string;
+  minConfidence: number | null;
+  severityThreshold: string | null;
 }

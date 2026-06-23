@@ -10,7 +10,7 @@ Usage:
   clawreview presets resolve <chain> [--root <dir>] [--format yaml|json|text] [--since <git-ref> | --since-base <git-ref>] [--output <path>|-]
   clawreview presets diff <a> <b> [--root <dir>] [--format text|yaml|json] [--only-fields <a,b,c> | --exclude-fields <a,b,c>] [--output <path>|-] [--max-output-bytes <n>] [--since <git-ref>] [--since-base <ref>] [--since-target <ref>] [--since-range <a>..<b>|<a>...<b>]
   clawreview presets diff --base <a> --target <b> [...same flags as positional form]
-  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--filter-summary] [--json-header] [--format text|json]
+  clawreview stats [--input <path>] [--fail-on critical|high|medium|low|nit] [--by severity|agent|category|file] [--top-files <n>] [--top-agents <n>] [--top-categories <n>] [--min-confidence <n>] [--severity-threshold <sev>] [--filter-summary] [--json-header] [--jsonl] [--format text|json]
   clawreview review drift [--input <path>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --base <reviewId> --target <reviewId> --server <url> [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
@@ -53,6 +53,9 @@ Flags:
                      Pair with --json-header (tick 22) to ALSO emit a one-line JSON envelope on
                      stdout before the multi-line JSON report body (JSON mode only) so a CI
                      pipeline can 'head -1 | jq' to short-circuit without parsing the whole report.
+                     Pair with --json-header AND --jsonl (tick 23) to STREAM the report as
+                     line-delimited JSON (one header + one line per severity + one footer) so a
+                     log-aggregator pipeline can ingest each line independently.
 
 Environment:
   LLM_BASE_URL       OpenAI-compatible endpoint base, default http://127.0.0.1:8642/v1.
