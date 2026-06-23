@@ -653,11 +653,40 @@ Gate results: telemetry 135/135 (+6 new = histogram), aggregator 275/275, cli 53
 - **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
 - **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
 - **Telemetry `clawreview_review_filter_report_read_duration_seconds` + tick-26's `clawreview_review_filter_report_diff_duration_seconds` Grafana dashboard JSON** — carried + extended.
-- **CLI `review filter-report --diff --on-delta-once`** — modifier flag pairing with --on-delta. Fires hook on the FIRST delta only; subsequent invocations (same baseId/targetId) within a single CLI process are inert. Use case: a multi-review batch script that wants one notification per delta event, not per invocation.
-- **CLI `review filter-report --diff --output --max-output-bytes <n>`** — size cap mirror of tick-14's presets diff --max-output-bytes. Refuses to write when JSON body exceeds the cap (default 100 KiB; 16 MiB ceiling). Useful for CI gates that should fail loudly on a runaway delta body.
-- **Server `/api/reviews/:id/filter-report` peak-bucket metric** — count the FRACTION of reads landing on each shape (full / slim / fields-projection). Pairs with the tick-23 reads counter to answer "what's the most-requested shape?" without sampling stdout.
-- **CLI `review filter-report --diff --base-format json --target-format json`** — feed two pre-fetched filter-report bodies via stdin instead of going through HTTP. Use case: a CI gate has already fetched the bodies (e.g. via a worker queue) and wants to skip the HTTP round-trip in the diff command itself.
-- **Aggregator `computeFilterReportDelta` aggregator-side mirror** — extract the pure delta helper into @clawreview/aggregator so non-CLI consumers (a dashboard server, a webhook handler) can compute the same delta without importing the CLI.
+- ~~CLI `review filter-report --diff --on-delta-once`~~ — DONE tick 27 (9308fb4). Process-level dedup keyed by `${baseId}|${targetId}`; failing hooks still record the key (no auto-retry); direction-sensitive (A,B vs B,A re-fires).
+- ~~CLI `review filter-report --diff --output --max-output-bytes <n>`~~ — DONE tick 27 (dee94d6). Mirror of tick-14's presets diff cap; default 100 KiB; 16 MiB ceiling; 0 disables; stdout sentinel also capped; UTF-8 byte counting.
+- ~~Server `/api/reviews/:id/filter-report` peak-bucket metric~~ — DONE tick 27 (5aa5b04), shipped as `clawreview_review_filter_report_reads_projection_total{projection}` (closed full|slim|fields). Pairs with tick-23's per-shape counter to disambiguate the fields-projection mode (which produces full-shape responses).
+- ~~CLI `review filter-report --diff --base-format json --target-format json`~~ — DONE tick 27 (8aae7cc), shipped as `--input <path|->` (single envelope `{ base, target }`) instead of two separate body flags. Skips the HTTP round-trip; --server becomes optional; stdin sentinel mirrors --output -; composes with --output / --json-stream / --on-delta hooks.
+- ~~Aggregator `computeFilterReportDelta` aggregator-side mirror~~ — DONE tick 27 (9214639). Extracted from CLI into @clawreview/aggregator with structurally-typed FilterReportBodyLike. CLI's tick-25 helper now delegates; non-CLI consumers (dashboard server, webhook handler) can compute the delta without importing apps/cli.
+
+### Tick 27 — 2026-06-23 15:49 PT — 5 features
+
+| # | Slice | SHA | Lines | Tests |
+|---|---|---|---|---|
+| 1 | Aggregator `computeFilterReportDelta` + `FilterReportBodyLike` (extracted from CLI; CLI delegates; structurally-typed body shape so non-CLI consumers can use it) | 9214639 | +359/-48 | 11 new (filter-report-delta.test.ts) |
+| 2 | CLI `review filter-report --diff --on-delta-once` modifier (process-level dedup keyed by `${baseId}\|${targetId}`; failing hooks still record key; direction-sensitive; resetOnDeltaOnceCache test seam) | 9308fb4 | +446/-2 | 10 new (3 parseOnDeltaOnceFlag pure + 7 integration) |
+| 3 | CLI `review filter-report --diff --max-output-bytes <n>` size cap (mirror of presets diff; default 100 KiB; 16 MiB ceiling; 0 disables; stdout sentinel also capped; UTF-8 byte counting; parseFilterReportDiffMaxOutputBytes + enforceFilterReportDiffSizeCap pure helpers) | dee94d6 | +450/-1 | 17 new (6 parser + 5 enforcer + 6 integration) |
+| 4 | CLI `review filter-report --diff --input <path\|->` (skips HTTP round-trip; reads `{ base, target }` envelope from file or stdin; --server becomes optional; FILTER_REPORT_DIFF_STDIN_SENTINEL + parseFilterReportDiffInput + resolveFilterReportDiffInputSource + defaultFilterReportDiffInputReader; injectable inputReader seam) | 8aae7cc | +551/-26 | 17 new (6 envelope parser + 2 path resolver + 9 integration) |
+| 5 | Server `clawreview_review_filter_report_reads_projection_total{projection}` counter (closed full\|slim\|fields; pairs with tick-23 shape counter; fields-projection produces full-shape responses so tick-23 conflates them; REVIEW_FILTER_REPORT_PROJECTIONS tuple + deriveReviewFilterReportProjection + observeReviewFilterReportReadProjection helpers) | 5aa5b04 | +351/-1 | 12 new (5 telemetry derive + 5 observe + 2 server route) |
+
+Gate results: aggregator 286/286 (+11 new = filter-report-delta), telemetry 145/145 (+10 new = 5 derive + 5 observe), cli 580/580 (+44 net new from 536 = 10 on-delta-once + 17 max-output-bytes + 17 --input), server 408/408 (+2 net new = projection counter), types 27/27, agents 72/72, diff 24/24, llm 12/12, github 14/14, queue 8/8 — **total 1617 tests verified passing (+108 over tick 26's 1509)**. Touched-package typecheck delta: `@clawreview/aggregator` red only on the pre-existing `node:crypto`/`node:fs/promises`/`node:path` baseline (filter-report-delta.ts additions clean, zero new errors); `@clawreview/telemetry` clean (0 errors -- counter + 3 helpers add zero); `@clawreview/cli` clean across review.ts (0 errors); `apps/server` typecheck output line count IDENTICAL to tick-26 baseline (215 lines pre-tick-27 vs 215 lines post-tick-27) -- verified by `pnpm --filter @clawreview/server exec tsc --noEmit 2>&1 | wc -l`; zero new errors on reviews.ts (observeReviewFilterReportReadProjection import + wiring) beyond the pre-existing api-auth.ts / rate-limit.ts / webhooks.ts / server.ts / worker.ts (pino) baseline + 3 pre-existing slimDigestFields baseline errors at lines 284/415/418. Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `5aa5b04`.
+
+**Tick-27 refill: 5 of 13 backlog items shipped this tick (the 5 net-new items: --on-delta-once, --max-output-bytes, projection counter, --input, aggregator-side delta mirror). The eight carried items (4 dashboard wiring + worker blame + Prometheus exposition + dashboard banner + Grafana JSON) still need work outside the unit-test-driven cron loop. Refilled with fresh items for tick 28 below.**
+
+### Backlog seeded for tick 28 (refill — eight follow-ups carried + fresh items)
+- **Worker-side blame attribution + `clawreview_authors_attributed_total` wiring** — carried from tick 7.
+- **Dashboard widget for `/api/internal/webhook/stats`** — carried.
+- **Dashboard widget for `/api/internal/webhook/recent` cursor pagination + payloadFields projection** — carried.
+- **Dashboard widget for the twelve drift / poll / filter counters (now with tick-27's filter-report-reads-projection joining)** — carried + extended.
+- **Dashboard "review header is stale" banner** — carried.
+- **Worker `findingDigest({ blame: ... })` server-side wiring** — carried.
+- **Telemetry `clawreview_review_drift_watch_polls_total` Prometheus exposition through the server** — carried.
+- **Telemetry Grafana dashboard JSON for filter-report read-duration + diff-duration histograms** — carried.
+- **CLI `review filter-report --diff --on-delta-once-per <minutes>`** — TTL variant of tick-27's --on-delta-once. Instead of "once per process lifetime", record a timestamp and re-fire after N minutes have elapsed for the same pair. Use case: a long-lived watcher that wants periodic re-notifications when a delta persists for hours.
+- **CLI `review filter-report --diff --max-output-bytes` shared default constant with `presets diff`** — extract `100 * 1024` and `16 * 1024 * 1024` into a single `@clawreview/cli` shared constants module so a future change to the default doesn't risk drift between the two commands.
+- **Server `/api/reviews/:id/filter-report` projection-counter Grafana panel** — pair the new tick-27 counter with a small "projection mode breakdown" panel in apps/dashboard.
+- **CLI `review filter-report --diff --input` envelope validator strict mode** — add `--input-strict` flag that runs the FULL filter-report shape validation (every nested field including raw / normalised / applied) instead of the current shallow envelope check. Off by default for back-compat.
+- **Aggregator `computeFilterReportDelta` topAgents/topCategories axis** — when both base and target carry digest top-N slices, surface a "top contributor changed" delta axis. Today the helper only handles the filter-report shape; the digest delta is a separate helper (`computeDigestDrift`).
 
 
 
