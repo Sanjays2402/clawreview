@@ -7,7 +7,7 @@ import { runExplain } from './commands/explain.js';
 import { runAuthors } from './commands/authors.js';
 import { runLintConfig } from './commands/lint-config.js';
 import { runPresetsDiff, runPresetsList, runPresetsResolve, runPresetsShow } from './commands/presets.js';
-import { runReviewDrift } from './commands/review.js';
+import { runReviewDrift, runReviewFilterReport } from './commands/review.js';
 import { runValidate } from './commands/validate.js';
 import { renderHelp } from './help.js';
 
@@ -61,13 +61,18 @@ export async function runCli(argv: string[]): Promise<void> {
       await runStats(args);
       return;
     case 'review':
-      // Sub-commands: today only `review drift`. The dispatcher matches
-      // the presets pattern so adding `review show <id>` or other
-      // review-scoped operations later is a one-line addition.
+      // Sub-commands: today `review drift` (single-shot / watch / compare)
+      // and tick-23's `review filter-report` (single-shot fetch of the
+      // persisted filter report). The dispatcher matches the presets
+      // pattern so adding `review show <id>` later is a one-line addition.
       {
         const sub = args.positional[0] ?? '';
         if (sub === 'drift') {
           await runReviewDrift(args);
+          return;
+        }
+        if (sub === 'filter-report') {
+          await runReviewFilterReport(args);
           return;
         }
         console.error(`Unknown review sub-command: ${sub || '(none)'}\n`);

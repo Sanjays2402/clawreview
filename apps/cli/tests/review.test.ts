@@ -1898,4 +1898,234 @@ describe('clawreview review drift --base / --target (tick 22)', () => {
   });
 });
 
+// Tick 23: `clawreview review filter-report <reviewId> --server <url>`
+// Single-shot CLI face of the new /api/reviews/:id/filter-report
+// endpoint. Mirrors the runReviewDriftCompare test pattern: stub
+// fetcher, capture stdout/stderr, assert exit code + body shape.
+describe('clawreview review filter-report (tick 23)', () => {
+  async function runFilterReport(
+    body: string | { ok: boolean; status: number; body: string },
+    positional: string[] = ['filter-report', 'rv_42_abc'],
+    flags: Record<string, string | boolean> = { server: 'http://localhost' },
+  ): Promise<RunResult & { fetchCalls: string[] }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetchCalls: string[] = [];
+    const entry = typeof body === 'string' ? { ok: true, status: 200, body } : body;
+    const fetcher = async (url: string) => {
+      fetchCalls.push(url);
+      return { ok: entry.ok, status: entry.status, text: async () => entry.body };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional,
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return {
+      stdout: stdout.join(''),
+      stderr: stderr.join(''),
+      exitCode: code,
+      fetchCalls,
+    };
+  }
+
+  function fullBody(extra: Partial<{ applied: boolean; droppedTotal: number }> = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_42_abc',
+      inputTotal: 10,
+      droppedTotal: extra.droppedTotal ?? 3,
+      applied: extra.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: extra.applied ?? true,
+      },
+    });
+  }
+
+  it('renders the full text banner on a successful fetch', async () => {
+    const r = await runFilterReport(fullBody());
+    expect(r.exitCode).toBe(0);
+    expect(r.stdout).toContain('review:');
+    expect(r.stdout).toContain('rv_42_abc');
+    expect(r.stdout).toContain('inputTotal');
+    expect(r.stdout).toContain('droppedTotal');
+    expect(r.stdout).toContain('applied');
+    // Full mode surfaces per-axis appliedFilters.
+    expect(r.stdout).toContain('appliedFilters');
+    expect(r.stdout).toContain('min_confidence');
+    expect(r.stdout).toContain('severity_threshold');
+    // URL was hit without ?slim= (full mode is the default).
+    expect(r.fetchCalls).toHaveLength(1);
+    expect(r.fetchCalls[0]).toContain('/api/reviews/rv_42_abc/filter-report');
+    expect(r.fetchCalls[0]).not.toContain('slim');
+  });
+
+  it('emits JSON verbatim with --format json', async () => {
+    const r = await runFilterReport(fullBody(), ['filter-report', 'rv_42_abc'], {
+      server: 'http://localhost',
+      format: 'json',
+    });
+    expect(r.exitCode).toBe(0);
+    const parsed = JSON.parse(r.stdout);
+    expect(parsed.reviewId).toBe('rv_42_abc');
+    expect(parsed.inputTotal).toBe(10);
+    expect(parsed.droppedTotal).toBe(3);
+    expect(parsed.applied).toBe(true);
+    expect(parsed.appliedFilters.minConfidence.normalised).toBe(0.5);
+  });
+
+  it('forwards --slim as ?slim=true on the wire and renders the slim banner', async () => {
+    const slimBody = JSON.stringify({
+      reviewId: 'rv_42_abc',
+      inputTotal: 10,
+      droppedTotal: 3,
+      applied: true,
+      slim: true,
+    });
+    const r = await runFilterReport(slimBody, ['filter-report', 'rv_42_abc'], {
+      server: 'http://localhost',
+      slim: true,
+    });
+    expect(r.exitCode).toBe(0);
+    // URL carries ?slim=true so the server returns the slim shape.
+    expect(r.fetchCalls[0]).toContain('?slim=true');
+    // Slim text banner mentions the slim mode and omits per-axis lines.
+    expect(r.stdout).toContain('slim mode');
+    expect(r.stdout).not.toContain('appliedFilters');
+  });
+
+  it('rejects with exit 2 and a missing-review-id sentinel when no positional reviewId is given', async () => {
+    const r = await runFilterReport(fullBody(), ['filter-report'], { server: 'http://localhost' });
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('reviewId');
+    // Fetcher was never invoked because the parser short-circuited.
+    expect(r.fetchCalls).toHaveLength(0);
+  });
+
+  it('rejects with exit 2 when --server is missing', async () => {
+    const r = await runFilterReport(fullBody(), ['filter-report', 'rv_42_abc'], {});
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--server');
+  });
+
+  it('rejects with exit 2 and surfaces the body error sentinel on HTTP 404 NoFilterReport', async () => {
+    const r = await runFilterReport(
+      { ok: false, status: 404, body: JSON.stringify({ error: 'NoFilterReport', reviewId: 'rv_42_abc' }) },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('HTTP 404');
+    expect(r.stderr).toContain('NoFilterReport');
+  });
+
+  it('rejects with exit 2 on network failure (fetcher rejects)', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stderr: string[] = [];
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(() => true as never);
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_42_abc'],
+          flags: { 'no-color': true, server: 'http://localhost' },
+        },
+        { fetcher: async () => { throw new Error('ECONNREFUSED'); } },
+      );
+    } finally {
+      writeStderr.mockRestore();
+      writeStdout.mockRestore();
+    }
+    expect(process.exitCode).toBe(2);
+    expect(stderr.join('')).toContain('fetch failed');
+    expect(stderr.join('')).toContain('ECONNREFUSED');
+    process.exitCode = 0;
+  });
+
+  // Pure parseFilterReportConfig coverage (mirrors parseCompareConfig
+  // unit tests above) so each discriminant has a regression pin.
+  describe('parseFilterReportConfig (pure)', () => {
+    it('resolves the happy path with all defaults', async () => {
+      const { parseFilterReportConfig } = await import('../src/commands/review.js');
+      const r = parseFilterReportConfig({ reviewId: 'rv_42_abc', server: 'http://x/' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        // Trailing slash stripped (mirrors parseCompareConfig).
+        expect(r.serverUrl).toBe('http://x');
+        expect(r.reviewId).toBe('rv_42_abc');
+        expect(r.format).toBe('text');
+        expect(r.slim).toBe(false);
+      }
+    });
+
+    it('rejects empty / non-string reviewId', async () => {
+      const { parseFilterReportConfig } = await import('../src/commands/review.js');
+      expect(parseFilterReportConfig({ reviewId: '', server: 'http://x' }).kind).toBe('missing-review-id');
+      expect(parseFilterReportConfig({ reviewId: '   ', server: 'http://x' }).kind).toBe('missing-review-id');
+      expect(parseFilterReportConfig({ server: 'http://x' }).kind).toBe('missing-review-id');
+      expect(parseFilterReportConfig({ reviewId: 5 as unknown as string, server: 'http://x' }).kind).toBe('missing-review-id');
+    });
+
+    it('rejects empty --server', async () => {
+      const { parseFilterReportConfig } = await import('../src/commands/review.js');
+      expect(parseFilterReportConfig({ reviewId: 'rv', server: '' }).kind).toBe('missing-server');
+    });
+
+    it('rejects unknown --format', async () => {
+      const { parseFilterReportConfig } = await import('../src/commands/review.js');
+      const r = parseFilterReportConfig({ reviewId: 'rv', server: 'http://x', format: 'xml' });
+      expect(r.kind).toBe('invalid-format');
+      if (r.kind === 'invalid-format') {
+        expect(r.message).toContain('xml');
+      }
+    });
+
+    it('accepts --slim as boolean true OR string "true"/"1"/"yes"', async () => {
+      const { parseFilterReportConfig } = await import('../src/commands/review.js');
+      const trueArm = parseFilterReportConfig({ reviewId: 'rv', server: 'http://x', slim: true });
+      expect(trueArm.kind).toBe('ok');
+      if (trueArm.kind === 'ok') expect(trueArm.slim).toBe(true);
+      for (const truthy of ['true', '1', 'yes', 'YES', 'True']) {
+        const r = parseFilterReportConfig({ reviewId: 'rv', server: 'http://x', slim: truthy });
+        if (r.kind === 'ok') expect(r.slim).toBe(true);
+      }
+      for (const falsy of ['false', '0', 'no', '', 'bogus']) {
+        const r = parseFilterReportConfig({ reviewId: 'rv', server: 'http://x', slim: falsy });
+        if (r.kind === 'ok') expect(r.slim).toBe(false);
+      }
+    });
+  });
+});
+
 

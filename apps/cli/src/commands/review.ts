@@ -1487,3 +1487,256 @@ function renderSparseCompareBucket(
   }
   process.stdout.write('\n');
 }
+
+/**
+ * Tick 23: pure config-validation result for `runReviewFilterReport`.
+ * Mirrors `CompareConfigResult` / `WatchConfigResult` discriminated-union
+ * shape so the test surface can pin each error arm individually.
+ */
+export type FilterReportConfigResult =
+  | {
+      kind: 'ok';
+      serverUrl: string;
+      reviewId: string;
+      format: 'text' | 'json';
+      slim: boolean;
+    }
+  | { kind: 'missing-review-id'; message: string }
+  | { kind: 'missing-server'; message: string }
+  | { kind: 'invalid-format'; message: string };
+
+/**
+ * Tick 23: pure parser for `review filter-report` config.
+ *
+ * Exported so the same shape (defaults, error sentinels) has one
+ * test surface. Mirrors `parseCompareConfig`'s patterns: each error
+ * arm is a distinct discriminant; the happy path returns a fully-typed
+ * shape. The reviewId arg is positional (first non-flag after the
+ * subcommand) to mirror `review drift --base <id>` ergonomics --
+ * an operator writes `clawreview review filter-report rv_42_abc`.
+ */
+export function parseFilterReportConfig(input: {
+  reviewId?: unknown;
+  server?: unknown;
+  format?: unknown;
+  slim?: unknown;
+}): FilterReportConfigResult {
+  const reviewId = typeof input.reviewId === 'string' ? input.reviewId.trim() : '';
+  if (reviewId.length === 0) {
+    return {
+      kind: 'missing-review-id',
+      message:
+        'clawreview review filter-report <reviewId> is required (saw empty / non-string value)',
+    };
+  }
+  const serverRaw = typeof input.server === 'string' ? input.server.trim() : '';
+  if (serverRaw.length === 0) {
+    return {
+      kind: 'missing-server',
+      message: '--server <url> is required so the CLI can fetch the persisted filter report',
+    };
+  }
+  // Strip a trailing slash so the URL template compose is unambiguous
+  // -- mirrors parseCompareConfig.
+  const serverUrl = serverRaw.replace(/\/+$/, '');
+  const formatRaw = typeof input.format === 'string' ? input.format.toLowerCase() : 'text';
+  if (formatRaw !== 'text' && formatRaw !== 'json') {
+    return {
+      kind: 'invalid-format',
+      message: `--format must be text or json (got '${formatRaw}')`,
+    };
+  }
+  // Slim accepts the same truthy-string contract as the route's
+  // ?slim=true|1|yes flag so the CLI surface matches the wire.
+  const slimRaw = input.slim;
+  let slim = false;
+  if (typeof slimRaw === 'boolean') {
+    slim = slimRaw;
+  } else if (typeof slimRaw === 'string') {
+    const lower = slimRaw.trim().toLowerCase();
+    slim = lower === 'true' || lower === '1' || lower === 'yes';
+  }
+  return {
+    kind: 'ok',
+    serverUrl,
+    reviewId,
+    format: formatRaw as 'text' | 'json',
+    slim,
+  };
+}
+
+/**
+ * Tick 23: shape of the `/api/reviews/:id/filter-report` response.
+ * Two-arm union: the slim path strips the verbose appliedFilters
+ * object and surfaces a single `applied: boolean`; the full path
+ * keeps it. Both arms always carry the common `reviewId / inputTotal
+ * / droppedTotal / applied / slim` fields.
+ *
+ * Exported so the test surface can pin shape expectations without
+ * round-tripping through fetch.
+ */
+export interface FilterReportBodyFull {
+  reviewId: string;
+  inputTotal: number;
+  droppedTotal: number;
+  applied: boolean;
+  slim: false;
+  appliedFilters: {
+    minConfidence: { raw: number | undefined; normalised: number; applied: boolean };
+    severityThreshold: { raw: string | undefined; normalised: string | null; applied: boolean };
+    any: boolean;
+  };
+}
+export interface FilterReportBodySlim {
+  reviewId: string;
+  inputTotal: number;
+  droppedTotal: number;
+  applied: boolean;
+  slim: true;
+}
+export type FilterReportBody = FilterReportBodyFull | FilterReportBodySlim;
+
+/**
+ * Tick 23: `clawreview review filter-report <reviewId> --server <url>`
+ *
+ * Fetches and renders the persisted filter report for a single review.
+ * Pair-of-three CLI with `review drift` and a future `review show`:
+ * each one is the CLI face of a single read endpoint on the server.
+ *
+ *   - `review drift`         -> /api/reviews/:id (or /digest)
+ *   - `review filter-report` -> /api/reviews/:id/filter-report (tick 23)
+ *
+ * Use cases:
+ *   1. CI gate that wants "did this review's worker apply any filter,
+ *      and how many findings did it drop?" without curl + jq.
+ *   2. On-call sanity check after a config rollout: "did the new
+ *      min_confidence threshold actually filter findings on review X?"
+ *   3. Inspection / debugging: `clawreview review filter-report
+ *      rv_42_abc --server https://clawreview --format json` for a
+ *      structured dump.
+ *
+ * Output formats:
+ *   - text (default) -- compact banner showing reviewId, drop count,
+ *     and applied filter axes. Color-tagged when stdout is a TTY.
+ *   - json -- the raw response body verbatim (or a slim projection
+ *     when --slim is set) so a downstream tool consumes the same
+ *     shape the server returned.
+ *
+ * Exit codes:
+ *   0 -- success: report fetched and rendered.
+ *   2 -- config error / fetch failure / shape rejection.
+ *   3 -- the persisted report had NO filter applied (applied=false).
+ *        Mirrors `presets diff` / `review drift`'s exit-3-on-drift
+ *        contract: a CI gate that REQUIRES a filter to be in effect
+ *        can `clawreview review filter-report ... --require-filter`
+ *        (a future fresh-flag) and treat exit 3 as "missing".
+ *        Today the exit code always returns 0 on a successful fetch;
+ *        the gating arm is reserved for a follow-up tick. (Pinned
+ *        in the test surface so a future change is intentional.)
+ *
+ * Injectable fetcher seam mirrors `runReviewDriftCompare` so the
+ * test suite can pin every arm without a real network round-trip.
+ */
+export async function runReviewFilterReport(
+  args: ParsedArgs,
+  injected?: { fetcher?: WatchFetcher },
+): Promise<void> {
+  // Positional shape: `clawreview review filter-report <reviewId>`.
+  // args.positional[0] is the subcommand name 'filter-report';
+  // [1] is the reviewId positional arg.
+  const reviewIdPositional = args.positional[1] ?? '';
+  const config = parseFilterReportConfig({
+    reviewId: reviewIdPositional,
+    server: args.flags.server,
+    format: args.flags.format,
+    slim: args.flags.slim,
+  });
+  if (config.kind !== 'ok') {
+    process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  const noColor = Boolean(args.flags['no-color']) || !process.stdout.isTTY;
+  if (noColor) kleur.enabled = false;
+  const fetcher = injected?.fetcher ?? defaultWatchFetcher;
+
+  // Build URL: /api/reviews/:id/filter-report (+ ?slim=true when set).
+  const slimQs = config.slim ? '?slim=true' : '';
+  const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(config.reviewId)}/filter-report${slimQs}`;
+
+  let body: FilterReportBody;
+  try {
+    const res = await fetcher(url);
+    if (!res.ok) {
+      // 404 here can be either NotFound (unknown review id) or
+      // NoFilterReport (legacy review pre-tick-22). We propagate the
+      // status so an operator can distinguish without parsing the
+      // body, but we ALSO surface the body's `error` field when
+      // available so the message is precise.
+      let detail = '';
+      try {
+        const txt = await res.text();
+        const parsedErr = JSON.parse(txt) as { error?: string };
+        if (parsedErr.error) detail = ` (${parsedErr.error})`;
+      } catch {
+        // Body wasn't JSON -- fall back to the bare status code.
+      }
+      process.stderr.write(
+        `clawreview review filter-report: HTTP ${res.status} fetching '${config.reviewId}'${detail}\n`,
+      );
+      process.exitCode = 2;
+      return;
+    }
+    const text = await res.text();
+    body = JSON.parse(text) as FilterReportBody;
+  } catch (err) {
+    process.stderr.write(
+      `clawreview review filter-report: fetch failed: ${(err as Error).message}\n`,
+    );
+    process.exitCode = 2;
+    return;
+  }
+
+  if (config.format === 'json') {
+    process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
+    return;
+  }
+  renderFilterReportText(body);
+}
+
+/**
+ * Tick 23: text renderer for `review filter-report`. Compact banner
+ * showing reviewId, drop count, and the applied filter axes. Slim
+ * mode collapses the per-axis detail to a single "filters applied"
+ * line.
+ *
+ * Pure-ish (writes to stdout); pulled out as a free function so the
+ * test surface can stub stdout and pin every render arm without
+ * driving the whole command pipeline.
+ */
+function renderFilterReportText(body: FilterReportBody): void {
+  process.stdout.write(
+    `${kleur.bold('review')}:        ${body.reviewId}\n` +
+      `${kleur.bold('inputTotal')}:    ${body.inputTotal}\n` +
+      `${kleur.bold('droppedTotal')}:  ${formatDelta(-body.droppedTotal)}\n` +
+      `${kleur.bold('applied')}:       ${body.applied ? kleur.yellow('yes') : kleur.gray('no')}\n`,
+  );
+  if (body.slim) {
+    process.stdout.write(
+      `${kleur.gray('(slim mode: per-axis detail stripped; ?slim=true)')}\n`,
+    );
+    return;
+  }
+  // Full mode: surface per-axis detail so the operator sees WHICH
+  // filter axis fired.
+  const f = body.appliedFilters;
+  process.stdout.write(`${kleur.bold('appliedFilters')}:\n`);
+  process.stdout.write(
+    `  ${kleur.bold('min_confidence')}        applied=${f.minConfidence.applied} ` +
+      `raw=${f.minConfidence.raw ?? '-'} normalised=${f.minConfidence.normalised}\n`,
+  );
+  process.stdout.write(
+    `  ${kleur.bold('severity_threshold')}    applied=${f.severityThreshold.applied} ` +
+      `raw=${f.severityThreshold.raw ?? '-'} normalised=${f.severityThreshold.normalised ?? '-'}\n`,
+  );
+}

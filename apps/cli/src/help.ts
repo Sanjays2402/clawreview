@@ -14,6 +14,7 @@ Usage:
   clawreview review drift [--input <path>] [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --base <reviewId> --target <reviewId> --server <url> [--min-confidence <n>] [--severity-threshold <sev>] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
+  clawreview review filter-report <reviewId> --server <url> [--format text|json] [--slim]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]
   clawreview diff-stats [--base <ref>] [--head <ref>] [--input <path>] [--diff -] [--format text|json]
@@ -103,5 +104,7 @@ Examples:
   curl -s https://clawreview/api/reviews/abc123/digest | clawreview review drift
   curl -s https://clawreview/api/reviews/abc123 | clawreview review drift --format json | jq '.drift.hasDrift'
   curl -s https://clawreview/api/reviews/abc123 | clawreview review drift --min-confidence 0.7  # preview "would drift change if we tighten the floor?"
+  clawreview review filter-report rv_42_abc --server https://clawreview                       # render persisted filter report for review rv_42_abc
+  clawreview review filter-report rv_42_abc --server https://clawreview --format json --slim   # slim JSON for a CI gate that only needs the applied bit
 `;
 }
