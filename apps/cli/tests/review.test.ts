@@ -2983,6 +2983,278 @@ describe('clawreview review filter-report --watch (tick 24)', () => {
       expect(r.stderr).not.toContain('require-filter');
     });
   });
+
+  // Tick 25: --on-applied-change hook + --on-applied-template. Fires
+  // on the transition edge of the persisted report's `applied` bit
+  // (false->true OR true->false). The first poll never fires (no
+  // prior to transition from).
+  describe('--on-applied-change (tick 25)', () => {
+    async function runWatchWithHook(
+      reviewId: string,
+      flags: Record<string, string | boolean>,
+      bodies: string[],
+      hookOutcome: { exitCode: number | null; stderr: string } = { exitCode: 0, stderr: '' },
+    ): Promise<RunResult & { fetchCalls: string[]; hookCalls: Array<{ cmd: string; payload: string }> }> {
+      const { runReviewFilterReportWatch } = await import('../src/commands/review.js');
+      const stdout: string[] = [];
+      const stderr: string[] = [];
+      const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+        ((chunk: unknown) => {
+          stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+          return true;
+        }) as never,
+      );
+      const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+        ((chunk: unknown) => {
+          stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+          return true;
+        }) as never,
+      );
+      const fetchCalls: string[] = [];
+      const hookCalls: Array<{ cmd: string; payload: string }> = [];
+      let bodyIdx = 0;
+      const fetcher = async (url: string) => {
+        fetchCalls.push(url);
+        const entry = bodies[bodyIdx] ?? bodies[bodies.length - 1]!;
+        bodyIdx += 1;
+        return { ok: true, status: 200, text: async () => entry };
+      };
+      const sleeper = async () => undefined;
+      const onAppliedChangeExecer = async (cmd: string, payload: string) => {
+        hookCalls.push({ cmd, payload });
+        return hookOutcome;
+      };
+      process.exitCode = 0;
+      try {
+        await runReviewFilterReportWatch(
+          {
+            command: 'review',
+            positional: ['filter-report'],
+            flags: { 'no-color': true, watch: reviewId, ...flags },
+          },
+          reviewId,
+          { fetcher, sleeper, onAppliedChangeExecer },
+        );
+      } finally {
+        writeStdout.mockRestore();
+        writeStderr.mockRestore();
+      }
+      const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+      process.exitCode = 0;
+      return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, fetchCalls, hookCalls };
+    }
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('does NOT fire on the first poll (no prior to transition from)', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '1',
+        'on-applied-change': 'echo applied-edge',
+      }, [makeFullBody({ applied: true })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.hookCalls).toHaveLength(0);
+    });
+
+    it('fires on the false->true transition edge', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+        'on-applied-change': 'echo applied-edge',
+      }, [makeFullBody({ applied: false }), makeFullBody({ applied: true })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.hookCalls).toHaveLength(1);
+      expect(r.hookCalls[0]!.cmd).toBe('echo applied-edge');
+      const payload = JSON.parse(r.hookCalls[0]!.payload);
+      expect(payload.reviewId).toBe('rv_w_1');
+      expect(payload.poll).toBe(2);
+      expect(payload.prevApplied).toBe(false);
+      expect(payload.currentApplied).toBe(true);
+    });
+
+    it('fires on the true->false transition edge', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+        'on-applied-change': 'echo unapplied-edge',
+      }, [makeFullBody({ applied: true }), makeFullBody({ applied: false })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.hookCalls).toHaveLength(1);
+      const payload = JSON.parse(r.hookCalls[0]!.payload);
+      expect(payload.prevApplied).toBe(true);
+      expect(payload.currentApplied).toBe(false);
+    });
+
+    it('does NOT fire when applied stays the same (no transition)', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '3',
+        'on-applied-change': 'echo edge',
+      }, [makeFullBody({ applied: true }), makeFullBody({ applied: true }), makeFullBody({ applied: true })]);
+      expect(r.exitCode).toBe(0);
+      expect(r.hookCalls).toHaveLength(0);
+    });
+
+    it('fires multiple times on flapping (false->true->false->true)', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '4',
+        'on-applied-change': 'echo flap',
+      }, [
+        makeFullBody({ applied: false }),
+        makeFullBody({ applied: true }),
+        makeFullBody({ applied: false }),
+        makeFullBody({ applied: true }),
+      ]);
+      expect(r.exitCode).toBe(0);
+      // Three transitions: false->true, true->false, false->true.
+      expect(r.hookCalls).toHaveLength(3);
+    });
+
+    it('surfaces hook failure on stderr but keeps polling', async () => {
+      const r = await runWatchWithHook('rv_w_1', {
+        server: 'https://test.local',
+        'max-polls': '2',
+        'on-applied-change': 'false',
+      }, [makeFullBody({ applied: false }), makeFullBody({ applied: true })], { exitCode: 1, stderr: 'mock fail' });
+      // Watch finishes normally (exit 0); the hook misfire is reported
+      // on stderr but doesn't abort the loop.
+      expect(r.exitCode).toBe(0);
+      expect(r.stderr).toContain('--on-applied-change exited 1');
+      expect(r.hookCalls).toHaveLength(1);
+    });
+
+    it('rejects empty --on-applied-change command (typo guard)', async () => {
+      const r = await runWatch('rv_w_1', {
+        server: 'https://test.local',
+        'on-applied-change': '   ',
+      }, []);
+      expect(r.exitCode).toBe(2);
+      expect(r.stderr).toContain('--on-applied-change');
+    });
+
+    it('parseFilterReportWatchConfig: defaults onAppliedChange to null', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      const r = parseFilterReportWatchConfig({ server: 'http://x' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.onAppliedChange).toBeNull();
+    });
+
+    it('parseFilterReportWatchConfig: --on-applied-change parses to a non-null command', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      const r = parseFilterReportWatchConfig({ server: 'http://x', 'on-applied-change': 'echo hi' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.onAppliedChange).toBe('echo hi');
+    });
+  });
+
+  // Tick 25: --on-applied-template slack|webhook expands to the
+  // standard curl-to-webhook pipeline; mutex with --on-applied-change.
+  describe('--on-applied-template (tick 25)', () => {
+    it('expandOnAppliedTemplate: slack with $SLACK_APPLIED_WEBHOOK_URL builds the curl line', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('slack', { SLACK_APPLIED_WEBHOOK_URL: 'https://hooks.slack.com/x' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') {
+        expect(r.command).toContain('curl');
+        expect(r.command).toContain('https://hooks.slack.com/x');
+        expect(r.command).toContain("'Content-Type: application/json'");
+        expect(r.command).toContain('--data-binary @-');
+      }
+    });
+
+    it('expandOnAppliedTemplate: slack falls back to $SLACK_WEBHOOK_URL when primary unset', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('slack', { SLACK_WEBHOOK_URL: 'https://hooks.slack.com/fallback' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.command).toContain('https://hooks.slack.com/fallback');
+    });
+
+    it('expandOnAppliedTemplate: webhook uses $WEBHOOK_APPLIED_URL primary', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('webhook', { WEBHOOK_APPLIED_URL: 'https://hooks.example.com/x' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.command).toContain('https://hooks.example.com/x');
+    });
+
+    it('expandOnAppliedTemplate: webhook falls back to $WEBHOOK_URL', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('webhook', { WEBHOOK_URL: 'https://generic/fallback' });
+      expect(r.kind).toBe('ok');
+      if (r.kind === 'ok') expect(r.command).toContain('https://generic/fallback');
+    });
+
+    it('expandOnAppliedTemplate: rejects unknown template name with enumerated valid set', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('discord', {});
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') {
+        expect(r.message).toContain('discord');
+        expect(r.message).toContain('slack');
+        expect(r.message).toContain('webhook');
+      }
+    });
+
+    it('expandOnAppliedTemplate: rejects when both primary AND fallback env vars are unset', async () => {
+      const { expandOnAppliedTemplate } = await import('../src/commands/review.js');
+      const r = expandOnAppliedTemplate('slack', {});
+      expect(r.kind).toBe('invalid');
+      if (r.kind === 'invalid') {
+        expect(r.message).toContain('SLACK_APPLIED_WEBHOOK_URL');
+        expect(r.message).toContain('SLACK_WEBHOOK_URL');
+      }
+    });
+
+    it('parseFilterReportWatchConfig: --on-applied-template resolves to a curl command', async () => {
+      // Set the env so the template expansion has a URL to bake in.
+      process.env['SLACK_APPLIED_WEBHOOK_URL'] = 'https://hooks.slack.com/parse';
+      try {
+        const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+        const r = parseFilterReportWatchConfig({ server: 'http://x', 'on-applied-template': 'slack' });
+        expect(r.kind).toBe('ok');
+        if (r.kind === 'ok') {
+          expect(r.onAppliedChange).toContain('curl');
+          expect(r.onAppliedChange).toContain('https://hooks.slack.com/parse');
+        }
+      } finally {
+        delete process.env['SLACK_APPLIED_WEBHOOK_URL'];
+      }
+    });
+
+    it('parseFilterReportWatchConfig: --on-applied-template + --on-applied-change rejects with mutex error', async () => {
+      process.env['SLACK_APPLIED_WEBHOOK_URL'] = 'https://hooks.slack.com/x';
+      try {
+        const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+        const r = parseFilterReportWatchConfig({
+          server: 'http://x',
+          'on-applied-change': 'echo a',
+          'on-applied-template': 'slack',
+        });
+        expect(r.kind).toBe('invalid-on-applied-change');
+        if (r.kind === 'invalid-on-applied-change') {
+          expect(r.message).toContain('mutually exclusive');
+        }
+      } finally {
+        delete process.env['SLACK_APPLIED_WEBHOOK_URL'];
+      }
+    });
+
+    it('parseFilterReportWatchConfig: --on-applied-template with unset env vars surfaces clear error', async () => {
+      const { parseFilterReportWatchConfig } = await import('../src/commands/review.js');
+      // Ensure both env vars are unset.
+      delete process.env['SLACK_APPLIED_WEBHOOK_URL'];
+      delete process.env['SLACK_WEBHOOK_URL'];
+      const r = parseFilterReportWatchConfig({ server: 'http://x', 'on-applied-template': 'slack' });
+      expect(r.kind).toBe('invalid-on-applied-change');
+    });
+
+    it('ON_APPLIED_TEMPLATES is a closed slack|webhook tuple', async () => {
+      const { ON_APPLIED_TEMPLATES } = await import('../src/commands/review.js');
+      expect([...ON_APPLIED_TEMPLATES].sort()).toEqual(['slack', 'webhook']);
+    });
+  });
 });
 
 

@@ -2157,11 +2157,31 @@ export type FilterReportWatchConfigResult =
       maxPolls: number;
       format: 'text' | 'json';
       slim: boolean;
+      /**
+       * Tick 25: --on-applied-change <cmd> hook. Fires on every
+       * transition of the persisted report's `applied` bit
+       * (false->true OR true->false). Use case: "alert me when the
+       * config rollout finally landed on this review's worker run"
+       * (or vice versa: "alert me if the worker started ignoring
+       * the filter").
+       *
+       * Null when the flag is absent. The hook receives the same
+       * JSONL payload --on-drift uses (reviewId / poll / body) so
+       * a single jq / webhook pipeline can consume both.
+       *
+       * Distinct from --on-drift / --on-recover in `runReviewDriftWatch`:
+       * those fire on per-bucket digest drift; this one fires on the
+       * top-level applied-bit edge. We use a fresh sentinel
+       * ('invalid-on-applied-change') so a parse error here doesn't
+       * surface under the digest-watch error path.
+       */
+      onAppliedChange: string | null;
     }
   | { kind: 'missing-server'; message: string }
   | { kind: 'invalid-interval'; message: string }
   | { kind: 'invalid-max-polls'; message: string }
-  | { kind: 'invalid-format'; message: string };
+  | { kind: 'invalid-format'; message: string }
+  | { kind: 'invalid-on-applied-change'; message: string };
 
 /**
  * Tick 24: pure parser for `review filter-report --watch` config.
@@ -2192,6 +2212,8 @@ export function parseFilterReportWatchConfig(flags: {
   'max-polls'?: unknown;
   format?: unknown;
   slim?: unknown;
+  'on-applied-change'?: unknown;
+  'on-applied-template'?: unknown;
 }): FilterReportWatchConfigResult {
   const serverRaw = typeof flags.server === 'string' ? flags.server.trim() : '';
   if (serverRaw.length === 0) {
@@ -2253,7 +2275,138 @@ export function parseFilterReportWatchConfig(flags: {
     slim = lower === 'true' || lower === '1' || lower === 'yes';
   }
 
-  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, slim };
+  // Tick 25: --on-applied-change <cmd> hook. Mirrors --on-drift's
+  // parse-time validation contract: a non-string value rejects, an
+  // empty trimmed string rejects (typo guard).
+  let onAppliedChange: string | null = null;
+  if (flags['on-applied-change'] !== undefined) {
+    if (typeof flags['on-applied-change'] !== 'string') {
+      return {
+        kind: 'invalid-on-applied-change',
+        message: `--on-applied-change must be a command string; got ${typeof flags['on-applied-change']}`,
+      };
+    }
+    const trimmed = flags['on-applied-change'].trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid-on-applied-change',
+        message: `--on-applied-change requires a non-empty command (e.g. --on-applied-change 'curl -X POST https://...')`,
+      };
+    }
+    onAppliedChange = trimmed;
+  }
+  // Tick 25: --on-applied-template <name>. Mirrors tick-17/19's
+  // --on-drift-template / --on-recover-template patterns. Mutex
+  // with --on-applied-change: combining the two would force the
+  // parser to pick a winner.
+  if (flags['on-applied-template'] !== undefined) {
+    if (onAppliedChange !== null) {
+      return {
+        kind: 'invalid-on-applied-change',
+        message:
+          '--on-applied-template is mutually exclusive with --on-applied-change (pick one)',
+      };
+    }
+    if (typeof flags['on-applied-template'] !== 'string') {
+      return {
+        kind: 'invalid-on-applied-change',
+        message: `--on-applied-template must be a template name string; got ${typeof flags['on-applied-template']}`,
+      };
+    }
+    const name = flags['on-applied-template'].trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid-on-applied-change',
+        message: '--on-applied-template requires a template name (one of: slack, webhook)',
+      };
+    }
+    const expanded = expandOnAppliedTemplate(name, process.env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid-on-applied-change', message: expanded.message };
+    }
+    onAppliedChange = expanded.command;
+  }
+
+  return { kind: 'ok', serverUrl, intervalMs, maxPolls, format, slim, onAppliedChange };
+}
+
+/**
+ * Tick 25: Closed set of `--on-applied-template` template names for
+ * `review filter-report --watch`. Mirrors ON_DRIFT_TEMPLATES /
+ * ON_RECOVER_TEMPLATES / ON_REGRESSION_TEMPLATES so an operator's
+ * mental model carries across all four hook surfaces (drift,
+ * recover, regression, applied-change).
+ *
+ * Re-exported as its own tuple so a future divergence (e.g. an
+ * "applied-only" / "unapplied-only" template that surfaces just one
+ * direction of the transition) can land without disturbing the
+ * other hook surfaces.
+ */
+export const ON_APPLIED_TEMPLATES = ['slack', 'webhook'] as const;
+export type OnAppliedTemplate = (typeof ON_APPLIED_TEMPLATES)[number];
+
+/**
+ * Outcome of expanding `--on-applied-template <name>`. Identical
+ * shape to `OnDriftTemplateExpansion`; surfaced under the existing
+ * 'invalid-on-applied-change' error sentinel so the caller doesn't
+ * need a new error kind.
+ */
+export type OnAppliedTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Expand a named `--on-applied-template` into the curl command the
+ * watch loop will exec on the applied-bit transition edge.
+ *
+ * Env-var fallback ladder (mirrors expandOnRecoverTemplate /
+ * expandOnRegressionTemplate's primary->shared pattern):
+ *   - `slack`   -> $SLACK_APPLIED_WEBHOOK_URL, falling back to
+ *                  $SLACK_WEBHOOK_URL. Operators with one Slack
+ *                  channel for all hook events don't need to
+ *                  duplicate the URL into a fourth env var.
+ *   - `webhook` -> $WEBHOOK_APPLIED_URL, falling back to
+ *                  $WEBHOOK_URL. Same logic.
+ *
+ * Pure: takes the `env` map as an argument so tests can drive
+ * every arm without mutating `process.env`.
+ */
+export function expandOnAppliedTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): OnAppliedTemplateExpansion {
+  const lower = name.toLowerCase();
+  let primaryVar: string;
+  let fallbackVar: string;
+  switch (lower) {
+    case 'slack':
+      primaryVar = 'SLACK_APPLIED_WEBHOOK_URL';
+      fallbackVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      primaryVar = 'WEBHOOK_APPLIED_URL';
+      fallbackVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-applied-template '${name}'; valid: ${ON_APPLIED_TEMPLATES.join(', ')}`,
+      };
+  }
+  const primary = (env[primaryVar] ?? '').trim();
+  const fallback = (env[fallbackVar] ?? '').trim();
+  const url = primary.length > 0 ? primary : fallback;
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-applied-template ${lower} requires \$${primaryVar} ` +
+        `(or \$${fallbackVar} as fallback) -- set one before running the watch loop`,
+    };
+  }
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
 }
 
 /**
@@ -2296,6 +2449,7 @@ export async function runReviewFilterReportWatch(
   injected?: {
     fetcher?: WatchFetcher;
     sleeper?: WatchSleeper;
+    onAppliedChangeExecer?: WatchOnDriftExecer;
   },
 ): Promise<void> {
   const config = parseFilterReportWatchConfig({
@@ -2304,6 +2458,8 @@ export async function runReviewFilterReportWatch(
     'max-polls': args.flags['max-polls'],
     format: args.flags.format,
     slim: args.flags.slim,
+    'on-applied-change': args.flags['on-applied-change'],
+    'on-applied-template': args.flags['on-applied-template'],
   });
   if (config.kind !== 'ok') {
     process.stderr.write(`clawreview review filter-report: ${config.message}\n`);
@@ -2315,6 +2471,11 @@ export async function runReviewFilterReportWatch(
 
   const fetcher = injected?.fetcher ?? defaultWatchFetcher;
   const sleeper = injected?.sleeper ?? defaultWatchSleeper;
+  // Tick 25: hook executor reuses the WatchOnDriftExecer shape from
+  // runReviewDriftWatch (same shell-exec contract, same stdin-pipe
+  // semantics). Tests inject a stub that records invocations.
+  const onAppliedChangeExecer =
+    injected?.onAppliedChangeExecer ?? defaultWatchOnDriftExecer;
   const slimQs = config.slim ? '?slim=true' : '';
   const url = `${config.serverUrl}/api/reviews/${encodeURIComponent(reviewId)}/filter-report${slimQs}`;
 
@@ -2336,6 +2497,16 @@ export async function runReviewFilterReportWatch(
   const requireFilter =
     args.flags['require-filter'] === true || args.flags['require-filter'] === 'true';
   let lastApplied = true;
+  // Tick 25: --on-applied-change bookkeeping. Tracks the PREVIOUS
+  // sample's applied bit so the next sample can detect the
+  // transition edge. We use a 'no prior sample' sentinel (null) so
+  // the FIRST poll never fires the hook (there's no transition
+  // FROM null TO a bool); subsequent polls compare against the
+  // last observed boolean. Same pattern as runReviewDriftWatch's
+  // prevHadDrift -- a recover edge requires a drift to recover
+  // FROM, and an applied-change edge requires an applied to change
+  // FROM.
+  let prevApplied: boolean | null = null;
   let pollCount = 0;
   try {
     while (!stopped) {
@@ -2383,6 +2554,42 @@ export async function runReviewFilterReportWatch(
       // top-level boolean both slim and full shapes carry, so the
       // bookkeeping works uniformly across projection modes.
       lastApplied = Boolean(body.applied);
+
+      // Tick 25: fire --on-applied-change hook on the transition
+      // edge (prev !== current). The first poll never fires (there's
+      // no transition from a null prior); subsequent polls compare
+      // against the last observed boolean and fire on flip.
+      //
+      // The hook receives the same JSONL payload --on-drift uses so
+      // a single jq / webhook pipeline can consume both:
+      //   { reviewId, poll, body, prevApplied, currentApplied }
+      // Failures surface on stderr but DON'T abort the loop -- the
+      // operator wired the hook to be notified; a misconfigured
+      // webhook shouldn't stop the watch from running.
+      if (config.onAppliedChange !== null) {
+        if (prevApplied !== null && prevApplied !== lastApplied) {
+          const payload = JSON.stringify({
+            reviewId,
+            poll: pollCount,
+            body,
+            prevApplied,
+            currentApplied: lastApplied,
+          });
+          try {
+            const result = await onAppliedChangeExecer(config.onAppliedChange, payload);
+            if (result.exitCode !== 0) {
+              process.stderr.write(
+                `clawreview review filter-report --watch: --on-applied-change exited ${result.exitCode}: ${result.stderr.trim()}\n`,
+              );
+            }
+          } catch (err) {
+            process.stderr.write(
+              `clawreview review filter-report --watch: --on-applied-change failed: ${(err as Error).message}\n`,
+            );
+          }
+        }
+      }
+      prevApplied = lastApplied;
 
       // Stop check BEFORE sleep so --max-polls 1 doesn't waste an
       // interval between the only sample and the exit.
