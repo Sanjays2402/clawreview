@@ -630,6 +630,123 @@ export async function registerReviewsRoutes(app: FastifyInstance): Promise<void>
       .default({}),
   });
 
+  /**
+   * Tick 23: GET /api/reviews/:id/filter-report
+   *
+   * Lightweight, single-purpose endpoint returning ONLY the persisted
+   * `PersistedFilterReport` shape (or a 404 when the review predates
+   * tick 22). Pair-of-three with /api/reviews/:id (full DTO) and
+   * /api/reviews/:id/digest (drift snapshot):
+   *
+   *   - /api/reviews/:id              -- everything; carries findings[],
+   *                                       digest, filterReport, executions.
+   *                                       Heavy for tag-heavy / large reviews.
+   *   - /api/reviews/:id/digest       -- digest + drift, no findings.
+   *                                       Lighter; for the "is it stale?"
+   *                                       banner.
+   *   - /api/reviews/:id/filter-report -- JUST the filter report
+   *                                       (appliedFilters, inputTotal,
+   *                                       droppedTotal). Smallest payload
+   *                                       on the wire; for the dashboard
+   *                                       "filtered N of M" badge / a CI
+   *                                       gate that ONLY needs the drop
+   *                                       count.
+   *
+   * Default response shape mirrors `PersistedFilterReport`:
+   *   {
+   *     reviewId, inputTotal, droppedTotal,
+   *     appliedFilters: { minConfidence: { raw, normalised, applied },
+   *                       severityThreshold: { raw, normalised, applied },
+   *                       any },
+   *   }
+   *
+   * `?slim=true` (default false) collapses the verbose `appliedFilters`
+   * object to a single `applied: boolean` flag (the `any` value) so a
+   * dashboard "filtered N of M" badge that doesn't care WHICH filter
+   * fired gets the smallest possible payload. The `applied` field is
+   * the canonical name (matches the inner field) so a consumer
+   * can write `body.applied` regardless of mode -- on the slim path
+   * it's the top-level boolean; on the full path it's
+   * `body.appliedFilters.any` (we also surface a top-level `applied`
+   * on the full path for ergonomic parity, mirroring the digest
+   * `slim` echo pattern).
+   *
+   * 404 when:
+   *   - The review id is unknown.
+   *   - The review exists but has no persisted filter report (legacy
+   *     pre-tick-22 completes / failed reviews). The 404 distinguishes
+   *     from a 200 with empty filterReport so a dashboard's "no data"
+   *     branch is explicit (mirrors the SARIF endpoint pattern). The
+   *     dashboard can fall back to /api/reviews/:id which echoes
+   *     filterReport=null on the same shape.
+   *
+   * Auth: readonly (same as /api/reviews/:id).
+   */
+  app.get(
+    '/api/reviews/:id/filter-report',
+    { preHandler: app.requireRole('readonly') },
+    async (req, reply) => {
+      const store = getReviewStore();
+      const params = z.object({ id: z.string().min(1) }).safeParse(req.params);
+      if (!params.success) {
+        reply.code(400);
+        return { error: 'BadInput' };
+      }
+      // Reuse parseNormalisedEchoFlag's boolean-sugar contract so this
+      // endpoint accepts the same `?slim=true|1|yes` / `?slim=false|0|no`
+      // shapes a consumer already knows from the digest route. We do
+      // NOT accept the comma-list / minus-prefix forms here because
+      // this shape only has ONE strippable field (appliedFilters) and
+      // a list would be over-engineering for a single bit.
+      const queryParse = z
+        .object({ slim: z.string().optional() })
+        .safeParse(req.query ?? {});
+      if (!queryParse.success) {
+        reply.code(400);
+        return { error: 'BadQuery', issues: queryParse.error.flatten() };
+      }
+      const slim = parseNormalisedEchoFlag(queryParse.data.slim);
+      const rec = await store.get(params.data.id);
+      if (!rec) {
+        reply.code(404);
+        return { error: 'NotFound' };
+      }
+      if (!rec.filterReport) {
+        // Legacy review (pre-tick-22) -- no persisted filter report.
+        // 404 keeps the dashboard's "no data" branch explicit; the
+        // dashboard can fall back to /api/reviews/:id?filter-report
+        // pattern which surfaces filterReport=null.
+        reply.code(404);
+        return { error: 'NoFilterReport', reviewId: rec.id };
+      }
+      const fr = rec.filterReport;
+      if (slim) {
+        return {
+          reviewId: rec.id,
+          inputTotal: fr.inputTotal,
+          droppedTotal: fr.droppedTotal,
+          // Single boolean replaces the verbose appliedFilters object
+          // on slim mode -- a "filtered N of M" badge only needs to
+          // know whether ANY filter fired, not which one.
+          applied: fr.appliedFilters.any,
+          slim: true,
+        };
+      }
+      return {
+        reviewId: rec.id,
+        inputTotal: fr.inputTotal,
+        droppedTotal: fr.droppedTotal,
+        appliedFilters: fr.appliedFilters,
+        // Surface `applied` at the top level too so a consumer that
+        // wants the single bit can read it without descending into
+        // appliedFilters.any -- matches the slim path's shape so
+        // dashboards have ONE name to bind regardless of mode.
+        applied: fr.appliedFilters.any,
+        slim: false,
+      };
+    },
+  );
+
   app.post('/api/reviews/:id/findings/bulk', { preHandler: app.requireRole('operator') }, async (req, reply) => {
     const store = getReviewStore();
     const params = z.object({ id: z.string().min(1) }).safeParse(req.params);

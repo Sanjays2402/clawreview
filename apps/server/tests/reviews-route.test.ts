@@ -2157,4 +2157,138 @@ describe('reviews and stats routes', () => {
       expect(res.statusCode).toBe(404);
     });
   });
+
+  // Tick 23: GET /api/reviews/:id/filter-report -- lightweight,
+  // single-purpose endpoint returning ONLY the persisted filter report
+  // shape so a dashboard "filtered N of M" badge doesn't need to pull
+  // the full review (findings + digest + executions) just to see the
+  // drop count.
+  describe('GET /api/reviews/:id/filter-report (tick 23)', () => {
+    async function seedReviewWithFilterReport(opts: {
+      prNumber: number;
+      minConfidence?: number;
+      severityThreshold?: 'critical' | 'high' | 'medium' | 'low' | 'nit';
+    }): Promise<string> {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 23, owner: 'o', repo: 'r', prNumber: opts.prNumber,
+        headSha: `h${opts.prNumber}`, baseSha: `b${opts.prNumber}`,
+      });
+      const findings = [
+        { agent: 'security', category: 'security' as const, severity: 'high' as const, title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        { agent: 'security', category: 'security' as const, severity: 'low' as const, title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+        { agent: 'style', category: 'style' as const, severity: 'nit' as const, title: 'Z', rationale: 'r', file: 'c.ts', startLine: 3, confidence: 0.8, tags: [] },
+      ];
+      const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+      const report = findingDigestWithFilterReport(findings, {
+        topAgents: 8, topCategories: 8, hotspots: true,
+        minConfidence: opts.minConfidence,
+        severityThreshold: opts.severityThreshold,
+      });
+      const { digest, ...persistedSlice } = report;
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: opts.prNumber, headSha: `h${opts.prNumber}`, baseSha: `b${opts.prNumber}` },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: findings.length, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        findings, { digest, filterReport: persistedSlice },
+      );
+      return r.id;
+    }
+
+    it('returns the persisted filter report verbatim (full shape) by default', async () => {
+      const reviewId = await seedReviewWithFilterReport({ prNumber: 230, minConfidence: 0.5 });
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.reviewId).toBe(reviewId);
+      expect(body.inputTotal).toBe(3);
+      // One low-confidence finding dropped by the 0.5 floor.
+      expect(body.droppedTotal).toBe(1);
+      expect(body.applied).toBe(true);
+      // Full appliedFilters object surfaces verbatim.
+      expect(body.appliedFilters.minConfidence.applied).toBe(true);
+      expect(body.appliedFilters.minConfidence.normalised).toBe(0.5);
+      expect(body.appliedFilters.severityThreshold.applied).toBe(false);
+      expect(body.appliedFilters.any).toBe(true);
+      // slim echo confirms the resolved mode.
+      expect(body.slim).toBe(false);
+    });
+
+    it('collapses appliedFilters into a single boolean when ?slim=true', async () => {
+      const reviewId = await seedReviewWithFilterReport({
+        prNumber: 231, minConfidence: 0.5, severityThreshold: 'medium',
+      });
+      const res = await app.inject({
+        method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=true`,
+      });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Slim mode: totals + single boolean, NO appliedFilters object.
+      expect(body.reviewId).toBe(reviewId);
+      expect(body.inputTotal).toBe(3);
+      expect(body.droppedTotal).toBeGreaterThan(0);
+      expect(body.applied).toBe(true);
+      expect(body.appliedFilters).toBeUndefined();
+      expect(body.slim).toBe(true);
+    });
+
+    it('returns 404 with NoFilterReport when the review predates tick 22 (no persisted report)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 23, owner: 'o', repo: 'r', prNumber: 232, headSha: 'h232', baseSha: 'b232',
+      });
+      // Complete WITHOUT a filterReport ref (legacy worker path).
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 232, headSha: 'h232', baseSha: 'b232' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}/filter-report` });
+      expect(res.statusCode).toBe(404);
+      const body = res.json();
+      expect(body.error).toBe('NoFilterReport');
+      expect(body.reviewId).toBe(r.id);
+    });
+
+    it('returns 404 with NotFound for an unknown review id', async () => {
+      const res = await app.inject({ method: 'GET', url: '/api/reviews/does-not-exist/filter-report' });
+      expect(res.statusCode).toBe(404);
+      expect(res.json().error).toBe('NotFound');
+    });
+
+    it('echoes applied=false / droppedTotal=0 when the review was unfiltered', async () => {
+      // No minConfidence / severityThreshold passed -> filter is a no-op.
+      const reviewId = await seedReviewWithFilterReport({ prNumber: 233 });
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      expect(body.inputTotal).toBe(3);
+      expect(body.droppedTotal).toBe(0);
+      expect(body.applied).toBe(false);
+      expect(body.appliedFilters.any).toBe(false);
+      expect(body.appliedFilters.minConfidence.applied).toBe(false);
+      expect(body.appliedFilters.severityThreshold.applied).toBe(false);
+    });
+
+    it('accepts ?slim=1 / ?slim=yes / ?slim=false sugar', async () => {
+      const reviewId = await seedReviewWithFilterReport({ prNumber: 234, minConfidence: 0.5 });
+      const sugar1 = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=1` });
+      expect(sugar1.json().slim).toBe(true);
+      expect(sugar1.json().appliedFilters).toBeUndefined();
+      const sugarYes = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=yes` });
+      expect(sugarYes.json().slim).toBe(true);
+      const sugarFalse = await app.inject({ method: 'GET', url: `/api/reviews/${reviewId}/filter-report?slim=false` });
+      expect(sugarFalse.json().slim).toBe(false);
+      expect(sugarFalse.json().appliedFilters).toBeDefined();
+    });
+  });
 });
