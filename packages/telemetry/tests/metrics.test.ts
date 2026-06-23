@@ -1313,3 +1313,137 @@ describe('observeReviewFilterReportRead (tick 23)', () => {
   });
 });
 
+describe('observeReviewFilterReportReadDuration (tick 24)', () => {
+  it('observes on the full series when slim=false', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-1', defaultMetrics: false });
+    observeReviewFilterReportReadDuration(metrics, false, 0.005);
+    observeReviewFilterReportReadDuration(metrics, false, 0.015);
+    const text = await metrics.registry.metrics();
+    // The histogram exposes _count and _sum per shape; pin both so
+    // a future refactor that drops the labelled fire breaks visibly.
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*2/,
+    );
+    // Sum is 0.005 + 0.015 = 0.02 (allow tiny float noise but match the prefix).
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_sum\{[^}]*shape="full"[^}]*\}\s*0\.02/,
+    );
+  });
+
+  it('observes on the slim series when slim=true', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-2', defaultMetrics: false });
+    observeReviewFilterReportReadDuration(metrics, true, 0.001);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="slim"[^}]*\}\s*1/,
+    );
+  });
+
+  it('keeps full and slim independent (cardinality is exactly 2)', async () => {
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-3', defaultMetrics: false });
+    observeReviewFilterReportReadDuration(metrics, false, 0.01);
+    observeReviewFilterReportReadDuration(metrics, true, 0.002);
+    observeReviewFilterReportReadDuration(metrics, true, 0.003);
+    const text = await metrics.registry.metrics();
+    // Two count series: one per shape. The _bucket / _sum lines per
+    // shape are byte-byte regulars from prom-client; matching _count
+    // is the canonical "this label appeared" assertion.
+    const countLines = text
+      .split('\n')
+      .filter((l) =>
+        l.startsWith('clawreview_review_filter_report_read_duration_seconds_count{'),
+      );
+    expect(countLines).toHaveLength(2);
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*1/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="slim"[^}]*\}\s*2/,
+    );
+  });
+
+  it('clamps non-finite durations to 0 (NaN / Infinity does not poison the histogram)', async () => {
+    // A clock-skew or programming bug must never poison the histogram
+    // because Prometheus quantile estimates would carry the bad value
+    // forward indefinitely. Pin the clamp behaviour.
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-4', defaultMetrics: false });
+    observeReviewFilterReportReadDuration(metrics, false, Number.NaN);
+    observeReviewFilterReportReadDuration(metrics, false, Number.POSITIVE_INFINITY);
+    observeReviewFilterReportReadDuration(metrics, false, -1);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*3/,
+    );
+    // All three observations contributed 0, so the sum stays 0.
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_sum\{[^}]*shape="full"[^}]*\}\s*0/,
+    );
+  });
+
+  it('lands samples in the expected histogram buckets (1ms in le="0.001", 50ms in le="0.05")', async () => {
+    // Bucket placement is the contract a dashboard depends on. Pin
+    // the resolved buckets for two representative sample sizes.
+    resetMetricsForTests();
+    const { observeReviewFilterReportReadDuration } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-5', defaultMetrics: false });
+    observeReviewFilterReportReadDuration(metrics, false, 0.001);  // exactly on the lowest bucket
+    observeReviewFilterReportReadDuration(metrics, false, 0.045);  // below 0.05 bucket
+    const text = await metrics.registry.metrics();
+    // 1ms lands in le="0.001" AND every larger bucket (cumulative).
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_bucket\{[^}]*le="0\.001"[^}]*\}\s*1/,
+    );
+    // 45ms is below 0.05, so the le="0.05" bucket holds both samples
+    // (1ms also counts because cumulative).
+    expect(text).toMatch(
+      /clawreview_review_filter_report_read_duration_seconds_bucket\{[^}]*le="0\.05"[^}]*\}\s*2/,
+    );
+  });
+
+  it('pairs cleanly with the counter (same shape label, same fire discipline)', async () => {
+    // The route fires the counter and the histogram on the SAME 200
+    // path; a divergence between the two breaks the dashboard join.
+    // This test pins the contract: when an operator hits N full + M
+    // slim reads, both series carry exactly N + M samples.
+    resetMetricsForTests();
+    const { observeReviewFilterReportRead, observeReviewFilterReportReadDuration } =
+      await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-frrd-6', defaultMetrics: false });
+    for (let i = 0; i < 4; i++) {
+      observeReviewFilterReportRead(metrics, false);
+      observeReviewFilterReportReadDuration(metrics, false, 0.01);
+    }
+    for (let i = 0; i < 2; i++) {
+      observeReviewFilterReportRead(metrics, true);
+      observeReviewFilterReportReadDuration(metrics, true, 0.005);
+    }
+    const text = await metrics.registry.metrics();
+    // Counter:  4 full + 2 slim.
+    const counterFull = text.match(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="full"[^}]*\}\s*(\d+)/,
+    );
+    const counterSlim = text.match(
+      /clawreview_review_filter_report_reads_total\{[^}]*shape="slim"[^}]*\}\s*(\d+)/,
+    );
+    expect(Number(counterFull![1])).toBe(4);
+    expect(Number(counterSlim![1])).toBe(2);
+    // Histogram: count series matches the counter.
+    const histFull = text.match(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="full"[^}]*\}\s*(\d+)/,
+    );
+    const histSlim = text.match(
+      /clawreview_review_filter_report_read_duration_seconds_count\{[^}]*shape="slim"[^}]*\}\s*(\d+)/,
+    );
+    expect(Number(histFull![1])).toBe(4);
+    expect(Number(histSlim![1])).toBe(2);
+  });
+});
+

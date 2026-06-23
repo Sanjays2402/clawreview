@@ -384,6 +384,31 @@ export interface MetricsBundle {
    * with traffic that didn't actually touch the persisted shape.
    */
   reviewFilterReportReadsTotal: Counter<string>;
+  /**
+   * Tick 24: `clawreview_review_filter_report_read_duration_seconds{shape}`
+   * -- per-shape latency histogram for /api/reviews/:id/filter-report.
+   *
+   * Pairs with the tick-23 `reviewFilterReportReadsTotal` counter: the
+   * counter answers "how often did each shape fire?", the histogram
+   * answers "and how long did each shape take?". Together they let a
+   * dashboard quantify the slim-vs-full tradeoff: if slim reads are
+   * consistently 3x faster than full, the projection knob is worth
+   * surfacing more aggressively in the UI; if they're indistinguishable,
+   * the projection isn't earning its keep and can be deprecated.
+   *
+   * Single label (`shape`), closed two-value set ('full' | 'slim') --
+   * identical to the counter so the two series can be joined in PromQL
+   * without re-labelling. Cardinality bounded at 2.
+   *
+   * Buckets are tuned for in-process file-store reads (sub-millisecond
+   * happy path; tail dominated by GC pauses on very large reviews).
+   * The slowest bucket (1s) catches pathological cases where the
+   * review store has spilled to disk or a sibling lock contention is
+   * starving the read. Same fire-discipline as the counter: 200 reads
+   * only; 404 arms (NotFound, NoFilterReport) deliberately excluded
+   * because they didn't actually consume the persisted shape.
+   */
+  reviewFilterReportReadDurationSeconds: Histogram<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -630,6 +655,25 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewFilterReportReadDurationSeconds = new Histogram({
+    name: 'clawreview_review_filter_report_read_duration_seconds',
+    help:
+      'Tick 24: /api/reviews/:id/filter-report read latency in seconds, ' +
+      'labelled by the same projection shape (full | slim) as the ' +
+      'reads counter. Pairs with reviewFilterReportReadsTotal so a ' +
+      'dashboard can compute average latency per shape (sum/count) ' +
+      'and quantify the slim-vs-full tradeoff. Fires once per 200; ' +
+      '404 arms are deliberately excluded so the histogram reflects ' +
+      'actual persisted-shape reads only.',
+    labelNames: ['shape'],
+    // Sub-ms happy path; tail captures GC pauses on very large reviews
+    // and rare lock contention. Slowest bucket 1s catches pathological
+    // file-store spillover so an on-call sees the outlier on /metrics
+    // before it shows up as a user complaint.
+    buckets: [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -696,6 +740,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDigestFilterAppliedTotal,
     findingsFilterPreAppliedTotal,
     reviewFilterReportReadsTotal,
+    reviewFilterReportReadDurationSeconds,
     queueDepth,
     queueInflight,
   };
@@ -1608,5 +1653,50 @@ export function observeReviewFilterReportRead(
   metrics.reviewFilterReportReadsTotal.inc({
     shape: deriveReviewFilterReportShape(slim),
   });
+}
+
+/**
+ * Tick 24: record one accepted `/api/reviews/:id/filter-report` read
+ * LATENCY on the `clawreview_review_filter_report_read_duration_seconds`
+ * histogram, labelled by the same projection shape (`full`/`slim`) as
+ * the tick-23 counter.
+ *
+ * Pairs with `observeReviewFilterReportRead`: the counter fire and the
+ * histogram observation use the SAME shape derivation so a dashboard
+ * joining the two series doesn't risk mis-labelled samples. Same fire
+ * discipline: 200 reads only; 404 arms (NotFound, NoFilterReport) are
+ * deliberately excluded because they didn't actually consume the
+ * persisted shape -- their latency would represent a 404 lookup, not
+ * a filter-report read, and would bias the per-shape average.
+ *
+ * `durationSeconds` must be a finite non-negative number. Callers
+ * typically measure with `performance.now()` and divide by 1000:
+ *
+ *     const start = performance.now();
+ *     // ... do the work, build the response body ...
+ *     observeReviewFilterReportReadDuration(metrics, slim, (performance.now() - start) / 1000);
+ *
+ * Non-finite / negative values are silently clamped to 0 so an
+ * upstream clock-skew or measurement bug doesn't poison the
+ * histogram with bogus values that would skew quantile estimates.
+ *
+ * Cheap: a single histogram observation with one short label.
+ */
+export function observeReviewFilterReportReadDuration(
+  metrics: MetricsBundle,
+  slim: boolean,
+  durationSeconds: number,
+): void {
+  // Clamp non-finite / negative samples to 0 so a bogus measurement
+  // (clock skew, programming error) doesn't poison the histogram's
+  // quantile estimates with values that would skew the dashboard.
+  const safe =
+    Number.isFinite(durationSeconds) && durationSeconds >= 0
+      ? durationSeconds
+      : 0;
+  metrics.reviewFilterReportReadDurationSeconds.observe(
+    { shape: deriveReviewFilterReportShape(slim) },
+    safe,
+  );
 }
 
