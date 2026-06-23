@@ -296,6 +296,37 @@ export interface MetricsBundle {
    * Cardinality: exactly three label values. Bounded.
    */
   reviewDriftWatchPollsTotal: Counter<string>;
+  /**
+   * Tick 21: `clawreview_review_digest_filter_applied_total{min_confidence,severity_threshold}`
+   * -- how often does each /api/reviews/:id/digest fresh recompute
+   * actually apply a pre-bucket filter?
+   *
+   * Fired once per accepted /digest fresh call (the cached arm does
+   * not fire -- the persisted digest carries no filter metadata, so
+   * counting cached reads would distort the "what fraction of
+   * dashboards filter?" ratio).
+   *
+   * Two labels:
+   *   - `min_confidence`     -- 'yes' | 'no'. 'yes' when the
+   *                             normalised threshold > 0, i.e. the
+   *                             filter is not the back-compat no-op.
+   *   - `severity_threshold` -- 'yes' | 'no'. 'yes' when the
+   *                             normalised threshold is a valid
+   *                             Severity literal, not null.
+   *
+   * Cross-product cardinality is exactly 4 (yes/yes, yes/no, no/yes,
+   * no/no) so this counter cannot blow up the cardinality budget.
+   *
+   * Pairs with tick 20's `?minConfidence` / `?severityThreshold`
+   * query knobs and tick 21's `findingDigestWithFilterReport` helper:
+   * the helper computes the `applied` bit, the counter records it.
+   * Dashboards can graph e.g.
+   *   rate(clawreview_review_digest_filter_applied_total{min_confidence="yes"}[5m])
+   * / rate(clawreview_review_digest_filter_applied_total[5m])
+   * to see what fraction of /digest reads filter by confidence over
+   * any time window.
+   */
+  reviewDigestFilterAppliedTotal: Counter<string>;
   queueDepth: Gauge<string>;
   queueInflight: Gauge<string>;
 }
@@ -506,6 +537,19 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     registers: [registry],
   });
 
+  const reviewDigestFilterAppliedTotal = new Counter({
+    name: 'clawreview_review_digest_filter_applied_total',
+    help:
+      'Tick 21: did each /api/reviews/:id/digest fresh recompute apply ' +
+      'a pre-bucket filter? Labels min_confidence and severity_threshold ' +
+      'are both closed yes|no sets, so the cross-product is exactly 4. ' +
+      'Cached arm does NOT fire (persisted digest carries no filter ' +
+      'metadata). Pairs with tick 20 ?minConfidence / ?severityThreshold ' +
+      'query knobs and tick 21 findingDigestWithFilterReport helper.',
+    labelNames: ['min_confidence', 'severity_threshold'],
+    registers: [registry],
+  });
+
   const queueProbes = new Map<string, () => Promise<{ pending?: number; inflight?: number } | undefined>>();
 
   const queueDepth = new Gauge({
@@ -569,6 +613,7 @@ export function getMetrics(init: MetricsInit = { service: 'clawreview' }): Metri
     reviewDigestDriftTotal,
     reviewDigestPersistedDriftTotal,
     reviewDriftWatchPollsTotal,
+    reviewDigestFilterAppliedTotal,
     queueDepth,
     queueInflight,
   };
@@ -1291,3 +1336,83 @@ export function observeReviewDriftWatchPoll(
   const result = deriveReviewDriftWatchResult(fetchOk, drift);
   metrics.reviewDriftWatchPollsTotal.inc({ result });
 }
+
+/**
+ * Tick 21: closed set of boolean labels the digest-filter-applied
+ * counter (`reviewDigestFilterAppliedTotal`) can record on each
+ * axis:
+ *
+ *   - `yes` -- the filter normalised to a not-no-op threshold
+ *              (minConfidence > 0 OR severityThreshold !== null)
+ *              AND the route consumed the filter (the cached arm
+ *              skips the filter entirely; only the fresh arm fires
+ *              the counter).
+ *   - `no`  -- the operator did not supply the filter, OR the value
+ *              normalised to the no-op (clamped 0 / unknown
+ *              severity literal).
+ *
+ * Exported as a `const` literal so callers cannot drift via a typo;
+ * a typo'd literal would silently fragment the counter series across
+ * label values that both look correct in code review.
+ */
+export const REVIEW_DIGEST_FILTER_APPLIED_LABELS = ['yes', 'no'] as const;
+export type ReviewDigestFilterAppliedLabel =
+  (typeof REVIEW_DIGEST_FILTER_APPLIED_LABELS)[number];
+
+/**
+ * Tick 21: derive a `yes`/`no` label from a boolean (the `applied`
+ * bit on `findingDigestWithFilterReport`'s appliedFilters arms).
+ *
+ * Pure: a 3-line helper that exists only so the worker / route layer
+ * can't accidentally pass a string like 'yes'/'No'/'true' that would
+ * fragment the counter series.
+ */
+export function deriveReviewDigestFilterAppliedLabel(
+  applied: boolean,
+): ReviewDigestFilterAppliedLabel {
+  return applied ? 'yes' : 'no';
+}
+
+/**
+ * Record one `/api/reviews/:id/digest` fresh recompute on the
+ * `clawreview_review_digest_filter_applied_total{min_confidence,severity_threshold}`
+ * counter.
+ *
+ * Fires once per accepted /digest fresh call (the cached arm is
+ * inert because the persisted digest carries no filter metadata --
+ * counting the cached arm would corrupt the "what fraction of
+ * dashboards request filtered fresh recomputes?" rate).
+ *
+ * Two labels, both `yes`/`no`:
+ *   - `min_confidence`     -- did the request apply a real
+ *                             minConfidence floor? (>0 after
+ *                             normalisation.)
+ *   - `severity_threshold` -- did the request apply a real
+ *                             severityThreshold floor? (a valid
+ *                             Severity literal after normalisation.)
+ *
+ * The cross-product cardinality is exactly 4 (yes/yes, yes/no, no/yes,
+ * no/no) so this counter cannot blow up the cardinality budget. The
+ * `no/no` bucket dominates traffic on the default no-filter call.
+ *
+ * Pairs with tick 20's `?minConfidence` / `?severityThreshold` query
+ * knobs and tick 21's `findingDigestWithFilterReport` helper: the
+ * helper computes the `applied` bit, the counter records it. Dashboards
+ * can graph e.g.
+ *   rate(clawreview_review_digest_filter_applied_total{min_confidence="yes"}[5m])
+ * to see "what fraction of /digest reads filter by confidence?".
+ *
+ * Cheap to call from a hot Fastify hook: a single counter increment
+ * with two short label values per request.
+ */
+export function observeReviewDigestFilterApplied(
+  metrics: MetricsBundle,
+  minConfidenceApplied: boolean,
+  severityThresholdApplied: boolean,
+): void {
+  metrics.reviewDigestFilterAppliedTotal.inc({
+    min_confidence: deriveReviewDigestFilterAppliedLabel(minConfidenceApplied),
+    severity_threshold: deriveReviewDigestFilterAppliedLabel(severityThresholdApplied),
+  });
+}
+

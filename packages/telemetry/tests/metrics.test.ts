@@ -998,3 +998,117 @@ describe('observeReviewDriftWatchPoll (tick 17)', () => {
   });
 });
 
+// Tick 21: digest-filter-applied counter records whether the
+// /api/reviews/:id/digest fresh recompute applied a pre-bucket
+// filter on each axis (minConfidence, severityThreshold). Bounded
+// at 4 series total (yes/yes, yes/no, no/yes, no/no).
+describe('deriveReviewDigestFilterAppliedLabel (tick 21)', () => {
+  it('returns yes when applied=true', async () => {
+    const { deriveReviewDigestFilterAppliedLabel } = await import('../src/metrics.js');
+    expect(deriveReviewDigestFilterAppliedLabel(true)).toBe('yes');
+  });
+  it('returns no when applied=false', async () => {
+    const { deriveReviewDigestFilterAppliedLabel } = await import('../src/metrics.js');
+    expect(deriveReviewDigestFilterAppliedLabel(false)).toBe('no');
+  });
+  it('REVIEW_DIGEST_FILTER_APPLIED_LABELS is the closed yes|no tuple', async () => {
+    const { REVIEW_DIGEST_FILTER_APPLIED_LABELS } = await import('../src/metrics.js');
+    // Frozen membership so a typo'd literal at a call site cannot
+    // silently fragment the series.
+    expect([...REVIEW_DIGEST_FILTER_APPLIED_LABELS]).toEqual(['yes', 'no']);
+  });
+});
+
+describe('observeReviewDigestFilterApplied (tick 21)', () => {
+  it('bumps the yes/yes series when both filters applied', async () => {
+    resetMetricsForTests();
+    const { observeReviewDigestFilterApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDigestFilterApplied(metrics, true, true);
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="yes"[^}]*severity_threshold="yes"[^}]*\}\s*1/,
+    );
+  });
+
+  it('bumps the no/no series on the default no-filter call', async () => {
+    resetMetricsForTests();
+    const { observeReviewDigestFilterApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDigestFilterApplied(metrics, false, false);
+    observeReviewDigestFilterApplied(metrics, false, false);
+    const text = await metrics.registry.metrics();
+    // no/no is the dominant series on default traffic.
+    expect(text).toMatch(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="no"[^}]*severity_threshold="no"[^}]*\}\s*2/,
+    );
+  });
+
+  it('keeps yes/no and no/yes in independent buckets (no spillover)', async () => {
+    // Three calls with the mixed shapes; the cross-product means each
+    // call lands in its own labelset and the counts do not bleed
+    // across.
+    resetMetricsForTests();
+    const { observeReviewDigestFilterApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDigestFilterApplied(metrics, true, false); // yes/no
+    observeReviewDigestFilterApplied(metrics, true, false); // yes/no
+    observeReviewDigestFilterApplied(metrics, false, true); // no/yes
+    const text = await metrics.registry.metrics();
+    expect(text).toMatch(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="yes"[^}]*severity_threshold="no"[^}]*\}\s*2/,
+    );
+    expect(text).toMatch(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="no"[^}]*severity_threshold="yes"[^}]*\}\s*1/,
+    );
+  });
+
+  it('cardinality stays exactly 4 across the full cross-product', async () => {
+    // Hit every cross-product cell. The closed yes|no x yes|no shape
+    // is a hard 4-series ceiling so a future code-change that
+    // accidentally widened either axis would surface here.
+    resetMetricsForTests();
+    const { observeReviewDigestFilterApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDigestFilterApplied(metrics, true, true);
+    observeReviewDigestFilterApplied(metrics, true, false);
+    observeReviewDigestFilterApplied(metrics, false, true);
+    observeReviewDigestFilterApplied(metrics, false, false);
+    const text = await metrics.registry.metrics();
+    const seriesLines = text
+      .split('\n')
+      .filter((l) => l.startsWith('clawreview_review_digest_filter_applied_total{'));
+    // Exactly four labelsets, each fired once.
+    expect(seriesLines).toHaveLength(4);
+    for (const line of seriesLines) {
+      // Each series should carry a count of 1 (we fired each one
+      // exactly once). The trailing whitespace + 1 is the value.
+      expect(line).toMatch(/\}\s*1$/);
+    }
+  });
+
+  it('reconciles per-axis cumulative counts with the bumped subsets', async () => {
+    // 3 polls: 2 with minConfidence applied, 1 without; 1 with
+    // severityThreshold applied, 2 without. The PER-AXIS sum across
+    // the cross-product cells must agree with each per-axis total.
+    resetMetricsForTests();
+    const { observeReviewDigestFilterApplied } = await import('../src/metrics.js');
+    const metrics = getMetrics({ service: 'clawreview-test', defaultMetrics: false });
+    observeReviewDigestFilterApplied(metrics, true, true);   // both yes
+    observeReviewDigestFilterApplied(metrics, true, false);  // min yes only
+    observeReviewDigestFilterApplied(metrics, false, false); // neither
+    const text = await metrics.registry.metrics();
+    // min_confidence=yes shows up in 2 calls (yes/yes + yes/no).
+    const yesYes = text.match(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="yes"[^}]*severity_threshold="yes"[^}]*\}\s*(\d+)/,
+    );
+    const yesNo = text.match(
+      /clawreview_review_digest_filter_applied_total\{[^}]*min_confidence="yes"[^}]*severity_threshold="no"[^}]*\}\s*(\d+)/,
+    );
+    expect(yesYes).toBeTruthy();
+    expect(yesNo).toBeTruthy();
+    const minConfidenceYesTotal = Number(yesYes![1]) + Number(yesNo![1]);
+    expect(minConfidenceYesTotal).toBe(2);
+  });
+});
+
