@@ -2319,6 +2319,140 @@ export function resolveFilterReportDiffOutputPath(
 }
 
 /**
+ * Tick 27: default byte cap for `review filter-report --diff --output`.
+ *
+ * 100 KiB is the same default as `presets diff --max-output-bytes`
+ * (tick 14) so an operator who learned one command's protection
+ * model knows the other's. The default protects against an
+ * accidental megabyte-scale stream into a CI log without an
+ * explicit operator opt-in (`--max-output-bytes 0` to disable, or
+ * a larger number to raise).
+ *
+ * For context: a typical filter-report delta JSON body is ~1-2 KB
+ * (header + 5 axes + footer; no per-finding detail). A 100 KiB cap
+ * is 50-100x the realistic body size, so the cap fires only on
+ * pathological cases (a renderer regression, a malformed delta with
+ * gigantic strings, etc.) -- which is exactly when an operator
+ * wants the protection.
+ */
+export const FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES = 100 * 1024;
+
+/**
+ * Tick 27: hard ceiling on `--max-output-bytes` for
+ * `review filter-report --diff`. Even an explicit caller cannot
+ * disable the sanity limit (apart from `--max-output-bytes 0`
+ * which is the documented opt-out). 16 MiB matches the `presets
+ * diff` ceiling so the two commands' protection contracts are
+ * symmetric -- a CI pipeline that wraps either with a `timeout` /
+ * `head` / `dd` cap doesn't have to special-case one or the other.
+ */
+export const FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING = 16 * 1024 * 1024;
+
+/**
+ * Tick 27: pure parser for the `--max-output-bytes` flag on
+ * `review filter-report --diff`.
+ *
+ * Returns:
+ *   - `number`     -- a valid byte cap (0 means "no cap", any
+ *                     positive integer means "fail when output
+ *                     exceeds N bytes"). Clamped to
+ *                     FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING.
+ *   - `'invalid'`  -- caller-supplied value was not a non-negative
+ *                     integer. The route layer surfaces this as
+ *                     exit-2 with a usage hint.
+ *
+ * Accepts string ("100000") or number forms because args.flags is
+ * `Record<string, string | boolean>` (strings from CLI parse) while
+ * a programmatic invoker (test) is most naturally a number.
+ * Whitespace trimmed.
+ *
+ * `undefined` / `null` / `true` (bare `--max-output-bytes` with no
+ * value) all map to the default cap so a stray flag without an
+ * argument doesn't accidentally disable the protection -- matches
+ * `parsePresetDiffMaxOutputBytes`'s contract.
+ */
+export function parseFilterReportDiffMaxOutputBytes(
+  raw: unknown,
+): number | 'invalid' {
+  if (raw === undefined || raw === null || raw === true) {
+    return FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES;
+  }
+  let s: string;
+  if (typeof raw === 'number') {
+    s = String(raw);
+  } else if (typeof raw === 'string') {
+    s = raw.trim();
+  } else {
+    return 'invalid';
+  }
+  if (s.length === 0) return FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES;
+  // Reject decimals, signs, scientific notation; only plain
+  // non-negative integers make sense for a byte count.
+  if (!/^\d+$/.test(s)) return 'invalid';
+  const n = Number(s);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) return 'invalid';
+  return Math.min(n, FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING);
+}
+
+/**
+ * Tick 27: enforce the `--max-output-bytes` cap on a rendered
+ * filter-report diff body.
+ *
+ * Returns `'ok'` when the body is within the cap (or the cap is 0 /
+ * disabled). On overflow returns a stderr-ready error message
+ * including the actual and allowed sizes plus a hint to switch to
+ * a file-based `--output <path>` (the common escape hatch when
+ * the diff is genuinely large and the operator wants it persisted
+ * to disk anyway).
+ *
+ * Pure -- never touches the filesystem or process state. Exported
+ * so a unit test can pin the exact error message shape without
+ * spinning up a fake stdout / disk.
+ *
+ * The cap fires on stdout-sentinel writes too, because the stdout
+ * pipe is the exact case the cap was designed for: a pipeline
+ * accidentally streaming a multi-MB body into `jq` is worse than
+ * the same body landing as a file. For named-file writes the cap
+ * still applies (an operator who passed `--max-output-bytes 1024`
+ * presumably wanted the protection on the file path as well; the
+ * easy escape hatch is `--max-output-bytes 0` to disable it).
+ *
+ * Mirrors `enforcePresetDiffSizeCap` byte-for-byte (different
+ * sentinel only -- the filter-report diff uses
+ * `FILTER_REPORT_DIFF_STDOUT_SENTINEL` so an operator wiring
+ * both commands' size caps to the same Prometheus counter can
+ * tell them apart in dashboards).
+ */
+export function enforceFilterReportDiffSizeCap(
+  outputPath: FilterReportDiffOutputTarget,
+  body: string,
+  maxBytes: number,
+): 'ok' | string {
+  // 0 (or any negative thanks to the parser's clamping) disables
+  // the cap entirely. Mirrors standard ulimit semantics: 0 = unlimited.
+  if (maxBytes === 0) return 'ok';
+  // Byte length: count UTF-8 bytes, not character code points. A
+  // JSON body packed with multi-byte unicode could be 2-3x larger
+  // in bytes than `.length` reports. Buffer.byteLength is the
+  // canonical Node way to get the wire byte count.
+  const bytes = Buffer.byteLength(body, 'utf8');
+  if (bytes <= maxBytes) return 'ok';
+  const target =
+    outputPath === FILTER_REPORT_DIFF_STDOUT_SENTINEL ? 'stdout' : `'${outputPath}'`;
+  // Hint depends on the target: a stdout caller has the obvious
+  // escape (switch to a file); a file caller's escape is to bump
+  // the cap or disable it explicitly.
+  const hint =
+    outputPath === FILTER_REPORT_DIFF_STDOUT_SENTINEL
+      ? `hint: write to a file with --output <path> instead, or pass --max-output-bytes 0 to disable the cap`
+      : `hint: raise --max-output-bytes (current: ${maxBytes}), or pass --max-output-bytes 0 to disable the cap`;
+  return (
+    `clawreview review filter-report --diff: refusing to write ${bytes} bytes to ${target} ` +
+    `(exceeds --max-output-bytes ${maxBytes})\n${hint}\n`
+  );
+}
+
+/**
  * Tick 26: write the rendered JSON delta body to either stdout (when
  * `outputTarget` is the sentinel) or a file on disk.
  *
@@ -2894,9 +3028,38 @@ export async function runReviewFilterReportDiff(
   };
 
   if (outputTarget !== null) {
+    // Tick 27: --max-output-bytes cap check fires AFTER the body is
+    // built (so the check sees the actual bytes) but BEFORE the
+    // write side-effect (so a cap violation never leaves a partial
+    // file on disk / a partial stream on stdout). Mirrors
+    // `presets diff --max-output-bytes`'s contract -- the operator's
+    // mental model carries over from one command to the other.
+    //
+    // Parse the flag first (default 100 KiB matches presets diff).
+    // Invalid value -> exit 2 with usage hint; default applies on
+    // bare `--max-output-bytes` (no value) so a stray flag without
+    // an argument doesn't accidentally disable the protection.
+    const maxBytesParse = parseFilterReportDiffMaxOutputBytes(args.flags['max-output-bytes']);
+    if (maxBytesParse === 'invalid') {
+      process.stderr.write(
+        `clawreview review filter-report --diff: --max-output-bytes must be a non-negative integer ` +
+          `(got '${String(args.flags['max-output-bytes'])}'); pass 0 to disable the cap\n`,
+      );
+      process.exitCode = 2;
+      fireExit(false, null);
+      return;
+    }
+    const body = buildBody();
+    const sizeCheck = enforceFilterReportDiffSizeCap(outputTarget, body, maxBytesParse);
+    if (sizeCheck !== 'ok') {
+      process.stderr.write(sizeCheck);
+      process.exitCode = 2;
+      fireExit(false, null);
+      return;
+    }
     // --output path: write the resolved body (single-doc or stream)
     // to disk / stdout sentinel.
-    await writeFilterReportDiffOutput(outputTarget, buildBody());
+    await writeFilterReportDiffOutput(outputTarget, body);
   } else if (config.format === 'json') {
     process.stdout.write(buildBody());
   } else {

@@ -4680,6 +4680,292 @@ describe('clawreview review filter-report --diff --on-delta-once (tick 27)', () 
   });
 });
 
+// Tick 27: `clawreview review filter-report --diff --max-output-bytes <n>` --
+// size cap on the JSON delta body when writing via --output. Mirror of
+// `presets diff --max-output-bytes` (tick 14). Default 100 KiB; 16 MiB
+// ceiling; 0 disables. Fires before the write so a cap violation never
+// leaves a partial file on disk / a partial stream on stdout.
+describe('clawreview review filter-report --diff --max-output-bytes (tick 27)', () => {
+  // -- Pure parser tests --
+
+  it('parseFilterReportDiffMaxOutputBytes: undefined -> default 100 KiB', async () => {
+    const { parseFilterReportDiffMaxOutputBytes, FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES } =
+      await import('../src/commands/review.js');
+    expect(parseFilterReportDiffMaxOutputBytes(undefined)).toBe(
+      FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES,
+    );
+    expect(FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES).toBe(100 * 1024);
+  });
+
+  it('parseFilterReportDiffMaxOutputBytes: bare true (flag without value) -> default', async () => {
+    const { parseFilterReportDiffMaxOutputBytes, FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES } =
+      await import('../src/commands/review.js');
+    expect(parseFilterReportDiffMaxOutputBytes(true)).toBe(
+      FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES,
+    );
+  });
+
+  it('parseFilterReportDiffMaxOutputBytes: numeric string -> integer', async () => {
+    const { parseFilterReportDiffMaxOutputBytes } = await import('../src/commands/review.js');
+    expect(parseFilterReportDiffMaxOutputBytes('2048')).toBe(2048);
+    expect(parseFilterReportDiffMaxOutputBytes('  100  ')).toBe(100);
+  });
+
+  it('parseFilterReportDiffMaxOutputBytes: 0 -> 0 (cap disabled)', async () => {
+    const { parseFilterReportDiffMaxOutputBytes } = await import('../src/commands/review.js');
+    expect(parseFilterReportDiffMaxOutputBytes('0')).toBe(0);
+    expect(parseFilterReportDiffMaxOutputBytes(0)).toBe(0);
+  });
+
+  it('parseFilterReportDiffMaxOutputBytes: clamps to ceiling (16 MiB)', async () => {
+    const { parseFilterReportDiffMaxOutputBytes, FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING } =
+      await import('../src/commands/review.js');
+    // 100 GiB clamped to 16 MiB
+    expect(parseFilterReportDiffMaxOutputBytes('107374182400')).toBe(
+      FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING,
+    );
+    expect(FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING).toBe(16 * 1024 * 1024);
+  });
+
+  it('parseFilterReportDiffMaxOutputBytes: rejects negative / decimals / scientific / non-integer / non-numeric strings', async () => {
+    const { parseFilterReportDiffMaxOutputBytes } = await import('../src/commands/review.js');
+    expect(parseFilterReportDiffMaxOutputBytes('-5')).toBe('invalid');
+    expect(parseFilterReportDiffMaxOutputBytes('3.14')).toBe('invalid');
+    expect(parseFilterReportDiffMaxOutputBytes('1e6')).toBe('invalid');
+    expect(parseFilterReportDiffMaxOutputBytes('abc')).toBe('invalid');
+    expect(parseFilterReportDiffMaxOutputBytes({})).toBe('invalid');
+  });
+
+  // -- enforceFilterReportDiffSizeCap pure helper --
+
+  it('enforceFilterReportDiffSizeCap: under-cap body returns ok', async () => {
+    const { enforceFilterReportDiffSizeCap, FILTER_REPORT_DIFF_STDOUT_SENTINEL } =
+      await import('../src/commands/review.js');
+    expect(enforceFilterReportDiffSizeCap('/tmp/out.json', 'hi', 1024)).toBe('ok');
+    expect(enforceFilterReportDiffSizeCap(FILTER_REPORT_DIFF_STDOUT_SENTINEL, 'hi', 1024)).toBe('ok');
+  });
+
+  it('enforceFilterReportDiffSizeCap: maxBytes=0 always returns ok (disabled)', async () => {
+    const { enforceFilterReportDiffSizeCap } = await import('../src/commands/review.js');
+    // 1 MB body but cap=0 -> ok
+    const big = 'x'.repeat(1024 * 1024);
+    expect(enforceFilterReportDiffSizeCap('/tmp/out.json', big, 0)).toBe('ok');
+  });
+
+  it('enforceFilterReportDiffSizeCap: over-cap file write returns stderr-ready message with cap-raise hint', async () => {
+    const { enforceFilterReportDiffSizeCap } = await import('../src/commands/review.js');
+    const big = 'x'.repeat(2048);
+    const r = enforceFilterReportDiffSizeCap('/tmp/out.json', big, 1024);
+    expect(r).not.toBe('ok');
+    if (r === 'ok') throw new Error('expected non-ok');
+    expect(r).toContain('refusing to write 2048 bytes');
+    expect(r).toContain("'/tmp/out.json'");
+    expect(r).toContain('--max-output-bytes 1024');
+    expect(r).toContain('raise --max-output-bytes');
+  });
+
+  it('enforceFilterReportDiffSizeCap: over-cap stdout write returns stderr-ready message with file-redirect hint', async () => {
+    const { enforceFilterReportDiffSizeCap, FILTER_REPORT_DIFF_STDOUT_SENTINEL } =
+      await import('../src/commands/review.js');
+    const big = 'x'.repeat(2048);
+    const r = enforceFilterReportDiffSizeCap(FILTER_REPORT_DIFF_STDOUT_SENTINEL, big, 1024);
+    expect(r).not.toBe('ok');
+    if (r === 'ok') throw new Error('expected non-ok');
+    expect(r).toContain('stdout');
+    expect(r).toContain('--output <path>');
+  });
+
+  it('enforceFilterReportDiffSizeCap: counts UTF-8 bytes, not character code points', async () => {
+    const { enforceFilterReportDiffSizeCap } = await import('../src/commands/review.js');
+    // 4 multi-byte characters = 12 UTF-8 bytes; cap = 8.
+    // String.length is 4 (incorrect for byte counting).
+    const multibyte = '中中中中';
+    const r = enforceFilterReportDiffSizeCap('/tmp/out.json', multibyte, 8);
+    expect(r).not.toBe('ok');
+    if (r === 'ok') throw new Error('expected non-ok');
+    expect(r).toContain('refusing to write 12 bytes');
+  });
+
+  // -- Integration with runReviewFilterReport --
+
+  async function runDiffWithSizeCap(
+    flags: Record<string, string | boolean>,
+    bodies: { base: string; target: string },
+    positionalTarget = 'rv_sc_target',
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', positionalTarget],
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('default cap applied when --output is set (under-cap body writes ok)', async () => {
+    const fs = await import('node:fs/promises');
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), 'crwx-tick27-'));
+    const outFile = join(tmpDir, 'delta.json');
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        output: outFile,
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(3); // has delta
+    const written = await fs.readFile(outFile, 'utf8');
+    // Body is pretty-printed JSON (2-space indent), so the field has whitespace.
+    expect(written).toContain('"hasDelta": true');
+    await fs.rm(tmpDir, { recursive: true });
+  });
+
+  it('--max-output-bytes 1 with a real delta body rejects exit 2 (body exceeds 1 byte)', async () => {
+    const fs = await import('node:fs/promises');
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), 'crwx-tick27-'));
+    const outFile = join(tmpDir, 'delta.json');
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        output: outFile,
+        'max-output-bytes': '1',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('refusing to write');
+    expect(r.stderr).toContain('--max-output-bytes 1');
+    // No partial file on disk.
+    await expect(fs.access(outFile)).rejects.toBeDefined();
+    await fs.rm(tmpDir, { recursive: true });
+  });
+
+  it('--max-output-bytes 0 disables the cap (big body writes ok)', async () => {
+    const fs = await import('node:fs/promises');
+    const tmpDir = await fs.mkdtemp(join(tmpdir(), 'crwx-tick27-'));
+    const outFile = join(tmpDir, 'delta.json');
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        output: outFile,
+        'max-output-bytes': '0',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(3);
+    const written = await fs.readFile(outFile, 'utf8');
+    expect(written.length).toBeGreaterThan(0);
+    await fs.rm(tmpDir, { recursive: true });
+  });
+
+  it('--max-output-bytes invalid value rejects exit 2 with usage hint', async () => {
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        output: '/tmp/should-not-exist.json',
+        'max-output-bytes': 'abc',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--max-output-bytes must be a non-negative integer');
+    expect(r.stderr).toContain("'abc'");
+  });
+
+  it('--max-output-bytes applies to --output - stdout sentinel (over-cap stdout rejects without writing)', async () => {
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        output: '-',
+        'max-output-bytes': '1',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('refusing to write');
+    expect(r.stderr).toContain('stdout');
+    // Nothing should have leaked through stdout (pure-mode write skipped on cap violation).
+    expect(r.stdout).toBe('');
+  });
+
+  it('WITHOUT --output the cap is a no-op (back-compat: default JSON/text path still works)', async () => {
+    // No --output -> the size cap branch is never entered.
+    const r = await runDiffWithSizeCap(
+      {
+        diff: 'rv_sc_base',
+        server: 'http://x',
+        format: 'json',
+        'max-output-bytes': '1', // tiny cap that WOULD reject if cap were applied
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+    );
+    // Diff still succeeded; body went to stdout regardless of the size cap.
+    expect(r.exitCode).toBe(3);
+    expect(r.stdout).toContain('hasDelta');
+  });
+});
+
+
 
 
 
