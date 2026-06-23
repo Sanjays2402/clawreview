@@ -1308,18 +1308,72 @@ export type FilterReportFieldsDirective =
  *     fields-echo (back-compat with the allowlist arm's behaviour
  *     for an empty-after-projection body).
  *
+ * Tick 26: shell-glob / keyword star sugar (mirror of /digest's
+ * tick-19 ?slim alias arm).
+ *   - `*` / `all`     -> all four fields (equivalent to absent ?fields,
+ *                        but explicit so a dashboard that wants to
+ *                        round-trip "the user picked everything"
+ *                        through a CLI tool has a stable representation).
+ *   - `none`          -> empty resolved set (strip every data field;
+ *                        same effect as deny-listing all four names
+ *                        but reads cleaner in URL).
+ *   - Case-insensitive (`*` is literal; `ALL` / `All` / `None` /
+ *     `NONE` accepted).
+ *   - Standalone-only -- mixing in a comma list (`?fields=*,inputTotal`
+ *     or `?fields=appliedFilters,none`) rejects because the
+ *     resolution is ambiguous (does the operator mean "all AND
+ *     inputTotal" which is a no-op duplicate, or "all EXCEPT
+ *     inputTotal" which is the inverse?). Refuse loudly with the
+ *     same hint /digest's ?slim aliases use.
+ *
  * Pure: no mutation, no side effects.
  */
 export function parseFilterReportFields(raw: string | undefined): FilterReportFieldsDirective {
   if (raw === undefined) return { kind: 'absent' };
   const trimmed = raw.trim();
   if (trimmed.length === 0) return { kind: 'absent' };
+  // Tick 26: standalone star / keyword aliases. Check BEFORE splitting
+  // on comma so a typo'd `?fields=*` doesn't enter the comma path and
+  // surface a confusing "unknown field '*'" error. The lowercase
+  // compare matches /digest's ?slim contract (tick 19).
+  const lower = trimmed.toLowerCase();
+  if (lower === '*' || lower === 'all') {
+    // All four data fields -- equivalent to absent ?fields, but
+    // surfacing the alias explicitly lets a dashboard round-trip
+    // "user picked everything" through the URL without dropping
+    // the parameter entirely.
+    return { kind: 'ok', fields: [...FILTER_REPORT_FIELDS] };
+  }
+  if (lower === 'none') {
+    // Empty resolved set -- the route projection drops every data
+    // field, leaving reviewId / slim / fields-echo (matches the
+    // deny-all-fields behaviour from the deny-list arm). Use case:
+    // a "just give me the identifier" badge.
+    return { kind: 'ok', fields: [] };
+  }
   const parts = trimmed.split(',').map((s) => s.trim());
   if (parts.some((p) => p.length === 0)) {
     return {
       kind: 'invalid',
       message: `?fields has an empty entry (likely a stray comma); got '${trimmed}'`,
     };
+  }
+  // Tick 26: reject the aliases appearing inside a comma list
+  // (they're standalone-only). Without this guard, `?fields=*,inputTotal`
+  // would fall through to the canonical-by-lower lookup, fail with
+  // "unknown field '*'", and surface a confusing error. Catch it
+  // here with a hint about the standalone usage -- mirrors
+  // parseSlimDirective's tick-19 contract.
+  for (const p of parts) {
+    const lp = p.toLowerCase();
+    if (lp === '*' || lp === 'all' || lp === 'none') {
+      return {
+        kind: 'invalid',
+        message:
+          `?fields alias '${p}' must be used standalone (not in a comma list); ` +
+          `got '${trimmed}'`,
+      };
+    }
   }
   // Tick 25: detect minus-prefix entries. If ANY entry carries the
   // prefix, we're in deny-list mode; if NONE do, we're in the legacy

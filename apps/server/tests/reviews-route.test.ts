@@ -2638,6 +2638,97 @@ describe('reviews and stats routes', () => {
       });
     });
 
+    // Tick 26: ?fields star / keyword sugar (mirror of /digest's
+    // tick-19 ?slim alias arm). `?fields=*` / `?fields=all` / `?fields=none`
+    // resolve to "everything" / "everything" / "nothing" respectively,
+    // standalone-only.
+    describe('?fields= star / keyword sugar (tick 26)', () => {
+      it('?fields=* resolves to all four fields (equivalent to absent ?fields)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 260, minConfidence: 0.5 });
+        const star = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=*`,
+        });
+        expect(star.statusCode).toBe(200);
+        const starBody = star.json();
+        // All four data fields present.
+        expect(starBody.appliedFilters).toBeDefined();
+        expect(starBody.inputTotal).toBeDefined();
+        expect(starBody.droppedTotal).toBeDefined();
+        expect(starBody.applied).toBeDefined();
+        // Echo carries the canonical-order full set.
+        expect(starBody.fields).toEqual([
+          'appliedFilters',
+          'inputTotal',
+          'droppedTotal',
+          'applied',
+        ]);
+      });
+
+      it('?fields=all is an alias for ?fields=* (same body shape)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 261, minConfidence: 0.5 });
+        const all = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=all`,
+        });
+        const star = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=*`,
+        });
+        expect(all.statusCode).toBe(200);
+        expect(star.statusCode).toBe(200);
+        // Same projection: both surface every data field and the same echo.
+        expect(all.json().fields).toEqual(star.json().fields);
+        expect(Object.keys(all.json()).sort()).toEqual(Object.keys(star.json()).sort());
+      });
+
+      it('?fields=none strips every data field (identifiers + fields echo preserved)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 262, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=none`,
+        });
+        expect(res.statusCode).toBe(200);
+        const body = res.json();
+        // All four data fields stripped (matches deny-all-fields behaviour).
+        expect(body.appliedFilters).toBeUndefined();
+        expect(body.inputTotal).toBeUndefined();
+        expect(body.droppedTotal).toBeUndefined();
+        expect(body.applied).toBeUndefined();
+        // Identifiers + empty fields echo preserved.
+        expect(body.reviewId).toBe(reviewId);
+        expect(body.slim).toBe(false);
+        expect(body.fields).toEqual([]);
+      });
+
+      it('?fields=*,inputTotal rejects (alias must be standalone, not in comma list)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 263, minConfidence: 0.5 });
+        const res = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=*,inputTotal`,
+        });
+        expect(res.statusCode).toBe(400);
+        expect(res.json().error).toBe('BadQuery');
+        expect(res.json().issues).toMatch(/standalone/);
+      });
+
+      it('?fields=ALL / NONE accepted case-insensitively (matches tick-19 ?slim contract)', async () => {
+        const reviewId = await seedReviewWithFilterReport({ prNumber: 264, minConfidence: 0.5 });
+        const upperAll = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=ALL`,
+        });
+        expect(upperAll.statusCode).toBe(200);
+        expect(upperAll.json().fields).toHaveLength(4);
+        const mixedNone = await app.inject({
+          method: 'GET',
+          url: `/api/reviews/${reviewId}/filter-report?fields=None`,
+        });
+        expect(mixedNone.statusCode).toBe(200);
+        expect(mixedNone.json().fields).toEqual([]);
+      });
+    });
+
     // Tick 24: pure parseFilterReportFields / projectFilterReportFields
     // coverage so each helper has a regression pin without driving
     // the Fastify route.
