@@ -193,6 +193,98 @@ describe('InMemoryReviewStore', () => {
       // applies to every bucket (not just the totals).
       expect(done.digest!.byFile).toEqual({ 'src/a.ts': 1 });
     });
+
+    // Tick 22: the worker now passes a persisted filterReport
+    // alongside the digest so the dashboard can render
+    // "this review's snapshot was filtered: dropped M of K findings
+    // by min_confidence >= 0.6" without recomputing. The store
+    // persists it verbatim on `rec.filterReport`. Legacy callers
+    // (no filterReport ref) leave the field undefined.
+    describe('filter-report persistence (tick 22)', () => {
+      it('persists a caller-supplied filterReport verbatim on the record', async () => {
+        const r = await store.start({
+          installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+        });
+        // Build the filter report the way the tick-22 worker does.
+        const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+        const findings = [
+          f({ severity: 'critical', confidence: 0.9, file: 'src/a.ts' }),
+          f({ severity: 'high', confidence: 0.3, file: 'src/b.ts' }),
+        ];
+        const filterReportFull = findingDigestWithFilterReport(findings, {
+          minConfidence: 0.5,
+        });
+        // Worker strips the embedded digest before persisting (the
+        // digest is on rec.digest; redundant copy would balloon
+        // and let the two views drift).
+        const { digest, ...persistedSlice } = filterReportFull;
+        const done = await store.complete(
+          r.id,
+          summary({ totalFindings: 2 }),
+          findings,
+          { digest, filterReport: persistedSlice },
+        );
+        // Persisted filterReport carries the same shape the worker built.
+        expect(done.filterReport).toBeDefined();
+        expect(done.filterReport!.inputTotal).toBe(2);
+        expect(done.filterReport!.droppedTotal).toBe(1);
+        expect(done.filterReport!.appliedFilters.minConfidence.applied).toBe(true);
+        expect(done.filterReport!.appliedFilters.minConfidence.normalised).toBe(0.5);
+        expect(done.filterReport!.appliedFilters.severityThreshold.applied).toBe(false);
+        expect(done.filterReport!.appliedFilters.any).toBe(true);
+        // No embedded digest on the persisted slice -- the digest is
+        // already on rec.digest and a redundant copy would double the
+        // persisted shape on tag-heavy reviews.
+        expect((done.filterReport as { digest?: unknown }).digest).toBeUndefined();
+      });
+
+      it('leaves `filterReport` undefined when the caller does not supply one (back-compat)', async () => {
+        // Pre-tick-22 callers and failed reviews never supply a
+        // filter report. The record must NOT crash and must NOT
+        // synthesise a report from findings -- consumers that need
+        // one recompute on demand.
+        const r = await store.start({
+          installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+        });
+        const done = await store.complete(
+          r.id,
+          summary({ totalFindings: 1 }),
+          [f()],
+          { commentId: 1 },
+        );
+        expect(done.filterReport).toBeUndefined();
+        // commentId still wired through; presence of the new ref
+        // doesn't perturb existing refs.
+        expect(done.commentId).toBe(1);
+      });
+
+      it('records a no-filter report when the worker ran with no cfg filters', async () => {
+        // A tenant with NO cfg.min_confidence / cfg.severity_threshold
+        // still gets a persisted filterReport from the worker -- it
+        // just records the no-op state (appliedFilters.any=false,
+        // droppedTotal=0). Important for the dashboard's "did this
+        // review filter?" check: a false bit is meaningfully
+        // different from a missing field (legacy review).
+        const r = await store.start({
+          installationId: 1, owner: 'o', repo: 'r', prNumber: 1, headSha: 'a', baseSha: 'b',
+        });
+        const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+        const findings = [f({ severity: 'high', confidence: 0.9 })];
+        const filterReportFull = findingDigestWithFilterReport(findings, {});
+        const { digest, ...persistedSlice } = filterReportFull;
+        const done = await store.complete(
+          r.id,
+          summary({ totalFindings: 1 }),
+          findings,
+          { digest, filterReport: persistedSlice },
+        );
+        expect(done.filterReport).toBeDefined();
+        expect(done.filterReport!.droppedTotal).toBe(0);
+        expect(done.filterReport!.appliedFilters.any).toBe(false);
+        expect(done.filterReport!.appliedFilters.minConfidence.applied).toBe(false);
+        expect(done.filterReport!.appliedFilters.severityThreshold.applied).toBe(false);
+      });
+    });
   });
 
   it('dismiss and reopen a finding', async () => {

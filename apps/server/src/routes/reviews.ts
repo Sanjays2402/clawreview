@@ -645,6 +645,15 @@ function toReviewDetailDto(r: Awaited<ReturnType<ReturnType<typeof getReviewStor
     // dashboard's "has counts?" check is just `digest !== null`
     // instead of `digest !== undefined && digest !== null`.
     digest: r.digest ?? null,
+    // Tick 22: worker-persisted filter-application report (sans
+    // embedded digest -- that's on `digest` above; redundant copy
+    // would balloon the wire payload). Surfaces appliedFilters +
+    // inputTotal + droppedTotal so a dashboard can render "this
+    // review's snapshot dropped 12 of 20 findings via
+    // min_confidence >= 0.6" without a second round-trip. `null`
+    // on legacy reviews (pre-tick-22) so the dashboard's "has
+    // filter report?" check is uniform with the digest pattern.
+    filterReport: r.filterReport ?? null,
   };
 }
 

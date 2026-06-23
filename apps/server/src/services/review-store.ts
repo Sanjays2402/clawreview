@@ -1,5 +1,23 @@
 import type { Finding, ReviewSummary, ReviewStatus, Severity } from '@clawreview/types';
-import { fingerprint, type FindingDigest } from '@clawreview/aggregator';
+import { fingerprint, type FindingDigest, type FindingDigestFilterReport } from '@clawreview/aggregator';
+
+/**
+ * Tick 22: persisted slice of `FindingDigestFilterReport` written to
+ * `ReviewRecord` alongside the digest. We deliberately strip the
+ * `digest` field here -- the full digest is already persisted on
+ * `ReviewRecord.digest` (tick 12) and re-serialising it on
+ * `ReviewRecord.filterReport.digest` would balloon the persisted
+ * shape AND let the two fields drift independently. Dashboards that
+ * need both read `rec.digest` + `rec.filterReport`; they're two views
+ * of the same source-of-truth findings array.
+ *
+ * Shape mirrors `FindingDigestFilterReport` minus the embedded
+ * digest. The `appliedFilters` arm carries enough information for the
+ * dashboard's "this review's persisted snapshot was filtered" banner
+ * to render without a second round-trip.
+ */
+export interface PersistedFilterReport
+  extends Omit<FindingDigestFilterReport, 'digest'> {}
 
 export interface ReviewRecord {
   id: string;
@@ -41,6 +59,29 @@ export interface ReviewRecord {
    * but find none should recompute via `findingDigest(record.findings)`.
    */
   digest?: FindingDigest;
+  /**
+   * Tick 22: optional persisted filter-application report. Written by
+   * the worker via `findingDigestWithFilterReport` so the dashboard
+   * can answer "did this review's persisted snapshot get filtered at
+   * write time?" without a second round-trip. Strictly a SUPERSET of
+   * the information persisted on `digest`: every field here can be
+   * re-derived (the digest itself is `rec.digest`, the input total
+   * equals findings.length on a fresh review, the applied filters
+   * mirror cfg.min_confidence / cfg.severity_threshold).
+   *
+   * Optional for two reasons:
+   *   1. Legacy reviews (pre-tick-22 completes, including all reviews
+   *      from ticks 1-21) have no persisted filter report. Consumers
+   *      that need one re-compute from rec.findings (the source of
+   *      truth -- the digest is a view).
+   *   2. The worker only attaches the report when it actually built
+   *      the digest. A failed review (no digest, no report) has
+   *      nothing to attribute filter drops to.
+   *
+   * Excludes the `digest` field of `FindingDigestFilterReport` so the
+   * persisted shape isn't ballooned with a duplicate of `rec.digest`.
+   */
+  filterReport?: PersistedFilterReport;
 }
 
 export interface StoredFinding extends Finding {
@@ -91,7 +132,20 @@ export interface ReviewStore {
     id: string,
     summary: ReviewSummary,
     findings: Finding[],
-    refs?: { commentId?: number; checkRunId?: number; digest?: FindingDigest },
+    refs?: {
+      commentId?: number;
+      checkRunId?: number;
+      digest?: FindingDigest;
+      /**
+       * Tick 22: optional persisted filter report. Worker passes the
+       * report it built via findingDigestWithFilterReport so the
+       * store can persist `appliedFilters` + `inputTotal` +
+       * `droppedTotal` alongside the digest. Strict superset of the
+       * existing `digest` ref; consumers that only need totals keep
+       * using `refs.digest` and ignore this field.
+       */
+      filterReport?: PersistedFilterReport;
+    },
   ): Promise<ReviewRecord>;
   fail(id: string, error: Error): Promise<void>;
   get(id: string): Promise<ReviewRecord | null>;
@@ -199,7 +253,12 @@ export class InMemoryReviewStore implements ReviewStore {
     id: string,
     summary: ReviewSummary,
     findings: Finding[],
-    refs?: { commentId?: number; checkRunId?: number; digest?: FindingDigest },
+    refs?: {
+      commentId?: number;
+      checkRunId?: number;
+      digest?: FindingDigest;
+      filterReport?: PersistedFilterReport;
+    },
   ): Promise<ReviewRecord> {
     const rec = this.reviews.get(id);
     if (!rec) throw new Error(`unknown review ${id}`);
@@ -222,6 +281,16 @@ export class InMemoryReviewStore implements ReviewStore {
     // `findings` on the fly.
     if (refs?.digest !== undefined) {
       rec.digest = refs.digest;
+    }
+    // Tick 22: persist the filter report alongside the digest. The
+    // worker built ONE filter report this run (via
+    // findingDigestWithFilterReport over the post-aggregate findings)
+    // so the store records its applied-filters bits + drop count
+    // verbatim. Legacy callers that don't supply a filter report
+    // leave rec.filterReport undefined; consumers that need one
+    // recompute from rec.findings.
+    if (refs?.filterReport !== undefined) {
+      rec.filterReport = refs.filterReport;
     }
 
     const prKey = `${rec.owner}/${rec.repo}#${rec.prNumber}`;

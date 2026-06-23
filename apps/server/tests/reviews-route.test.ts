@@ -361,6 +361,82 @@ describe('reviews and stats routes', () => {
     });
   });
 
+  // Tick 22: the worker persists a `filterReport` alongside the
+  // digest so the dashboard can render "this review's snapshot
+  // dropped 12 of 20 findings via min_confidence >= 0.6" without
+  // re-walking findings or recomputing. The DTO surfaces it as
+  // `body.filterReport`. Legacy reviews (pre-tick-22 completes)
+  // get `null` so the dashboard's "has filter report?" check is
+  // uniform with the digest pattern.
+  describe('filterReport in /api/reviews/:id DTO (tick 22)', () => {
+    it('surfaces a persisted filterReport on the detail DTO', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 22, owner: 'o', repo: 'r', prNumber: 22, headSha: 'h22', baseSha: 'b22',
+      });
+      const findings = [
+        { agent: 'security', category: 'security' as const, severity: 'high' as const, title: 'X', rationale: 'r', file: 'a.ts', startLine: 1, confidence: 0.9, tags: [] },
+        { agent: 'security', category: 'security' as const, severity: 'low' as const, title: 'Y', rationale: 'r', file: 'b.ts', startLine: 2, confidence: 0.2, tags: [] },
+      ];
+      const { findingDigestWithFilterReport } = await import('@clawreview/aggregator');
+      const report = findingDigestWithFilterReport(findings, {
+        topAgents: 8, topCategories: 8, hotspots: true,
+        minConfidence: 0.5,
+      });
+      const { digest, ...persistedSlice } = report;
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 22, headSha: 'h22', baseSha: 'b22' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 1, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        findings, { digest, filterReport: persistedSlice },
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // filterReport surfaces verbatim from the persisted slice.
+      expect(body.filterReport).not.toBeNull();
+      expect(body.filterReport.inputTotal).toBe(2);
+      expect(body.filterReport.droppedTotal).toBe(1);
+      expect(body.filterReport.appliedFilters.minConfidence.applied).toBe(true);
+      expect(body.filterReport.appliedFilters.minConfidence.normalised).toBe(0.5);
+      expect(body.filterReport.appliedFilters.severityThreshold.applied).toBe(false);
+      expect(body.filterReport.appliedFilters.any).toBe(true);
+      // No embedded digest inside filterReport -- the digest is
+      // already on body.digest above; redundant copy would balloon
+      // the wire payload on tag-heavy reviews.
+      expect(body.filterReport.digest).toBeUndefined();
+    });
+
+    it('echoes filterReport=null for a legacy review (no persisted report)', async () => {
+      const store = getReviewStore();
+      const r = await store.start({
+        installationId: 22, owner: 'o', repo: 'r', prNumber: 23, headSha: 'h23', baseSha: 'b23',
+      });
+      // Complete WITHOUT passing a filterReport ref (mirrors a
+      // pre-tick-22 worker / failed review).
+      await store.complete(
+        r.id,
+        {
+          pullRequest: { owner: 'o', repo: 'r', number: 23, headSha: 'h23', baseSha: 'b23' },
+          status: 'completed', startedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+          agentExecutions: [], totalFindings: 0, totalCostUsd: 0,
+          skippedFiles: [],
+        },
+        [],
+      );
+      const res = await app.inject({ method: 'GET', url: `/api/reviews/${r.id}` });
+      expect(res.statusCode).toBe(200);
+      const body = res.json();
+      // Uniform null (not undefined) so the dashboard's "has filter
+      // report?" check is symmetric with the digest pattern.
+      expect(body.filterReport).toBeNull();
+    });
+  });
+
   // Tick 14: GET /api/reviews/:id/digest returns { persisted, fresh, drift }
   // so a dashboard can answer the "is the review header stale?"
   // question in one round-trip instead of pulling every finding.

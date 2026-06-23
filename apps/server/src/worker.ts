@@ -17,6 +17,7 @@ import {
   computeDigestDrift,
   deriveCheckRun,
   findingDigest,
+  findingDigestWithFilterReport,
   recomputeAggregateTotals,
   renderPrComment,
   similarityMerge,
@@ -349,13 +350,25 @@ export async function startWorker(logger: Logger): Promise<void> {
     // AND cfg.severity_threshold: 'medium' gets a digest that drops
     // every low-confidence finding AND every nit/low finding, matching
     // the aggregate() pipeline's surviving set exactly.
-    const reviewDigest = findingDigest(aggregated.findings, {
+    //
+    // Tick 22: switched from the bare findingDigest() call to
+    // findingDigestWithFilterReport so the worker captures the
+    // appliedFilters bits AND the input/dropped totals in a single
+    // pass. The digest field of the wrapper is byte-identical to
+    // what findingDigest() returns for the same inputs (a single
+    // delegated call internally) so the rendered comment header and
+    // the persisted digest are unchanged. The new metadata is
+    // persisted on ReviewRecord.filterReport for the dashboard's
+    // "did this review's snapshot get filtered?" banner; legacy
+    // reviews keep the field absent.
+    const reviewFilterReport = findingDigestWithFilterReport(aggregated.findings, {
       topCategories: 8,
       topAgents: 8,
       hotspots: true,
       minConfidence: cfg.min_confidence,
       severityThreshold: cfg.severity_threshold,
     });
+    const reviewDigest = reviewFilterReport.digest;
 
     // Tick 15: WRITE-side persisted-drift counter. Compare the digest we
     // JUST built against the previously-persisted digest for this review
@@ -499,6 +512,18 @@ export async function startWorker(logger: Logger): Promise<void> {
       // /api/reviews/:id DTO surfaces byte-identical numbers without
       // re-walking the findings array.
       digest: reviewDigest,
+      // Tick 22: also persist the filter report (sans embedded
+      // digest -- the digest is on rec.digest, redundant copy would
+      // balloon the persisted shape and let the two views drift).
+      // Surfaces appliedFilters + inputTotal + droppedTotal on
+      // ReviewRecord.filterReport so /api/reviews/:id can render
+      // "this review's snapshot dropped N of M findings via
+      // min_confidence >= 0.6" without recomputing.
+      filterReport: {
+        inputTotal: reviewFilterReport.inputTotal,
+        droppedTotal: reviewFilterReport.droppedTotal,
+        appliedFilters: reviewFilterReport.appliedFilters,
+      },
     });
     getRepoHealth().recordSuccess(data.owner, data.repo);
 
