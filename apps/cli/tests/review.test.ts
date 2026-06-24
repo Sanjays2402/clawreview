@@ -5605,6 +5605,368 @@ describe('clawreview review filter-report --diff --on-delta-once-per (tick 28)',
   });
 });
 
+// Tick 28: `clawreview review filter-report --diff --input-strict` --
+// opt-in deep shape validator for the --input envelope's two bodies.
+// The shallow envelope parser (tick 27) only checks that base/target
+// are objects; the strict mode walks every required field and rejects
+// on the first violation. Use case: a CI pipeline migrating between
+// wire shapes wants a noisy fast-fail BEFORE the diff command renders
+// a misleading delta.
+describe('clawreview review filter-report --diff --input-strict (tick 28)', () => {
+  function makeFullBody(over: Record<string, unknown> = {}): unknown {
+    return {
+      reviewId: 'rv_strict',
+      inputTotal: 10,
+      droppedTotal: 3,
+      applied: true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+      ...over,
+    };
+  }
+
+  function makeSlimBody(over: Record<string, unknown> = {}): unknown {
+    return {
+      reviewId: 'rv_strict',
+      inputTotal: 10,
+      droppedTotal: 3,
+      applied: true,
+      slim: true,
+      ...over,
+    };
+  }
+
+  it('parseInputStrictFlag: boolean / string sugar / absent', async () => {
+    const { parseInputStrictFlag } = await import('../src/commands/review.js');
+    expect(parseInputStrictFlag(true)).toBe(true);
+    expect(parseInputStrictFlag('true')).toBe(true);
+    expect(parseInputStrictFlag('TRUE')).toBe(true);
+    expect(parseInputStrictFlag('1')).toBe(true);
+    expect(parseInputStrictFlag('yes')).toBe(true);
+    expect(parseInputStrictFlag(undefined)).toBe(false);
+    expect(parseInputStrictFlag(false)).toBe(false);
+    expect(parseInputStrictFlag('false')).toBe(false);
+    expect(parseInputStrictFlag('maybe')).toBe(false);
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: full body happy path', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    expect(validateFilterReportDiffInputBodyStrict(makeFullBody(), 'base')).toEqual({
+      kind: 'ok',
+    });
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: slim body happy path', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    expect(validateFilterReportDiffInputBodyStrict(makeSlimBody(), 'target')).toEqual({
+      kind: 'ok',
+    });
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: null / non-object rejects with path', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    const r1 = validateFilterReportDiffInputBodyStrict(null, 'base');
+    expect(r1.kind).toBe('invalid-shape');
+    if (r1.kind === 'invalid-shape') {
+      expect(r1.message).toContain('base must be an object');
+      expect(r1.message).toContain('null');
+    }
+    const r2 = validateFilterReportDiffInputBodyStrict('not-object', 'target');
+    expect(r2.kind).toBe('invalid-shape');
+    if (r2.kind === 'invalid-shape') expect(r2.message).toContain('target');
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: missing reviewId rejects', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    const bad = makeFullBody({ reviewId: '' });
+    const r = validateFilterReportDiffInputBodyStrict(bad, 'base');
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') expect(r.message).toContain('reviewId');
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: non-integer inputTotal rejects', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    const r1 = validateFilterReportDiffInputBodyStrict(makeFullBody({ inputTotal: 'abc' }), 'base');
+    expect(r1.kind).toBe('invalid-shape');
+    if (r1.kind === 'invalid-shape') expect(r1.message).toContain('inputTotal');
+    const r2 = validateFilterReportDiffInputBodyStrict(makeFullBody({ inputTotal: -1 }), 'base');
+    expect(r2.kind).toBe('invalid-shape');
+    if (r2.kind === 'invalid-shape') expect(r2.message).toContain('non-negative');
+    const r3 = validateFilterReportDiffInputBodyStrict(makeFullBody({ inputTotal: 1.5 }), 'base');
+    expect(r3.kind).toBe('invalid-shape');
+    if (r3.kind === 'invalid-shape') expect(r3.message).toContain('integer');
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: non-boolean applied / slim rejects', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    const r1 = validateFilterReportDiffInputBodyStrict(
+      makeFullBody({ applied: 'yes' }),
+      'base',
+    );
+    expect(r1.kind).toBe('invalid-shape');
+    if (r1.kind === 'invalid-shape') expect(r1.message).toContain('applied');
+    const r2 = validateFilterReportDiffInputBodyStrict(
+      makeFullBody({ slim: 1 }),
+      'base',
+    );
+    expect(r2.kind).toBe('invalid-shape');
+    if (r2.kind === 'invalid-shape') expect(r2.message).toContain('slim');
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: missing appliedFilters on non-slim rejects', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    const bad: Record<string, unknown> = makeFullBody() as Record<string, unknown>;
+    delete bad['appliedFilters'];
+    const r = validateFilterReportDiffInputBodyStrict(bad, 'base');
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') expect(r.message).toContain('appliedFilters');
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: malformed appliedFilters.minConfidence rejects per-axis', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    // wrong type for normalised
+    const r = validateFilterReportDiffInputBodyStrict(
+      makeFullBody({
+        appliedFilters: {
+          minConfidence: { raw: 0.5, normalised: 'x', applied: true },
+          severityThreshold: { raw: undefined, normalised: null, applied: false },
+          any: true,
+        },
+      }),
+      'base',
+    );
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') {
+      expect(r.message).toContain('appliedFilters.minConfidence.normalised');
+      expect(r.message).toContain('number');
+    }
+  });
+
+  it('validateFilterReportDiffInputBodyStrict: malformed appliedFilters.severityThreshold rejects per-axis', async () => {
+    const { validateFilterReportDiffInputBodyStrict } = await import(
+      '../src/commands/review.js'
+    );
+    // normalised must be string | null; reject number.
+    const r = validateFilterReportDiffInputBodyStrict(
+      makeFullBody({
+        appliedFilters: {
+          minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+          severityThreshold: { raw: undefined, normalised: 42, applied: true },
+          any: true,
+        },
+      }),
+      'base',
+    );
+    expect(r.kind).toBe('invalid-shape');
+    if (r.kind === 'invalid-shape') {
+      expect(r.message).toContain('appliedFilters.severityThreshold.normalised');
+    }
+  });
+
+  it('--input + --input-strict happy path: full bodies validate; exit-3 on delta', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const envelope = JSON.stringify({
+      base: makeFullBody({ inputTotal: 10, droppedTotal: 3 }),
+      target: makeFullBody({ inputTotal: 12, droppedTotal: 4 }),
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const inputReader = async () => envelope;
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_t'],
+          flags: {
+            diff: 'rv_b',
+            format: 'json',
+            input: '/some/path.json',
+            'input-strict': true,
+          },
+        },
+        { inputReader },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(code).toBe(3);
+    expect(stdout.join('')).toContain('"hasDelta": true');
+    expect(stderr.join('')).not.toContain('--input-strict:');
+  });
+
+  it('--input + --input-strict catches malformed base body BEFORE diff is computed', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const envelope = JSON.stringify({
+      base: { reviewId: '', inputTotal: 10, droppedTotal: 3, applied: true, slim: false }, // bad reviewId
+      target: makeFullBody(),
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const inputReader = async () => envelope;
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_t'],
+          flags: {
+            diff: 'rv_b',
+            format: 'json',
+            input: '/some/path.json',
+            'input-strict': true,
+          },
+        },
+        { inputReader },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('--input-strict: base.reviewId');
+    // No diff JSON was produced -- exit 2 came before the render path.
+    expect(stdout.join('')).not.toContain('"hasDelta"');
+  });
+
+  it('--input WITHOUT --input-strict is back-compat (tolerates shape drift in non-validated fields)', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    // Drop `slim` and `appliedFilters` -- the shallow envelope tolerates
+    // these gaps; computeFilterReportDelta also tolerates them
+    // (treats absent appliedFilters as no per-axis filter).
+    const envelope = JSON.stringify({
+      base: { reviewId: 'rv_b', inputTotal: 10, droppedTotal: 3, applied: true },
+      target: { reviewId: 'rv_t', inputTotal: 12, droppedTotal: 3, applied: true },
+    });
+    const stdout: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      (() => true) as never,
+    );
+    const inputReader = async () => envelope;
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_t'],
+          flags: {
+            diff: 'rv_b',
+            format: 'json',
+            input: '/some/path.json',
+            // 'input-strict' OMITTED -- back-compat path.
+          },
+        },
+        { inputReader },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    // Back-compat: still exits 3 on delta (inputTotal differs).
+    expect(code).toBe(3);
+  });
+
+  it('--input + --input-strict catches malformed TARGET body when base is valid', async () => {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const envelope = JSON.stringify({
+      base: makeFullBody(),
+      target: makeFullBody({ applied: 'yes' }), // bad applied
+    });
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      (() => true) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const inputReader = async () => envelope;
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_t'],
+          flags: {
+            diff: 'rv_b',
+            format: 'json',
+            input: '/some/path.json',
+            'input-strict': true,
+          },
+        },
+        { inputReader },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('--input-strict: target.applied');
+  });
+});
+
+
 
 
 

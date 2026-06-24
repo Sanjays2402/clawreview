@@ -2621,6 +2621,198 @@ export function parseFilterReportDiffInput(rawBody: string): FilterReportDiffInp
 }
 
 /**
+ * Tick 28: discriminated-union result of `validateFilterReportDiffInputBodyStrict`.
+ *
+ * Mirrors `parseFilterReportDiffInput`'s ok shape so a caller that
+ * accepts either path (shallow envelope or strict deep validation)
+ * can route on `kind` without branching on the source type.
+ */
+export type FilterReportDiffInputStrictResult =
+  | { kind: 'ok' }
+  | { kind: 'invalid-shape'; message: string };
+
+/**
+ * Tick 28: deep shape validator for a single filter-report body
+ * (full or slim) from a `--input` envelope.
+ *
+ * The shallow envelope parser (tick 27) only checks that `base` and
+ * `target` are objects -- it tolerates legacy or partially-fetched
+ * shapes so a CI pipeline migrating from one wire shape to another
+ * doesn't break instantly. That tolerance is the right default.
+ *
+ * The strict validator (tick 28) is OPT-IN via `--input-strict`. When
+ * enabled, every required field on `FilterReportBodyFull` /
+ * `FilterReportBodySlim` is type-checked individually:
+ *
+ *   - reviewId: non-empty string
+ *   - inputTotal: non-negative integer
+ *   - droppedTotal: non-negative integer
+ *   - applied: boolean
+ *   - slim: literal true OR literal false (NOT just "truthy")
+ *   - if slim=false: appliedFilters.{minConfidence,severityThreshold}
+ *     each with applied + normalised + raw (raw can be undefined,
+ *     mirrored from FilterReportBodyFull) plus the `any` bit
+ *
+ * Use case: a CI pipeline that's about to compute a delta wants to
+ * know upfront that its cached envelope still matches the wire shape,
+ * not silently drift into garbage-in/garbage-out. The strict mode is
+ * the "noisy" mode -- it catches a worker that started writing the
+ * wrong shape BEFORE the diff command produces a misleading delta.
+ *
+ * Returns the source-field path on the first violation so the
+ * operator can find the malformed field without trial-and-error.
+ * Pure: no IO, no mutation.
+ *
+ * Exported so the test surface can pin every error arm.
+ */
+export function validateFilterReportDiffInputBodyStrict(
+  body: unknown,
+  fieldPath: string,
+): FilterReportDiffInputStrictResult {
+  if (body === null || typeof body !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath} must be an object; got ${body === null ? 'null' : typeof body}`,
+    };
+  }
+  const obj = body as Record<string, unknown>;
+  // reviewId: non-empty string. Empty reviewId is rejected because
+  // the diff command doesn't use it for labelling, but a legitimate
+  // worker would always include it.
+  if (typeof obj['reviewId'] !== 'string' || obj['reviewId'].length === 0) {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.reviewId must be a non-empty string`,
+    };
+  }
+  if (typeof obj['inputTotal'] !== 'number' || !Number.isInteger(obj['inputTotal']) || obj['inputTotal'] < 0) {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.inputTotal must be a non-negative integer`,
+    };
+  }
+  if (typeof obj['droppedTotal'] !== 'number' || !Number.isInteger(obj['droppedTotal']) || obj['droppedTotal'] < 0) {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.droppedTotal must be a non-negative integer`,
+    };
+  }
+  if (typeof obj['applied'] !== 'boolean') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.applied must be a boolean`,
+    };
+  }
+  // slim: must be a literal boolean. A missing key (back-compat path)
+  // is NOT allowed in strict mode -- that's the whole point.
+  if (typeof obj['slim'] !== 'boolean') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.slim must be a boolean (true|false)`,
+    };
+  }
+  if (obj['slim'] === true) {
+    // Slim shape: no appliedFilters. Allow it to be absent (matches
+    // the wire shape) -- presence is tolerated as long as `slim:
+    // true` is the discriminator. The strict mode's job is shape
+    // validation, not policy enforcement.
+    return { kind: 'ok' };
+  }
+  // Full shape: validate appliedFilters in detail.
+  const af = obj['appliedFilters'];
+  if (af === null || typeof af !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters must be an object on non-slim bodies`,
+    };
+  }
+  const afObj = af as Record<string, unknown>;
+  // minConfidence axis.
+  const mc = afObj['minConfidence'];
+  if (mc === null || typeof mc !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.minConfidence must be an object`,
+    };
+  }
+  const mcObj = mc as Record<string, unknown>;
+  if (typeof mcObj['applied'] !== 'boolean') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.minConfidence.applied must be a boolean`,
+    };
+  }
+  if (typeof mcObj['normalised'] !== 'number') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.minConfidence.normalised must be a number`,
+    };
+  }
+  // raw: number | undefined; reject other shapes.
+  if (mcObj['raw'] !== undefined && typeof mcObj['raw'] !== 'number') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.minConfidence.raw must be a number or undefined`,
+    };
+  }
+  // severityThreshold axis.
+  const st = afObj['severityThreshold'];
+  if (st === null || typeof st !== 'object') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.severityThreshold must be an object`,
+    };
+  }
+  const stObj = st as Record<string, unknown>;
+  if (typeof stObj['applied'] !== 'boolean') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.severityThreshold.applied must be a boolean`,
+    };
+  }
+  // normalised: string | null
+  if (stObj['normalised'] !== null && typeof stObj['normalised'] !== 'string') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.severityThreshold.normalised must be a string or null`,
+    };
+  }
+  if (stObj['raw'] !== undefined && typeof stObj['raw'] !== 'string') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.severityThreshold.raw must be a string or undefined`,
+    };
+  }
+  // any bit.
+  if (typeof afObj['any'] !== 'boolean') {
+    return {
+      kind: 'invalid-shape',
+      message: `--input-strict: ${fieldPath}.appliedFilters.any must be a boolean`,
+    };
+  }
+  return { kind: 'ok' };
+}
+
+/**
+ * Tick 28: pure parser for the boolean `--input-strict` flag. Same
+ * boolean-sugar contract as the CLI's other boolean flags
+ * (--slim, --on-delta-once, --filter-summary): accepts `true|1|yes`
+ * strings or the literal `true` boolean. Anything else resolves to
+ * `false` (back-compat default; strict mode is opt-in).
+ *
+ * Exported so the test surface can pin the sugar arms independently
+ * of the runtime.
+ */
+export function parseInputStrictFlag(raw: unknown): boolean {
+  if (typeof raw === 'boolean') return raw;
+  if (typeof raw === 'string') {
+    const lower = raw.trim().toLowerCase();
+    return lower === 'true' || lower === '1' || lower === 'yes';
+  }
+  return false;
+}
+
+/**
  * Tick 27: stdin sentinel for `--input -`. Same Symbol.for pattern
  * as FILTER_REPORT_DIFF_STDOUT_SENTINEL so test-surface module
  * duplication doesn't break identity compares.
@@ -3328,6 +3520,34 @@ export async function runReviewFilterReportDiff(
       process.exitCode = 2;
       fireExit(false, null);
       return;
+    }
+    // Tick 28: --input-strict opt-in. Run the deep shape validator
+    // on each of the two parsed bodies. The shallow envelope parser
+    // (tick 27) tolerates legacy / partial shapes -- that's the
+    // right default. Strict mode is the "noisy" cousin: catches a
+    // worker that started writing the wrong shape BEFORE the diff
+    // command produces a misleading delta. Validates `base` first so
+    // a violation surfaces with a stable field-path label.
+    const inputStrict = parseInputStrictFlag(args.flags['input-strict']);
+    if (inputStrict) {
+      const baseStrict = validateFilterReportDiffInputBodyStrict(parsed.base, 'base');
+      if (baseStrict.kind !== 'ok') {
+        process.stderr.write(
+          `clawreview review filter-report --diff: ${baseStrict.message}\n`,
+        );
+        process.exitCode = 2;
+        fireExit(false, null);
+        return;
+      }
+      const targetStrict = validateFilterReportDiffInputBodyStrict(parsed.target, 'target');
+      if (targetStrict.kind !== 'ok') {
+        process.stderr.write(
+          `clawreview review filter-report --diff: ${targetStrict.message}\n`,
+        );
+        process.exitCode = 2;
+        fireExit(false, null);
+        return;
+      }
     }
     baseBody = parsed.base;
     targetBody = parsed.target;
