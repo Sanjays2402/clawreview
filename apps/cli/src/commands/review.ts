@@ -2010,7 +2010,25 @@ export type FilterReportBody = FilterReportBodyFull | FilterReportBodySlim;
  */
 export async function runReviewFilterReport(
   args: ParsedArgs,
-  injected?: { fetcher?: WatchFetcher; sleeper?: WatchSleeper; metrics?: MetricsBundle },
+  injected?: {
+    fetcher?: WatchFetcher;
+    sleeper?: WatchSleeper;
+    metrics?: MetricsBundle;
+    /**
+     * Tick 26/27: hook executor + input reader threaded through to
+     * `runReviewFilterReportDiff` when `--diff` is set. Tests inject
+     * these here so the test runs the full router (`runReviewFilterReport`)
+     * exactly like the production CLI dispatch.
+     */
+    onDeltaExecer?: WatchOnDriftExecer;
+    inputReader?: FilterReportDiffInputReader;
+    /**
+     * Tick 28: injectable clock threaded through to
+     * `runReviewFilterReportDiff` for the `--on-delta-once-per`
+     * TTL gate. Defaults to `Date.now` in the run function.
+     */
+    now?: () => number;
+  },
 ): Promise<void> {
   // Positional shape: `clawreview review filter-report <reviewId>`.
   // args.positional[0] is the subcommand name 'filter-report';
@@ -2909,10 +2927,36 @@ const ON_DELTA_ONCE_FIRED = new Set<string>();
  * Tests call this between cases to guarantee a clean slate; the
  * production CLI never calls it (the cache lives for the process
  * lifetime by design).
+ *
+ * Tick 28: also clears the TTL cache used by `--on-delta-once-per`
+ * so a fresh test case starts with no historical fire timestamps.
  */
 export function resetOnDeltaOnceCache(): void {
   ON_DELTA_ONCE_FIRED.clear();
+  ON_DELTA_ONCE_PER_FIRED_AT.clear();
 }
+
+/**
+ * Tick 28: process-level map of (baseId|targetId) -> last-fire epoch
+ * ms, used by `--on-delta-once-per <minutes>` to refire the hook
+ * only after N minutes of cooldown have elapsed.
+ *
+ * Contrast with `ON_DELTA_ONCE_FIRED` (tick 27, a Set with no
+ * expiry): once-per is the "long-lived watcher" cousin -- a script
+ * that runs the diff command in a loop for hours wants periodic
+ * re-notifications when the same delta persists, not a single
+ * head-of-loop fire followed by hours of silence.
+ *
+ * The two are MUTUALLY EXCLUSIVE on the CLI: `--on-delta-once` is
+ * "once per process lifetime" (no TTL); `--on-delta-once-per N` is
+ * "once every N minutes". Combining them would create ambiguous
+ * semantics (does once-per reset the once gate?) so the parser
+ * rejects the combination.
+ *
+ * Key format identical to ON_DELTA_ONCE_FIRED so a future caller
+ * can introspect either cache without learning two key schemes.
+ */
+const ON_DELTA_ONCE_PER_FIRED_AT = new Map<string, number>();
 
 /**
  * Tick 27: pure parser for `--on-delta-once` flag. Boolean-sugar
@@ -2931,6 +2975,102 @@ export function parseOnDeltaOnceFlag(raw: unknown): boolean {
     return lower === 'true' || lower === '1' || lower === 'yes';
   }
   return false;
+}
+
+/**
+ * Tick 28: discriminated-union result of parsing `--on-delta-once-per
+ * <minutes>`.
+ *
+ * - `absent`  -- flag not set; the once-per gate is opt-out.
+ * - `ok`      -- value parsed to a positive integer minutes; the
+ *                resolved `ttlMs` is what the runtime compares
+ *                against. Pre-multiplied by 60_000 so the gate
+ *                arithmetic is a single subtraction in the hot path.
+ * - `invalid` -- caller-supplied value rejected. The runtime surfaces
+ *                this on stderr and exits 2 BEFORE the network round-
+ *                trip, mirroring the other typed-flag parsers in this
+ *                file (parseOnDeltaFlags, parseFilterReportDiffMaxOutputBytes).
+ *
+ * Sentinel name pattern matches OnDeltaFlagsResult / OnDriftFlagsResult
+ * so a downstream test surface that pattern-matches on `kind` sees a
+ * consistent shape across all the flag parsers.
+ */
+export type OnDeltaOncePerParseResult =
+  | { kind: 'absent' }
+  | { kind: 'ok'; minutes: number; ttlMs: number }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Tick 28: pure parser for `--on-delta-once-per <minutes>` flag.
+ *
+ * Accepts a positive integer string (or number) representing minutes.
+ * Rejects:
+ *   - zero / negative / non-integer values (a 0-minute TTL would
+ *     collapse to "fire on every invocation", which is the default
+ *     behaviour -- the flag would be a no-op; better to reject so a
+ *     CI author who typed `--on-delta-once-per 0` thinking they were
+ *     "disabling" the cooldown gets a clear error),
+ *   - non-numeric strings,
+ *   - scientific notation / decimals (a `1.5` minute TTL is plausible
+ *     but YAGNI; a future enhancement could accept duration strings
+ *     like `90s` / `2h` if a real need surfaces).
+ *
+ * The legitimate range is 1 to (24 * 60 * 365) minutes (1 minute to
+ * 1 year). Anything beyond a year is almost certainly a typo and a
+ * year-scale cooldown defeats the purpose of `--on-delta-once-per`
+ * (use `--on-delta-once` for true once-per-process-lifetime).
+ *
+ * Exported for tests so the parser contract is pinned independently
+ * of the runtime gate.
+ */
+export const ON_DELTA_ONCE_PER_MAX_MINUTES = 24 * 60 * 365;
+
+export function parseOnDeltaOncePerFlag(raw: unknown): OnDeltaOncePerParseResult {
+  if (raw === undefined || raw === null) {
+    return { kind: 'absent' };
+  }
+  let s: string;
+  if (typeof raw === 'number') {
+    s = String(raw);
+  } else if (typeof raw === 'string') {
+    s = raw.trim();
+  } else {
+    return {
+      kind: 'invalid',
+      message: `--on-delta-once-per must be a positive integer minutes value; got ${typeof raw}`,
+    };
+  }
+  if (s.length === 0) {
+    return {
+      kind: 'invalid',
+      message: '--on-delta-once-per requires a value (e.g. --on-delta-once-per 30)',
+    };
+  }
+  // Reject decimals, signs, scientific notation; only plain
+  // positive integers make sense for a minutes TTL.
+  if (!/^[0-9]+$/.test(s)) {
+    return {
+      kind: 'invalid',
+      message: `--on-delta-once-per must be a positive integer minutes value; got '${s}'`,
+    };
+  }
+  const n = Number(s);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 1) {
+    return {
+      kind: 'invalid',
+      message: `--on-delta-once-per must be a positive integer minutes value (>= 1); got '${s}'`,
+    };
+  }
+  if (n > ON_DELTA_ONCE_PER_MAX_MINUTES) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-delta-once-per ${n} exceeds the 1-year sanity ceiling ` +
+        `(${ON_DELTA_ONCE_PER_MAX_MINUTES} minutes); use --on-delta-once for true ` +
+        `once-per-process-lifetime dedup`,
+    };
+  }
+  return { kind: 'ok', minutes: n, ttlMs: n * 60_000 };
 }
 
 /**
@@ -3063,6 +3203,14 @@ export async function runReviewFilterReportDiff(
      * envelope bodies without touching the filesystem or stdin.
      */
     inputReader?: FilterReportDiffInputReader;
+    /**
+     * Tick 28: injectable clock for `--on-delta-once-per <minutes>`.
+     * Defaults to `Date.now`. Tests inject a stub that advances by
+     * a known delta so the TTL gate can be exercised without sleeping
+     * real wall-clock minutes. Returns epoch ms (same shape Date.now()
+     * returns) so the gate arithmetic is portable.
+     */
+    now?: () => number;
   },
 ): Promise<void> {
   // Tick 26: start the per-invocation clock at the top so the
@@ -3354,11 +3502,54 @@ export async function runReviewFilterReportDiff(
   // gets one notification per unique pair, not per-invocation.
   // The exit code is unaffected (still 3 on delta) so a CI gate
   // sees the same signal; only the hook side-effect is deduped.
+  //
+  // Tick 28: --on-delta-once-per <minutes> is the TTL cousin. Same
+  // dedup key, but the cache stores last-fire-ms instead of just
+  // "fired"; subsequent invocations re-fire only after N minutes
+  // of cooldown have elapsed. Mutually exclusive with --on-delta-once
+  // (combining them would create ambiguous semantics -- does once-per
+  // reset the once gate?).
   const onDeltaOnce = parseOnDeltaOnceFlag(args.flags['on-delta-once']);
+  const onDeltaOncePerParse = parseOnDeltaOncePerFlag(args.flags['on-delta-once-per']);
+  if (onDeltaOncePerParse.kind === 'invalid') {
+    process.stderr.write(
+      `clawreview review filter-report --diff: ${onDeltaOncePerParse.message}\n`,
+    );
+    process.exitCode = 2;
+    fireExit(false, null);
+    return;
+  }
+  if (onDeltaOnce && onDeltaOncePerParse.kind === 'ok') {
+    process.stderr.write(
+      `clawreview review filter-report --diff: --on-delta-once and ` +
+        `--on-delta-once-per are mutually exclusive (pick one: lifetime dedup or TTL cooldown)\n`,
+    );
+    process.exitCode = 2;
+    fireExit(false, null);
+    return;
+  }
   const onDeltaOnceKey = `${config.baseId}|${config.targetId}`;
   const onDeltaSuppressedByOnce =
     onDeltaOnce && ON_DELTA_ONCE_FIRED.has(onDeltaOnceKey);
-  if (onDeltaCommand !== null && delta.hasDelta && !onDeltaSuppressedByOnce) {
+  // Tick 28: TTL gate consults the per-pair last-fire timestamp.
+  // Suppressed when the most recent fire was less than ttlMs ago.
+  // A pair never previously fired is allowed through (no entry in
+  // the map -> elapsed = Infinity).
+  const nowFn = injected?.now ?? Date.now;
+  let onDeltaSuppressedByOncePer = false;
+  if (onDeltaOncePerParse.kind === 'ok') {
+    const lastFireAt = ON_DELTA_ONCE_PER_FIRED_AT.get(onDeltaOnceKey);
+    if (lastFireAt !== undefined) {
+      const elapsed = nowFn() - lastFireAt;
+      onDeltaSuppressedByOncePer = elapsed < onDeltaOncePerParse.ttlMs;
+    }
+  }
+  if (
+    onDeltaCommand !== null &&
+    delta.hasDelta &&
+    !onDeltaSuppressedByOnce &&
+    !onDeltaSuppressedByOncePer
+  ) {
     const payload = JSON.stringify({
       baseId: config.baseId,
       targetId: config.targetId,
@@ -3382,8 +3573,14 @@ export async function runReviewFilterReportDiff(
     // (the dedup is per-process by design); if an operator wants
     // automatic retries, they should wrap the CLI in a retry loop
     // and NOT pass --on-delta-once.
+    //
+    // Tick 28: also record the fire timestamp for --on-delta-once-per
+    // so the TTL countdown starts here (not at config-parse time).
     if (onDeltaOnce) {
       ON_DELTA_ONCE_FIRED.add(onDeltaOnceKey);
+    }
+    if (onDeltaOncePerParse.kind === 'ok') {
+      ON_DELTA_ONCE_PER_FIRED_AT.set(onDeltaOnceKey, nowFn());
     }
   }
   // Tick 25: fire the diff counter with the resolved result label

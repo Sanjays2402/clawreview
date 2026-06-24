@@ -15,7 +15,7 @@ Usage:
   clawreview review drift --base <reviewId> --target <reviewId> --server <url> [--min-confidence <n>] [--severity-threshold <sev>] [--on-regression <cmd> | --on-regression-template slack|webhook] [--format text|json]
   clawreview review drift --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--on-drift <cmd> | --on-drift-template slack|webhook] [--on-drift-once] [--on-recover <cmd> | --on-recover-template slack|webhook]
   clawreview review filter-report <reviewId> --server <url> [--format text|json] [--slim] [--require-filter]
-  clawreview review filter-report --diff <baseReviewId> <targetReviewId> --server <url> [--format text|json] [--output <path>|-] [--json-stream] [--on-delta <cmd> | --on-delta-template slack|webhook]
+  clawreview review filter-report --diff <baseReviewId> <targetReviewId> --server <url> [--format text|json] [--output <path>|-] [--json-stream] [--on-delta <cmd> | --on-delta-template slack|webhook] [--on-delta-once | --on-delta-once-per <minutes>]
   clawreview review filter-report --watch <reviewId> --server <url> [--interval <ms>] [--max-polls <n>] [--format text|json] [--slim] [--require-filter] [--on-applied-change <cmd> | --on-applied-template slack|webhook]
   clawreview baseline save [--input <path>] [--output <path>]
   clawreview baseline diff [--input <path>] [--baseline <path>] [--fail-on-new]

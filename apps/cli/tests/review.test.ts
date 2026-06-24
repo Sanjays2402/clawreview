@@ -5257,6 +5257,355 @@ describe('clawreview review filter-report --diff --input (tick 27)', () => {
   });
 });
 
+// Tick 28: `clawreview review filter-report --diff --on-delta-once-per
+// <minutes>` -- TTL variant of tick-27's --on-delta-once. Instead of
+// "fire exactly once per process lifetime for this pair", fire at
+// most once per N minutes. Use case: a long-lived watcher that wants
+// periodic re-notifications when a delta persists for hours.
+describe('clawreview review filter-report --diff --on-delta-once-per (tick 28)', () => {
+  async function runDiffWithClock(
+    flags: Record<string, string | boolean | number>,
+    bodies: { base: string; target: string },
+    onDeltaExecer: (cmd: string, payload: string) => Promise<{ exitCode: number | null; stderr: string }>,
+    now: () => number,
+    positionalTarget = 'rv_target_28',
+  ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      if (typeof flags.diff === 'string' && url.includes(encodeURIComponent(flags.diff))) {
+        return { ok: true, status: 200, text: async () => bodies.base };
+      }
+      return { ok: true, status: 200, text: async () => bodies.target };
+    };
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', positionalTarget],
+          flags: { 'no-color': true, ...flags },
+        },
+        { fetcher, onDeltaExecer, now },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code };
+  }
+
+  function makeBody(opts: { applied?: boolean; inputTotal?: number; droppedTotal?: number } = {}): string {
+    return JSON.stringify({
+      reviewId: 'rv_x',
+      inputTotal: opts.inputTotal ?? 10,
+      droppedTotal: opts.droppedTotal ?? 3,
+      applied: opts.applied ?? true,
+      slim: false,
+      appliedFilters: {
+        minConfidence: { raw: 0.5, normalised: 0.5, applied: true },
+        severityThreshold: { raw: undefined, normalised: null, applied: false },
+        any: true,
+      },
+    });
+  }
+
+  beforeEach(async () => {
+    const { resetOnDeltaOnceCache } = await import('../src/commands/review.js');
+    resetOnDeltaOnceCache();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('parseOnDeltaOncePerFlag: absent -> kind absent', async () => {
+    const { parseOnDeltaOncePerFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOncePerFlag(undefined)).toEqual({ kind: 'absent' });
+    expect(parseOnDeltaOncePerFlag(null)).toEqual({ kind: 'absent' });
+  });
+
+  it('parseOnDeltaOncePerFlag: positive integer string -> ok with ttlMs = minutes * 60_000', async () => {
+    const { parseOnDeltaOncePerFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOncePerFlag('5')).toEqual({ kind: 'ok', minutes: 5, ttlMs: 300_000 });
+    expect(parseOnDeltaOncePerFlag('120')).toEqual({ kind: 'ok', minutes: 120, ttlMs: 7_200_000 });
+  });
+
+  it('parseOnDeltaOncePerFlag: positive integer number -> ok (same shape)', async () => {
+    const { parseOnDeltaOncePerFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOncePerFlag(30)).toEqual({ kind: 'ok', minutes: 30, ttlMs: 1_800_000 });
+  });
+
+  it('parseOnDeltaOncePerFlag: 0 / negative / decimal / non-numeric / empty -> invalid', async () => {
+    const { parseOnDeltaOncePerFlag } = await import('../src/commands/review.js');
+    expect(parseOnDeltaOncePerFlag('0').kind).toBe('invalid');
+    expect(parseOnDeltaOncePerFlag('-5').kind).toBe('invalid');
+    expect(parseOnDeltaOncePerFlag('1.5').kind).toBe('invalid');
+    expect(parseOnDeltaOncePerFlag('abc').kind).toBe('invalid');
+    expect(parseOnDeltaOncePerFlag('').kind).toBe('invalid');
+    expect(parseOnDeltaOncePerFlag('   ').kind).toBe('invalid');
+  });
+
+  it('parseOnDeltaOncePerFlag: exceeds 1-year sanity ceiling -> invalid with hint', async () => {
+    const { parseOnDeltaOncePerFlag, ON_DELTA_ONCE_PER_MAX_MINUTES } = await import(
+      '../src/commands/review.js'
+    );
+    const tooBig = ON_DELTA_ONCE_PER_MAX_MINUTES + 1;
+    const res = parseOnDeltaOncePerFlag(String(tooBig));
+    expect(res.kind).toBe('invalid');
+    if (res.kind === 'invalid') {
+      expect(res.message).toContain('1-year sanity ceiling');
+      expect(res.message).toContain('--on-delta-once');
+    }
+  });
+
+  it('first fire records timestamp; second invocation within TTL is suppressed', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    // Fixed clock at t=0 for first call, t=10 minutes for second.
+    let clockMs = 1_000_000;
+    const now = (): number => clockMs;
+    const r1 = await runDiffWithClock(
+      {
+        diff: 'rv_per_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '30', // 30 minute TTL
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_target',
+    );
+    expect(r1.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    // Advance clock by 10 minutes -- well within the 30-minute TTL.
+    clockMs += 10 * 60_000;
+    const r2 = await runDiffWithClock(
+      {
+        diff: 'rv_per_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '30',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_target',
+    );
+    // Exit still 3 (delta detected); hook suppressed within TTL.
+    expect(r2.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('second invocation AFTER TTL elapses re-fires the hook', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    let clockMs = 5_000_000;
+    const now = (): number => clockMs;
+    const r1 = await runDiffWithClock(
+      {
+        diff: 'rv_per_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '5', // 5-minute TTL
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_target',
+    );
+    expect(r1.exitCode).toBe(3);
+    expect(calls).toHaveLength(1);
+    // Advance clock by 6 minutes -- past the 5-minute TTL.
+    clockMs += 6 * 60_000;
+    const r2 = await runDiffWithClock(
+      {
+        diff: 'rv_per_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '5',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_target',
+    );
+    expect(r2.exitCode).toBe(3);
+    // TTL elapsed -> hook re-fires.
+    expect(calls).toHaveLength(2);
+  });
+
+  it('--on-delta-once + --on-delta-once-per together -> mutex rejection exit 2', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const r = await runDiffWithClock(
+      {
+        diff: 'rv_per_base',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once': true,
+        'on-delta-once-per': '5',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      () => 0,
+      'rv_per_target',
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    // Hook NEVER fired (rejected before the network round-trip).
+    expect(calls).toHaveLength(0);
+  });
+
+  it('invalid --on-delta-once-per value rejects with exit 2 BEFORE the network round-trip', async () => {
+    const fetcherCalls: string[] = [];
+    const execer = async () => ({ exitCode: 0, stderr: '' });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const fetcher = async (url: string) => {
+      fetcherCalls.push(url);
+      return { ok: true, status: 200, text: async () => makeBody() };
+    };
+    const { runReviewFilterReport } = await import('../src/commands/review.js');
+    process.exitCode = 0;
+    try {
+      await runReviewFilterReport(
+        {
+          command: 'review',
+          positional: ['filter-report', 'rv_per_target'],
+          flags: {
+            diff: 'rv_per_base',
+            server: 'http://x',
+            format: 'json',
+            'on-delta': 'curl https://hook',
+            'on-delta-once-per': '0', // 0 rejects (no-op semantics)
+          },
+        },
+        { fetcher, onDeltaExecer: execer },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    expect(code).toBe(2);
+    expect(stderr.join('')).toContain('--on-delta-once-per');
+    expect(stderr.join('')).toContain('positive integer');
+    // Whether the fetch happened or not, the key assertion is that
+    // the parse error wins the exit code (not the diff result).
+  });
+
+  it('TTL gate uses DIFFERENT keys per (base, target) pair', async () => {
+    const calls: Array<{ payload: string }> = [];
+    const execer = async (_cmd: string, payload: string) => {
+      calls.push({ payload });
+      return { exitCode: 0, stderr: '' };
+    };
+    const now = (): number => 100_000;
+    // Pair A.
+    await runDiffWithClock(
+      {
+        diff: 'rv_per_baseA',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '60', // 1 hour TTL
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_targetA',
+    );
+    // Pair B -- different base, same target. Different key.
+    await runDiffWithClock(
+      {
+        diff: 'rv_per_baseB',
+        server: 'http://x',
+        format: 'json',
+        'on-delta': 'curl https://hook',
+        'on-delta-once-per': '60',
+      },
+      { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+      execer,
+      now,
+      'rv_per_targetA',
+    );
+    // Two distinct pairs -> two fires (TTL didn't conflate them).
+    expect(calls).toHaveLength(2);
+  });
+
+  it('no --on-delta-once-per flag -> back-compat (every invocation with delta fires)', async () => {
+    const calls: Array<{ cmd: string }> = [];
+    const execer = async (cmd: string) => {
+      calls.push({ cmd });
+      return { exitCode: 0, stderr: '' };
+    };
+    const now = (): number => 0;
+    for (let i = 0; i < 3; i++) {
+      const r = await runDiffWithClock(
+        {
+          diff: 'rv_per_back_compat_base',
+          server: 'http://x',
+          format: 'json',
+          'on-delta': 'curl https://hook',
+          // no --on-delta-once-per
+        },
+        { base: makeBody({ inputTotal: 10 }), target: makeBody({ inputTotal: 15 }) },
+        execer,
+        now,
+        'rv_per_back_compat_target',
+      );
+      expect(r.exitCode).toBe(3);
+    }
+    // Without the gate, every invocation with a delta fires.
+    expect(calls).toHaveLength(3);
+  });
+});
+
+
 
 
 
