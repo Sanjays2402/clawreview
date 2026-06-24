@@ -1,5 +1,7 @@
 import { CheckCircle, WarningCircle, MinusCircle } from '@phosphor-icons/react/dist/ssr';
+import type { ReactNode } from 'react';
 
+import { Tooltip } from '@/components/ui/tooltip';
 import type { AgentExecutionDto } from '@/lib/data';
 import { formatMs } from '@/lib/format';
 
@@ -110,11 +112,13 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
 function StatusGlyph({ status }: { status: AgentStatus }) {
   const cls = STATUS_DOT[status];
   const label = STATUS_LABEL[status];
+  let icon: ReactNode;
   if (status === 'ok') {
-    return <CheckCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
+    icon = <CheckCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
+  } else if (status === 'error') {
+    icon = <WarningCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
+  } else {
+    icon = <MinusCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
   }
-  if (status === 'error') {
-    return <WarningCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
-  }
-  return <MinusCircle size={13} weight="duotone" className={`shrink-0 ${cls}`} aria-label={label} />;
+  return <Tooltip label={label}>{icon}</Tooltip>;
 }

@@ -2,10 +2,14 @@
 
 import { useEffect, useState } from 'react';
 
+import { Tooltip } from '@/components/ui/tooltip';
+
 export function ThemeToggle() {
   const [theme, setTheme] = useState<'light' | 'dark'>('dark');
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     const stored = (typeof window !== 'undefined' && localStorage.getItem('clawreview-theme')) as 'light' | 'dark' | null;
     if (stored) setTheme(stored);
   }, []);
@@ -17,14 +21,19 @@ export function ThemeToggle() {
     localStorage.setItem('clawreview-theme', next);
   }
 
+  // Pre-mount we render a deterministic placeholder so SSR/CSR match.
+  const label = mounted ? (theme === 'dark' ? 'switch to light' : 'switch to dark') : 'theme';
+
   return (
-    <button
-      aria-label="Toggle color theme"
-      onClick={toggle}
-      className="inline-flex h-7 w-7 items-center justify-center rounded-sm border border-border text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg"
-    >
-      {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
-    </button>
+    <Tooltip label={label} placement="bottom">
+      <button
+        aria-label="Toggle color theme"
+        onClick={toggle}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-sm border border-border text-fg-muted transition-colors hover:bg-bg-subtle hover:text-fg"
+      >
+        {theme === 'dark' ? <SunIcon /> : <MoonIcon />}
+      </button>
+    </Tooltip>
   );
 }
 

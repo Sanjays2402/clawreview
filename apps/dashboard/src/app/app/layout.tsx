@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { Footer } from '@/components/footer';
 import { CommandPalette } from '@/components/command-palette';
+import { Tooltip } from '@/components/ui/tooltip';
 
 const NAV: Array<{ href: string; label: string }> = [
   { href: '/app', label: 'overview' },
@@ -43,15 +44,17 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             </nav>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
-            <button
-              type="button"
-              data-cmdk-trigger
-              className="hidden items-center gap-1.5 rounded border border-border bg-bg-subtle px-2 py-1 font-mono text-[11px] text-fg-muted hover:bg-bg-muted md:inline-flex"
-              aria-label="Open command palette"
-            >
-              <span>search</span>
-              <kbd className="rounded-sm border border-border px-1 text-[10px]">⌘K</kbd>
-            </button>
+            <Tooltip label="open command palette" placement="bottom">
+              <button
+                type="button"
+                data-cmdk-trigger
+                className="hidden items-center gap-1.5 rounded border border-border bg-bg-subtle px-2 py-1 font-mono text-[11px] text-fg-muted hover:bg-bg-muted md:inline-flex"
+                aria-label="Open command palette"
+              >
+                <span>search</span>
+                <kbd className="rounded-sm border border-border px-1 text-[10px]">⌘K</kbd>
+              </button>
+            </Tooltip>
             <span className="rounded border border-border bg-bg-subtle px-1.5 py-0.5 font-mono text-[11px]">sanjay</span>
           </div>
         </div>
