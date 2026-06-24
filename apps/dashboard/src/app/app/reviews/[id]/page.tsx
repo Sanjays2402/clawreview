@@ -10,6 +10,7 @@ import {
 
 import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 
+import { AgentTimeline } from '@/components/review/agent-timeline';
 import { FindingRow } from '@/components/review/finding-row';
 import { FindingsKeyNav } from '@/components/review/findings-key-nav';
 import { RerunForm } from '@/components/review/rerun-form';
@@ -133,36 +134,7 @@ export default async function ReviewDetailPage({ params, searchParams }: PagePro
           <div className="font-mono text-[11px] tabular-nums text-fg-muted">{review.agentExecutions.length} runs</div>
         </CardHeader>
         <CardBody>
-          {review.agentExecutions.length === 0 ? (
-            <div className="font-mono text-xs text-fg-subtle">no runs.</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[480px] font-mono text-xs">
-                <thead className="text-left text-[10px] uppercase tracking-wider text-fg-subtle">
-                  <tr>
-                    <th className="py-1 font-medium">agent</th>
-                    <th className="font-medium">status</th>
-                    <th className="font-medium">findings</th>
-                    <th className="font-medium">duration</th>
-                    <th className="font-medium">error</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border-subtle">
-                  {review.agentExecutions.map((ex) => (
-                    <tr key={ex.agent}>
-                      <td className="py-1 font-medium text-fg">{ex.agent}</td>
-                      <td>
-                        <StatusPill status={ex.status === 'ok' ? 'completed' : ex.status === 'error' ? 'failed' : 'queued'} />
-                      </td>
-                      <td className="tabular-nums text-fg-muted">{ex.findings}</td>
-                      <td className="tabular-nums text-fg-muted">{formatMs(ex.durationMs)}</td>
-                      <td className="text-fg-muted">{ex.error ?? ''}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <AgentTimeline executions={review.agentExecutions} />
         </CardBody>
       </Card>
 
