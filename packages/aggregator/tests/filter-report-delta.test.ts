@@ -212,3 +212,217 @@ describe('computeFilterReportDelta (aggregator-side mirror, tick 27)', () => {
     expect(delta.droppedTotal.delta).toBe(0);
   });
 });
+
+// Tick 28: `summariseFilterReportDelta` -- compact summary helper
+// suitable for a Slack message body, an email subject line, or a
+// webhook router's "what's the headline?" payload. Where
+// FilterReportDelta carries the full per-axis before/after shape,
+// the summary collapses it to `changedAxes` + `regression` + `bugFix`
+// bits so a downstream consumer can short-circuit on the headline.
+describe('summariseFilterReportDelta (tick 28)', () => {
+  async function importHelpers(): Promise<{
+    summariseFilterReportDelta: typeof import('../src/filter-report-delta.js').summariseFilterReportDelta;
+    FILTER_REPORT_DELTA_AXES: typeof import('../src/filter-report-delta.js').FILTER_REPORT_DELTA_AXES;
+  }> {
+    const mod = await import('../src/filter-report-delta.js');
+    return {
+      summariseFilterReportDelta: mod.summariseFilterReportDelta,
+      FILTER_REPORT_DELTA_AXES: mod.FILTER_REPORT_DELTA_AXES,
+    };
+  }
+
+  it('FILTER_REPORT_DELTA_AXES is a closed 5-tuple in canonical order', async () => {
+    const { FILTER_REPORT_DELTA_AXES } = await importHelpers();
+    // Pinning the order: the diff render path walks axes in this
+    // sequence; the summary's changedAxes also iterates in this
+    // order. A reorder would silently change every CI dashboard's
+    // column layout.
+    expect([...FILTER_REPORT_DELTA_AXES]).toEqual([
+      'applied',
+      'inputTotal',
+      'droppedTotal',
+      'minConfidence',
+      'severityThreshold',
+    ]);
+  });
+
+  it('identical bodies -> hasDelta=false, changedAxes empty, neither regression nor bugFix', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(makeBody(), makeBody()),
+    );
+    expect(summary.hasDelta).toBe(false);
+    expect([...summary.changedAxes]).toEqual([]);
+    expect(summary.regression).toBe(false);
+    expect(summary.bugFix).toBe(false);
+  });
+
+  it('inputTotal grew (10 -> 25) -> regression true, bugFix false, changedAxes=[inputTotal]', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ inputTotal: 10 }),
+        makeBody({ inputTotal: 25 }),
+      ),
+    );
+    expect(summary.hasDelta).toBe(true);
+    expect([...summary.changedAxes]).toEqual(['inputTotal']);
+    expect(summary.regression).toBe(true);
+    expect(summary.bugFix).toBe(false);
+  });
+
+  it('inputTotal shrank (25 -> 10) -> bugFix true, regression false', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ inputTotal: 25 }),
+        makeBody({ inputTotal: 10 }),
+      ),
+    );
+    expect(summary.bugFix).toBe(true);
+    expect(summary.regression).toBe(false);
+    expect([...summary.changedAxes]).toEqual(['inputTotal']);
+  });
+
+  it('applied flipped true -> false (filter removed) -> regression true', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ applied: true }),
+        makeBody({ applied: false }),
+      ),
+    );
+    expect(summary.regression).toBe(true);
+    expect(summary.bugFix).toBe(false);
+    expect([...summary.changedAxes]).toEqual(['applied']);
+  });
+
+  it('applied flipped false -> true (filter added) -> bugFix true', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ applied: false }),
+        makeBody({ applied: true }),
+      ),
+    );
+    expect(summary.bugFix).toBe(true);
+    expect(summary.regression).toBe(false);
+  });
+
+  it('droppedTotal shrank with inputTotal flat -> regression (filter letting more through)', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ inputTotal: 10, droppedTotal: 8 }),
+        makeBody({ inputTotal: 10, droppedTotal: 3 }),
+      ),
+    );
+    expect(summary.regression).toBe(true);
+    expect([...summary.changedAxes]).toEqual(['droppedTotal']);
+  });
+
+  it('droppedTotal grew with inputTotal flat -> bugFix (filter rejecting more)', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ inputTotal: 10, droppedTotal: 3 }),
+        makeBody({ inputTotal: 10, droppedTotal: 8 }),
+      ),
+    );
+    expect(summary.bugFix).toBe(true);
+    expect([...summary.changedAxes]).toEqual(['droppedTotal']);
+  });
+
+  it('mixed change (applied flipped AND inputTotal grew) -> BOTH regression and bugFix true', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    // applied false->true is a "bug fix" signal; inputTotal grew
+    // is a "regression" signal. Both fire because the underlying
+    // sources are independent (and a webhook router that wants
+    // exclusive routing should resolve precedence itself).
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ applied: false, inputTotal: 10 }),
+        makeBody({ applied: true, inputTotal: 25 }),
+      ),
+    );
+    expect(summary.regression).toBe(true);
+    expect(summary.bugFix).toBe(true);
+    expect([...summary.changedAxes]).toEqual(['applied', 'inputTotal']);
+  });
+
+  it('threshold-only change (minConfidence 0.5 -> 0.8) -> hasDelta but neither regression nor bugFix', async () => {
+    // A threshold drift alone doesn't move the input/dropped totals,
+    // so neither bit fires. This is a deliberate design choice: a
+    // threshold-only operator-config change is ambiguous (tightening
+    // is "filter MORE strict" which is intent-fix; relaxing is the
+    // opposite). The webhook router can inspect changedAxes for
+    // 'minConfidence' or 'severityThreshold' if it wants to alert
+    // on threshold drift specifically.
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({
+          appliedFilters: {
+            minConfidence: { applied: true, normalised: 0.5 },
+            severityThreshold: { applied: false, normalised: null },
+          },
+        }),
+        makeBody({
+          appliedFilters: {
+            minConfidence: { applied: true, normalised: 0.8 },
+            severityThreshold: { applied: false, normalised: null },
+          },
+        }),
+      ),
+    );
+    expect(summary.hasDelta).toBe(true);
+    expect([...summary.changedAxes]).toEqual(['minConfidence']);
+    expect(summary.regression).toBe(false);
+    expect(summary.bugFix).toBe(false);
+  });
+
+  it('multi-axis change (input AND severity AND minConfidence) -> changedAxes in canonical order', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({
+          inputTotal: 10,
+          appliedFilters: {
+            minConfidence: { applied: true, normalised: 0.5 },
+            severityThreshold: { applied: true, normalised: 'low' },
+          },
+        }),
+        makeBody({
+          inputTotal: 25,
+          appliedFilters: {
+            minConfidence: { applied: true, normalised: 0.8 },
+            severityThreshold: { applied: true, normalised: 'medium' },
+          },
+        }),
+      ),
+    );
+    expect([...summary.changedAxes]).toEqual([
+      'inputTotal',
+      'minConfidence',
+      'severityThreshold',
+    ]);
+    expect(summary.regression).toBe(true); // inputTotal grew
+  });
+
+  it('changedAxes is frozen (cannot be extended by a careless caller)', async () => {
+    const { summariseFilterReportDelta } = await importHelpers();
+    const summary = summariseFilterReportDelta(
+      computeFilterReportDelta(
+        makeBody({ inputTotal: 10 }),
+        makeBody({ inputTotal: 15 }),
+      ),
+    );
+    // Frozen by Object.freeze; push throws in strict mode (which
+    // ESM is) without a TypeError-tolerant `try` -- assert by
+    // catching the throw.
+    expect(() => {
+      (summary.changedAxes as unknown as string[]).push('synthetic');
+    }).toThrow();
+  });
+});
+
