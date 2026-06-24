@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { Footer } from '@/components/footer';
 import { CommandPalette } from '@/components/command-palette';
+import { ShortcutsOverlay } from '@/components/shortcuts-overlay';
 import { Tooltip } from '@/components/ui/tooltip';
 
 const NAV: Array<{ href: string; label: string }> = [
@@ -62,6 +63,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       <main className="mx-auto max-w-[1400px] px-4 py-5">{children}</main>
       <Footer />
       <CommandPalette />
+      <ShortcutsOverlay />
     </div>
   );
 }

@@ -25,7 +25,7 @@ const ROUTES: Cmd[] = [
   { id: 'team', label: 'go: team', href: '/app/team' },
   { id: 'keys', label: 'go: api keys', href: '/app/api-keys' },
   { id: 'settings', label: 'go: settings', href: '/app/settings' },
-  { id: 'shortcuts', label: 'shortcuts', hint: '?', href: '/shortcuts' },
+  { id: 'shortcuts', label: 'shortcuts (page)', href: '/shortcuts' },
   { id: 'docs', label: 'docs', href: '/docs' },
 ];
 
@@ -43,17 +43,9 @@ export function CommandPalette() {
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      const target = e.target as HTMLElement | null;
-      const tag = target?.tagName;
-      const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || (target?.isContentEditable ?? false);
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setOpen((v) => !v);
-        return;
-      }
-      if (e.key === '?' && !isInput) {
-        e.preventDefault();
-        router.push('/shortcuts' as any);
         return;
       }
       if (e.key === 'Escape' && open) {
