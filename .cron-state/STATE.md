@@ -719,6 +719,36 @@ Gate results: aggregator 298/298 (+12 new = summariseFilterReportDelta + axis tu
 - **CLI `review filter-report --diff --input-strict --warn-only`** — relaxes the exit-2 fast-fail to a stderr warning + continue; for CI pipelines that want the strict diagnostics WITHOUT breaking the gate on shape drift. Pairs naturally with the tick-28 strict mode.
 - **CLI `presets diff --on-delta` payload includes the new tick-28 `summariseFilterReportDelta`-style summary** — surface `changedKeys` / `addedKeys` / `removedKeys` counts in the hook payload so a Slack template doesn't have to reduce the full delta object client-side.
 
+**Tick-29 frontend override:** Sanjay redirected the loop on 2026-06-23 — all 5 slices each tick must be frontend / UX work in `apps/dashboard/`. The backend backlog above stays parked until the override lifts.
+
+
+### Tick 29 — 2026-06-24 00:24 PT — 5 features (FRONTEND BATCH)
+
+| # | Slice | SHA | Lines | Notes |
+|---|---|---|---|---|
+| 1 | Findings page `?group=file` collapsible file-grouped sections (groupFindingsByFile pure helper sorts by highest-severity-first; FileGroupCard with caret + folder glyph + 20px sev-mini-bar + count chip; first 5 default open, rest collapsed) | 09a4b56 | +183/-9 | 1 component, 1 page rewire |
+| 2 | Reviews list sortable columns + active-filter chips (SortableTh aria-sort + arrow glyph; hrefWith threads ALL params through every link; per-chip "X" removes one filter, "clear all" strips them) | 31ab09a | +179/-12 | 1 page rewrite |
+| 3 | Agent timeline replaces flat agents table on /app/reviews/:id (horizontal proportional-duration bars Linear-style; sorted longest-first so bottleneck pops; StatusGlyph CheckCircle/WarningCircle/MinusCircle; error string under the row, not in a cramped column; summary header with totals + error highlight) | 6ab294f | +122/-30 | 1 component (AgentTimeline), 1 page rewire |
+| 4 | Tooltip primitive + apply to theme-toggle / cmdk-trigger / agent status glyphs (hover + keyboard focus + Escape; 250ms show / 75ms hide; placement top\|bottom; aria-describedby; CSS-triangle arrow; animate-fade-in shared keyframe) | 11d1b67 | +148/-21 | 1 primitive, 3 wires |
+| 5 | ShortcutsOverlay (?-triggered cheatsheet replaces /shortcuts page nav; supersedes command-palette ? handler; role=dialog aria-modal; two-column grid sm+, scrollable; same 12 shortcuts grouped global/findings list/palette) | 4ad0dd4 | +143/-9 | 1 overlay, 1 layout mount, 1 command-palette rewire |
+
+Gate results: dashboard `tsc --noEmit` output line count IDENTICAL to tick-28 baseline (5 lines pre-batch vs 5 lines post-batch -- the only error is the pre-existing TS5101 baseUrl deprecation on tsconfig.json:18). Verified by `git checkout 1f863a1 -- apps/dashboard && pnpm --filter @clawreview/dashboard exec tsc --noEmit 2>&1 | wc -l` (= 5) vs the same on HEAD (= 5). Adjacent packages stable (no source touched): types 27/27, aggregator 298/298, cli 627/627, telemetry passing, server 408/408 (after one transient Prisma client flake that resolved cleanly on rerun -- unrelated to this batch, no server files touched). UI `pnpm test` passWithNoTests (no test fixtures exist; the dashboard has no unit-test infra so the gate this tick is the typecheck baseline + visual review of the rendered surfaces). Push verified: `git fetch -q origin && git log --oneline origin/main | head -1` -> `4ad0dd4`.
+
+**Tick-29 frontend override:** All five slices are user-facing UI work in `apps/dashboard/src/`. Each slice independently revertible. New components match the existing lowercase / mono / dense / Linear-Raycast-flavored design language. No backend / packages touched this tick. Backlog roadmap items 1-14 above remain parked under the frontend override until Sanjay flips it back.
+
+### Backlog seeded for tick 30 (refill — frontend-first under the standing override)
+- **Reviews list: keyboard navigation** — `j`/`k` to navigate result rows, `Enter` to open. Mirrors the FindingsKeyNav pattern; would share a generic `useListKeyboardNav` hook so /repos and /audit can pick it up next.
+- **Reviews list: sticky filter bar on scroll** — current filter strip scrolls off the top. Tailwind `sticky top-10` (under the app header) keeps it pinned. Add backdrop-blur for legibility over content.
+- **Findings page: persisted-expand-state in localStorage** — remember which file groups were expanded per-review so reloading the page doesn't snap closed. Key shape `clawreview-findings-expand:<reviewId>`.
+- **Reviews list: per-row hover preview** — hover a PR row for ~400ms and a popover surfaces the head finding mix (the same SeverityMiniBar from findings-group) so an operator can triage without clicking through.
+- **Dashboard overview: sparkline tooltips** — the existing `<Sparkline />` is decorative. Add a hover-overlay showing the daily count for the bucket under the cursor. Use the existing Tooltip primitive's positioning logic.
+- **Findings page: virtualized list for 200+ findings** — large reviews chew render time on every filter toggle. Wrap the flat list in a windowed scroller (custom intersection-observer based, no react-window dep) when filtered.length > 100.
+- **Theme persistence: hydration-safe theme bootstrap** — currently the page paints in dark, then flickers to light on next mount. Add a tiny inline `<script>` in the root layout that applies the saved theme before React hydrates.
+- **Review detail: copy-link affordance on findings** — each finding has a fingerprint. Add a Tooltip-wrapped link-copy button that copies a deep link `/app/reviews/:id/findings?focus=<fingerprint>` to the clipboard.
+- **Reviews list: empty-state CTA improvements** — current empty card is text-only. Add a primary CTA "configure github app" linking to /app/installations and a secondary "view docs" linking to /docs.
+- **Repos page: status filter tabs + same chip pattern** — apply the tick-29 sortable+chip pattern to /app/repos so the dashboard has consistent table interactivity everywhere.
+
+
 
 
 ## TICK LOG
