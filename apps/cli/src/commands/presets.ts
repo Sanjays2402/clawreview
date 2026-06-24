@@ -777,7 +777,211 @@ function populatedKeys(preset: ConfigPreset): string[] {
  * easier to scan than a per-element rebase. Callers that need the
  * deeper diff can feed the JSON output through jq or a diff tool.
  */
-export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
+/**
+ * Tick 28: shell-exec hook interface for `presets diff --on-delta`.
+ * Mirrors `WatchOnDriftExecer` from `review.ts` byte-for-byte (same
+ * shell-exec contract, same stdin-pipe semantics) so a CI pipeline
+ * can reuse hooks across the two commands.
+ *
+ * Returns the resolved exit code (null when the process died without
+ * an exit) plus any stderr text -- the caller logs both at debug
+ * visibility so a silent hook failure shows up in the diff command's
+ * stderr without affecting the exit code.
+ */
+export type PresetsDiffOnDeltaExecer = (
+  cmd: string,
+  payload: string,
+) => Promise<{ exitCode: number | null; stderr: string }>;
+
+/**
+ * Tick 28: default exec implementation. Uses `child_process.exec` so
+ * an operator can pass a shell pipeline (`jq .hasChanges | curl ...`).
+ * Pipes the payload to stdin for the hook to read.
+ *
+ * Pulled out so tests inject a stub without spawning real processes.
+ */
+const defaultPresetsDiffOnDeltaExecer: PresetsDiffOnDeltaExecer = async (cmd, payload) => {
+  const { exec } = await import('node:child_process');
+  return new Promise((resolvePromise) => {
+    const child = exec(cmd, (err, _stdout, stderr) => {
+      // exec resolves err.code = exitCode on non-zero exits; that's
+      // surfaced verbatim to the caller. err.signal would be the
+      // signal name on SIGTERM/etc; we treat any non-zero / null exit
+      // as a hook failure for the caller's stderr surfacing.
+      resolvePromise({
+        exitCode: err === null ? 0 : err.code ?? null,
+        stderr: typeof stderr === 'string' ? stderr : String(stderr ?? ''),
+      });
+    });
+    if (child.stdin !== null) {
+      child.stdin.write(payload);
+      child.stdin.end();
+    }
+  });
+};
+
+/**
+ * Tick 28: closed set of `presets diff --on-delta-template` template
+ * names. Mirrors `ON_DELTA_TEMPLATES` on `review filter-report --diff`
+ * (slack | webhook) so an operator's mental model carries across
+ * both commands.
+ */
+export const PRESETS_DIFF_ON_DELTA_TEMPLATES = ['slack', 'webhook'] as const;
+export type PresetsDiffOnDeltaTemplate = (typeof PRESETS_DIFF_ON_DELTA_TEMPLATES)[number];
+
+/**
+ * Tick 28: expand a named `--on-delta-template` into the curl command
+ * the diff command will exec when computePresetDelta surfaces a
+ * non-empty delta.
+ *
+ * Env-var fallback ladder (mirrors `expandOnDeltaTemplate` on
+ * `review filter-report --diff`):
+ *   - `slack`   -> $SLACK_PRESETS_DELTA_WEBHOOK_URL, falling back to
+ *                  $SLACK_WEBHOOK_URL.
+ *   - `webhook` -> $WEBHOOK_PRESETS_DELTA_URL, falling back to
+ *                  $WEBHOOK_URL.
+ *
+ * The primary env vars are namespaced with `PRESETS_` so an operator
+ * who routes review filter-report deltas and preset diffs to DIFFERENT
+ * channels can set distinct primaries. The shared fallback means a
+ * single-channel operator doesn't need to duplicate the URL.
+ *
+ * Pure: takes the `env` map as an argument so tests can drive every
+ * arm without mutating `process.env`.
+ */
+export type PresetsDiffOnDeltaTemplateExpansion =
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+export function expandPresetsDiffOnDeltaTemplate(
+  name: string,
+  env: NodeJS.ProcessEnv,
+): PresetsDiffOnDeltaTemplateExpansion {
+  const lower = name.toLowerCase();
+  let primaryVar: string;
+  let fallbackVar: string;
+  switch (lower) {
+    case 'slack':
+      primaryVar = 'SLACK_PRESETS_DELTA_WEBHOOK_URL';
+      fallbackVar = 'SLACK_WEBHOOK_URL';
+      break;
+    case 'webhook':
+      primaryVar = 'WEBHOOK_PRESETS_DELTA_URL';
+      fallbackVar = 'WEBHOOK_URL';
+      break;
+    default:
+      return {
+        kind: 'invalid',
+        message: `unknown --on-delta-template '${name}'; valid: ${PRESETS_DIFF_ON_DELTA_TEMPLATES.join(', ')}`,
+      };
+  }
+  const primary = (env[primaryVar] ?? '').trim();
+  const fallback = (env[fallbackVar] ?? '').trim();
+  const url = primary.length > 0 ? primary : fallback;
+  if (url.length === 0) {
+    return {
+      kind: 'invalid',
+      message:
+        `--on-delta-template ${lower} requires \$${primaryVar} ` +
+        `(or \$${fallbackVar} as fallback) -- set one before running presets diff`,
+    };
+  }
+  const command =
+    `curl -sS -X POST -H 'Content-Type: application/json' --data-binary @- '${url}'`;
+  return { kind: 'ok', command };
+}
+
+/**
+ * Tick 28: discriminated-union result of parsing `--on-delta` /
+ * `--on-delta-template` flags on `presets diff`. Mirrors the
+ * `OnDeltaFlagsResult` shape on `review filter-report --diff` so
+ * a CI consumer pattern-matching on `kind` sees the same shape
+ * across both commands.
+ */
+export type PresetsDiffOnDeltaFlagsResult =
+  | { kind: 'absent' }
+  | { kind: 'ok'; command: string }
+  | { kind: 'invalid'; message: string };
+
+/**
+ * Tick 28: parse `--on-delta <cmd>` / `--on-delta-template <name>`
+ * flags on `presets diff`. Mutually exclusive (the resolution would
+ * be ambiguous if both were set); the mutex check fires before env-
+ * var expansion so an operator setting both gets a clear "pick one"
+ * hint instead of an env-var-missing error.
+ *
+ * Pure: env injected for testability.
+ */
+export function parsePresetsDiffOnDeltaFlags(
+  flags: { 'on-delta'?: unknown; 'on-delta-template'?: unknown },
+  env: NodeJS.ProcessEnv,
+): PresetsDiffOnDeltaFlagsResult {
+  const hasCmd = flags['on-delta'] !== undefined;
+  const hasTemplate = flags['on-delta-template'] !== undefined;
+  if (hasCmd && hasTemplate) {
+    return {
+      kind: 'invalid',
+      message:
+        '--on-delta and --on-delta-template are mutually exclusive ' +
+        '(pick one: the literal command or a named template)',
+    };
+  }
+  if (hasCmd) {
+    if (typeof flags['on-delta'] !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-delta must be a command string; got ${typeof flags['on-delta']}`,
+      };
+    }
+    const trimmed = flags['on-delta'].trim();
+    if (trimmed.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `--on-delta requires a non-empty command (e.g. --on-delta 'curl -X POST https://...')`,
+      };
+    }
+    return { kind: 'ok', command: trimmed };
+  }
+  if (hasTemplate) {
+    if (typeof flags['on-delta-template'] !== 'string') {
+      return {
+        kind: 'invalid',
+        message: `--on-delta-template must be a template name; got ${typeof flags['on-delta-template']}`,
+      };
+    }
+    const name = flags['on-delta-template'].trim();
+    if (name.length === 0) {
+      return {
+        kind: 'invalid',
+        message: `--on-delta-template requires a template name (one of: ${PRESETS_DIFF_ON_DELTA_TEMPLATES.join(', ')})`,
+      };
+    }
+    const expanded = expandPresetsDiffOnDeltaTemplate(name, env);
+    if (expanded.kind === 'invalid') {
+      return { kind: 'invalid', message: expanded.message };
+    }
+    return { kind: 'ok', command: expanded.command };
+  }
+  return { kind: 'absent' };
+}
+
+export async function runPresetsDiff(
+  args: ParsedArgs,
+  injected?: {
+    /**
+     * Tick 28: hook executor for `--on-delta` / `--on-delta-template`.
+     * Defaults to the shell-exec implementation; tests inject a stub
+     * that records invocations without spawning real processes.
+     */
+    onDeltaExecer?: PresetsDiffOnDeltaExecer;
+    /**
+     * Tick 28: env map for `--on-delta-template` resolution. Defaults
+     * to `process.env`; tests pass a stub env so the template's
+     * fallback ladder can be exercised without mutating the real env.
+     */
+    env?: NodeJS.ProcessEnv;
+  },
+): Promise<void> {
   // Three accepted forms for the two chains:
   //
   //   - Positional:       `presets diff <a> <b>`         (the original)
@@ -1391,6 +1595,59 @@ export async function runPresetsDiff(args: ParsedArgs): Promise<void> {
   // `--exclude-fields` exits 0 because the operator declared those
   // changes out of scope.
   process.exitCode = hasDelta(delta) ? 3 : 0;
+
+  // Tick 28: --on-delta hook fires AFTER the exit code is assigned
+  // so a CI consumer reading the exit code sees the same state the
+  // hook saw. Fires only when hasDelta(delta) is true -- a "no-delta"
+  // invocation doesn't notify (matches the exit-3 contract).
+  //
+  // Hook receives a JSON payload describing the diff and the resolved
+  // delta:
+  //   { chainA, chainB, hasChanges, delta }
+  //
+  // Failures surface on stderr but DON'T change the exit code -- the
+  // operator wired the hook for notification; a misconfigured webhook
+  // shouldn't promote the diff command's exit from 3 to 2.
+  //
+  // Mutex --on-delta / --on-delta-template parsed here; an invalid
+  // template (or mutex violation) exits 2 BEFORE the hook would fire.
+  // Parsing AFTER the diff body means a delta that flapped already
+  // got rendered to stdout -- worth surfacing the diff even if the
+  // notification path is misconfigured.
+  const onDeltaEnv = injected?.env ?? process.env;
+  const onDeltaParse = parsePresetsDiffOnDeltaFlags(
+    {
+      'on-delta': args.flags['on-delta'],
+      'on-delta-template': args.flags['on-delta-template'],
+    },
+    onDeltaEnv,
+  );
+  if (onDeltaParse.kind === 'invalid') {
+    process.stderr.write(`clawreview presets diff: ${onDeltaParse.message}\n`);
+    process.exitCode = 2;
+    return;
+  }
+  if (onDeltaParse.kind === 'ok' && hasDelta(delta)) {
+    const onDeltaExecer = injected?.onDeltaExecer ?? defaultPresetsDiffOnDeltaExecer;
+    const payload = JSON.stringify({
+      chainA,
+      chainB,
+      hasChanges: true,
+      delta,
+    });
+    try {
+      const result = await onDeltaExecer(onDeltaParse.command, payload);
+      if (result.exitCode !== 0) {
+        process.stderr.write(
+          `clawreview presets diff: --on-delta exited ${result.exitCode}: ${result.stderr.trim()}\n`,
+        );
+      }
+    } catch (err) {
+      process.stderr.write(
+        `clawreview presets diff: --on-delta failed: ${(err as Error).message}\n`,
+      );
+    }
+  }
 }
 
 /**

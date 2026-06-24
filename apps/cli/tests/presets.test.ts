@@ -3765,3 +3765,298 @@ describe('clawreview presets diff --since-range JSON echoes range discriminator 
     expect(tripleDot.stdout).toContain('# since-range-kind: triple-dot');
   });
 });
+
+// Tick 28: `clawreview presets diff --on-delta <cmd>` /
+// `--on-delta-template slack|webhook` -- symmetric port of tick-26's
+// review filter-report --diff hook to the presets command. Same
+// shell-exec contract, same env-var fallback ladder (with PRESETS_
+// namespacing), same mutex. Use case: a CI pipeline that wants a
+// Slack ping when a preset rolled out by a config-repo PR drifts.
+describe('clawreview presets diff --on-delta (tick 28)', () => {
+  async function runDiffWithHook(
+    dir: string,
+    positional: string[],
+    flags: Record<string, string | boolean> = {},
+    execer?: (cmd: string, payload: string) => Promise<{ exitCode: number | null; stderr: string }>,
+    env?: NodeJS.ProcessEnv,
+  ): Promise<{
+    stdout: string;
+    stderr: string;
+    exitCode: number;
+    calls: Array<{ cmd: string; payload: string }>;
+  }> {
+    const { runPresetsDiff } = await import('../src/commands/presets.js');
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const calls: Array<{ cmd: string; payload: string }> = [];
+    const wrappedExecer = execer
+      ? async (cmd: string, payload: string) => {
+          calls.push({ cmd, payload });
+          return execer(cmd, payload);
+        }
+      : undefined;
+    const writeStdout = vi.spyOn(process.stdout, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stdout.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    const writeStderr = vi.spyOn(process.stderr, 'write').mockImplementation(
+      ((chunk: unknown) => {
+        stderr.push(typeof chunk === 'string' ? chunk : (chunk as Buffer).toString('utf8'));
+        return true;
+      }) as never,
+    );
+    process.exitCode = 0;
+    try {
+      await runPresetsDiff(
+        {
+          command: 'presets',
+          positional: ['diff', ...positional],
+          flags: { 'no-color': true, root: dir, ...flags },
+        },
+        { onDeltaExecer: wrappedExecer, env },
+      );
+    } finally {
+      writeStdout.mockRestore();
+      writeStderr.mockRestore();
+    }
+    const code = typeof process.exitCode === 'number' ? process.exitCode : 0;
+    process.exitCode = 0;
+    return { stdout: stdout.join(''), stderr: stderr.join(''), exitCode: code, calls };
+  }
+
+  it('parsePresetsDiffOnDeltaFlags: absent / ok / mutex / unknown template', async () => {
+    const { parsePresetsDiffOnDeltaFlags } = await import('../src/commands/presets.js');
+    // Absent
+    expect(parsePresetsDiffOnDeltaFlags({}, {})).toEqual({ kind: 'absent' });
+    // OK literal command
+    expect(
+      parsePresetsDiffOnDeltaFlags({ 'on-delta': 'curl https://x' }, {}),
+    ).toEqual({ kind: 'ok', command: 'curl https://x' });
+    // Mutex
+    const mutex = parsePresetsDiffOnDeltaFlags(
+      { 'on-delta': 'curl x', 'on-delta-template': 'slack' },
+      { SLACK_WEBHOOK_URL: 'https://hooks.slack.com/x' },
+    );
+    expect(mutex.kind).toBe('invalid');
+    if (mutex.kind === 'invalid') {
+      expect(mutex.message).toContain('mutually exclusive');
+    }
+    // Empty --on-delta string
+    const emptyCmd = parsePresetsDiffOnDeltaFlags({ 'on-delta': '' }, {});
+    expect(emptyCmd.kind).toBe('invalid');
+    if (emptyCmd.kind === 'invalid') expect(emptyCmd.message).toContain('non-empty');
+    // Unknown template
+    const badTpl = parsePresetsDiffOnDeltaFlags(
+      { 'on-delta-template': 'discord' },
+      {},
+    );
+    expect(badTpl.kind).toBe('invalid');
+    if (badTpl.kind === 'invalid') expect(badTpl.message).toContain("unknown");
+  });
+
+  it('expandPresetsDiffOnDeltaTemplate: slack -> primary env wins; fallback when missing', async () => {
+    const { expandPresetsDiffOnDeltaTemplate } = await import('../src/commands/presets.js');
+    // Primary set
+    const primary = expandPresetsDiffOnDeltaTemplate('slack', {
+      SLACK_PRESETS_DELTA_WEBHOOK_URL: 'https://hooks.slack.com/primary',
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/shared',
+    });
+    expect(primary.kind).toBe('ok');
+    if (primary.kind === 'ok') {
+      expect(primary.command).toContain('https://hooks.slack.com/primary');
+    }
+    // Fallback only
+    const fallback = expandPresetsDiffOnDeltaTemplate('slack', {
+      SLACK_WEBHOOK_URL: 'https://hooks.slack.com/shared',
+    });
+    expect(fallback.kind).toBe('ok');
+    if (fallback.kind === 'ok') {
+      expect(fallback.command).toContain('https://hooks.slack.com/shared');
+    }
+    // Neither set
+    const missing = expandPresetsDiffOnDeltaTemplate('slack', {});
+    expect(missing.kind).toBe('invalid');
+    if (missing.kind === 'invalid') {
+      expect(missing.message).toContain('SLACK_PRESETS_DELTA_WEBHOOK_URL');
+      expect(missing.message).toContain('SLACK_WEBHOOK_URL');
+    }
+  });
+
+  it('expandPresetsDiffOnDeltaTemplate: webhook env-var ladder works', async () => {
+    const { expandPresetsDiffOnDeltaTemplate } = await import('../src/commands/presets.js');
+    const r = expandPresetsDiffOnDeltaTemplate('webhook', {
+      WEBHOOK_PRESETS_DELTA_URL: 'https://hooks.example.com/presets',
+    });
+    expect(r.kind).toBe('ok');
+    if (r.kind === 'ok') expect(r.command).toContain('https://hooks.example.com/presets');
+  });
+
+  it('PRESETS_DIFF_ON_DELTA_TEMPLATES is a closed 2-tuple', async () => {
+    const { PRESETS_DIFF_ON_DELTA_TEMPLATES } = await import('../src/commands/presets.js');
+    expect([...PRESETS_DIFF_ON_DELTA_TEMPLATES]).toEqual(['slack', 'webhook']);
+  });
+
+  it('hook fires on delta (exit 3): execer sees command + JSON payload with delta', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]?.cmd).toBe('curl -X POST https://hook');
+    const payload = JSON.parse(r.calls[0]!.payload);
+    expect(payload.chainA).toEqual(['strict']);
+    expect(payload.chainB).toEqual(['permissive']);
+    expect(payload.hasChanges).toBe(true);
+    expect(payload.delta).toBeDefined();
+  });
+
+  it('hook does NOT fire on no-delta (exit 0)', async () => {
+    const dir = await tmpDir();
+    await mkdir(join(dir, '.clawreview/presets'), { recursive: true });
+    await writeFile(
+      join(dir, '.clawreview/presets/clone.yml'),
+      'extends: [strict]\n',
+      'utf8',
+    );
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'clone'],
+      {
+        format: 'json',
+        'on-delta': 'curl -X POST https://hook',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.calls).toHaveLength(0);
+  });
+
+  it('hook failure (non-zero exit) surfaces on stderr WITHOUT changing exit code', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta': 'curl https://broken-hook',
+      },
+      async () => ({ exitCode: 42, stderr: 'curl: connection refused' }),
+    );
+    // Diff still exit-3 (delta was detected); hook failure is
+    // surfaced on stderr but doesn't promote the exit code.
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('--on-delta exited 42');
+    expect(r.stderr).toContain('connection refused');
+    expect(r.calls).toHaveLength(1);
+  });
+
+  it('hook throws -> caught and surfaced on stderr; exit unchanged', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta': 'curl https://x',
+      },
+      async () => {
+        throw new Error('synthetic spawn failure');
+      },
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.stderr).toContain('--on-delta failed: synthetic spawn failure');
+  });
+
+  it('--on-delta + --on-delta-template together -> mutex rejection exit 2', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta': 'curl https://x',
+        'on-delta-template': 'slack',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+      { SLACK_WEBHOOK_URL: 'https://hooks.slack.com/x' },
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('mutually exclusive');
+    expect(r.calls).toHaveLength(0);
+  });
+
+  it('--on-delta-template slack with primary env -> hook fires with curl pointed at primary', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta-template': 'slack',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+      { SLACK_PRESETS_DELTA_WEBHOOK_URL: 'https://hooks.slack.com/primary' },
+    );
+    expect(r.exitCode).toBe(3);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]?.cmd).toContain('https://hooks.slack.com/primary');
+  });
+
+  it('--on-delta-template with no env vars -> exit 2, no hook fire', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta-template': 'slack',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+      {}, // no SLACK_* env vars
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('SLACK_PRESETS_DELTA_WEBHOOK_URL');
+    expect(r.calls).toHaveLength(0);
+  });
+
+  it('--on-delta empty string -> exit 2, no hook fire (back-compat-safe rejection)', async () => {
+    const dir = await tmpDir();
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      {
+        format: 'json',
+        'on-delta': '',
+      },
+      async () => ({ exitCode: 0, stderr: '' }),
+    );
+    expect(r.exitCode).toBe(2);
+    expect(r.stderr).toContain('--on-delta');
+    expect(r.calls).toHaveLength(0);
+  });
+
+  it('hook is back-compat off when neither flag is set (existing tests stay green)', async () => {
+    const dir = await tmpDir();
+    const calls: Array<{ cmd: string }> = [];
+    const r = await runDiffWithHook(
+      dir,
+      ['strict', 'permissive'],
+      { format: 'json' },
+      async (cmd) => {
+        calls.push({ cmd });
+        return { exitCode: 0, stderr: '' };
+      },
+    );
+    expect(r.exitCode).toBe(3);
+    expect(calls).toHaveLength(0);
+  });
+});
