@@ -18,6 +18,10 @@ import {
 import type { Finding, Severity } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
+import {
+  DIFF_DEFAULT_MAX_OUTPUT_BYTES,
+  DIFF_MAX_OUTPUT_BYTES_CEILING,
+} from '../diff-output-limits.js';
 
 /**
  * Shape this command consumes. Matches the `/api/reviews/:id` DTO that
@@ -2360,7 +2364,21 @@ export function resolveFilterReportDiffOutputPath(
  * gigantic strings, etc.) -- which is exactly when an operator
  * wants the protection.
  */
-export const FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES = 100 * 1024;
+/**
+ * Default size cap for `--output` / `--output -` writes when the
+ * caller doesn't pass `--max-output-bytes` explicitly.
+ *
+ * Tick 28: this constant now re-exports the single canonical
+ * `DIFF_DEFAULT_MAX_OUTPUT_BYTES` from
+ * `apps/cli/src/diff-output-limits.ts` so a future bump to the
+ * default lands in ONE place and the `presets diff` /
+ * `review filter-report --diff` commands never drift apart.
+ *
+ * Back-compat: the name + numeric value are unchanged at `100 *
+ * 1024`. Tests and downstream tooling that import the existing
+ * symbol continue to see the same value.
+ */
+export const FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES = DIFF_DEFAULT_MAX_OUTPUT_BYTES;
 
 /**
  * Tick 27: hard ceiling on `--max-output-bytes` for
@@ -2371,7 +2389,17 @@ export const FILTER_REPORT_DIFF_DEFAULT_MAX_OUTPUT_BYTES = 100 * 1024;
  * symmetric -- a CI pipeline that wraps either with a `timeout` /
  * `head` / `dd` cap doesn't have to special-case one or the other.
  */
-export const FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING = 16 * 1024 * 1024;
+/**
+ * Hard ceiling on `--max-output-bytes`. Even an explicit caller
+ * cannot ask for an unbounded write -- a 100 MiB filter-report diff
+ * was never the intended use case for this command.
+ *
+ * Tick 28: this constant now re-exports the single canonical
+ * `DIFF_MAX_OUTPUT_BYTES_CEILING` from
+ * `apps/cli/src/diff-output-limits.ts`. Back-compat: name + value
+ * unchanged at `16 * 1024 * 1024`.
+ */
+export const FILTER_REPORT_DIFF_MAX_OUTPUT_BYTES_CEILING = DIFF_MAX_OUTPUT_BYTES_CEILING;
 
 /**
  * Tick 27: pure parser for the `--max-output-bytes` flag on

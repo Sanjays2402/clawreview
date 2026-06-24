@@ -4,6 +4,11 @@ import { cwd as getCwd } from 'node:process';
 
 import kleur from 'kleur';
 import YAML from 'yaml';
+
+import {
+  DIFF_DEFAULT_MAX_OUTPUT_BYTES,
+  DIFF_MAX_OUTPUT_BYTES_CEILING,
+} from '../diff-output-limits.js';
 import {
   getPreset,
   listPresets,
@@ -1863,32 +1868,34 @@ async function writePresetResolveOutput(
 
 /**
  * Default size cap for `--output` / `--output -` writes when the
- * caller doesn't pass `--max-output-bytes` explicitly. 100 KiB is
- * chosen as a generous-but-bounded ceiling: a real-world preset diff
- * fits in a few hundred bytes; a multi-kilobyte diff is plausible
- * for a deeply-customised local preset stack; a megabyte-scale diff
- * almost always indicates a runaway extends chain or a YAML that
- * resolved to a giant body. Catching that BEFORE it lands on a pipe
- * (where the downstream consumer is usually `jq` or `mail`) saves
- * the on-call from a 30-second wait followed by a "what is this?"
- * stack trace.
+ * caller doesn't pass `--max-output-bytes` explicitly.
  *
- * Exported so test fixtures + integrations can reference the same
- * literal without re-deriving it.
+ * Tick 28: this constant now re-exports the single canonical
+ * `DIFF_DEFAULT_MAX_OUTPUT_BYTES` from `apps/cli/src/diff-output-limits.ts`
+ * so a future bump to the default lands in ONE place and the
+ * `presets diff` / `review filter-report --diff` commands never
+ * drift apart. The two are conceptually the same knob with the
+ * same use case (cap an artifact write); they should share a value.
+ *
+ * Back-compat: the name + numeric value are unchanged. Tests and
+ * downstream tooling that import `PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES`
+ * continue to see `100 * 1024`.
  */
-export const PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES = 100 * 1024;
+export const PRESET_DIFF_DEFAULT_MAX_OUTPUT_BYTES = DIFF_DEFAULT_MAX_OUTPUT_BYTES;
 
 /**
  * Hard ceiling on `--max-output-bytes`. Even an explicit caller
  * cannot ask for an unbounded write -- a 100 MiB preset diff was
  * never the intended use case for this command, and an accidentally-
  * typed `--max-output-bytes 100000000000` shouldn't allocate a
- * gigabyte-scale buffer either. 16 MiB is a sanity ceiling that's
- * still 160x the default; anything genuinely larger should be
- * written via two `clawreview presets show <chain> --format yaml`
- * calls and a manual diff, not through this command.
+ * gigabyte-scale buffer either.
+ *
+ * Tick 28: this constant now re-exports the single canonical
+ * `DIFF_MAX_OUTPUT_BYTES_CEILING` from
+ * `apps/cli/src/diff-output-limits.ts`. Back-compat: name + value
+ * unchanged at `16 * 1024 * 1024`.
  */
-export const PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING = 16 * 1024 * 1024;
+export const PRESET_DIFF_MAX_OUTPUT_BYTES_CEILING = DIFF_MAX_OUTPUT_BYTES_CEILING;
 
 /**
  * Pure parser for the `--max-output-bytes` flag. Returns:
