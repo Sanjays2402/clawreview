@@ -8,6 +8,7 @@ import { Breadcrumbs } from '@/components/ui/breadcrumbs';
 import { PageHeader } from '@/components/layout/page-header';
 import { FindingRow } from '@/components/review/finding-row';
 import { FindingsKeyNav } from '@/components/review/findings-key-nav';
+import { FindingsGroupedByFile, groupFindingsByFile } from '@/components/review/findings-group';
 import { Kbd } from '@/components/ui/kbd';
 import { getReview, type Severity, type BulkFindingFilter } from '@/lib/data';
 
@@ -15,10 +16,11 @@ import { BulkFindingsBar } from './bulk-findings-bar';
 
 const SEVERITIES: Array<Severity | 'all'> = ['all', 'critical', 'high', 'medium', 'low', 'nit'];
 const STATES: Array<'all' | 'open' | 'dismissed'> = ['all', 'open', 'dismissed'];
+const GROUPS: Array<'flat' | 'file'> = ['flat', 'file'];
 
 interface PageProps {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ severity?: string; state?: string; agent?: string }>;
+  searchParams: Promise<{ severity?: string; state?: string; agent?: string; group?: string }>;
 }
 
 export default async function FindingsPage({ params, searchParams }: PageProps) {
@@ -34,6 +36,9 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
     ? sp.state
     : 'all') as 'all' | 'open' | 'dismissed';
   const agentFilter = sp.agent?.trim() || '';
+  const groupBy = (GROUPS.includes((sp.group ?? 'flat') as 'flat' | 'file')
+    ? sp.group
+    : 'flat') as 'flat' | 'file';
 
   const agents = Array.from(new Set(review.findings.map((f) => f.agent))).sort();
 
@@ -44,17 +49,23 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
     return true;
   });
 
-  function hrefWith(next: Partial<{ severity: string; state: string; agent: string }>): string {
+  function hrefWith(
+    next: Partial<{ severity: string; state: string; agent: string; group: string }>,
+  ): string {
     const qs = new URLSearchParams();
     const sev = next.severity ?? sevFilter;
     const st = next.state ?? stateFilter;
     const ag = next.agent ?? agentFilter;
+    const gr = next.group ?? groupBy;
     if (sev && sev !== 'all') qs.set('severity', sev);
     if (st && st !== 'all') qs.set('state', st);
     if (ag) qs.set('agent', ag);
+    if (gr && gr !== 'flat') qs.set('group', gr);
     const tail = qs.toString();
     return `/app/reviews/${id}/findings${tail ? `?${tail}` : ''}`;
   }
+
+  const fileGroups = groupBy === 'file' ? groupFindingsByFile(filtered) : null;
 
   return (
     <div className="space-y-3">
@@ -117,6 +128,7 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
           <form action={`/app/reviews/${id}/findings`} method="get" className="flex items-center gap-1">
             <input type="hidden" name="state" value={stateFilter === 'all' ? '' : stateFilter} />
             <input type="hidden" name="severity" value={sevFilter === 'all' ? '' : sevFilter} />
+            <input type="hidden" name="group" value={groupBy === 'flat' ? '' : groupBy} />
             <span className="uppercase tracking-wider text-fg-subtle">agent</span>
             <select
               name="agent"
@@ -130,10 +142,29 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
             </select>
             <button type="submit" className="rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 hover:bg-bg-muted">apply</button>
           </form>
-          {(sevFilter !== 'all' || stateFilter !== 'all' || agentFilter) && (
+          <span className="mx-1 text-fg-subtle">·</span>
+          <span className="uppercase tracking-wider text-fg-subtle">group</span>
+          {GROUPS.map((g) => {
+            const active = g === groupBy;
+            return (
+              <Link
+                key={g}
+                href={hrefWith({ group: g }) as any}
+                className={`rounded-sm px-1.5 py-0.5 lowercase ${
+                  active ? 'bg-accent/20 text-fg' : 'text-fg-muted hover:bg-bg-muted hover:text-fg'
+                }`}
+              >
+                {g === 'flat' ? 'list' : 'file'}
+              </Link>
+            );
+          })}
+          {(sevFilter !== 'all' || stateFilter !== 'all' || agentFilter || groupBy !== 'flat') && (
             <Link href={`/app/reviews/${id}/findings` as any} className="ml-1 text-fg-subtle hover:text-fg">reset</Link>
           )}
-          <span className="ml-auto tabular-nums text-fg-subtle">{filtered.length} / {review.findings.length}</span>
+          <span className="ml-auto tabular-nums text-fg-subtle">
+            {filtered.length} / {review.findings.length}
+            {fileGroups ? <span> · {fileGroups.length} files</span> : null}
+          </span>
         </div>
 
         <div className="p-2">
@@ -156,11 +187,15 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
                   return f;
                 })()}
               />
-              <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
-                {filtered.map((f) => (
-                  <FindingRow key={f.id} finding={f} reviewId={id} />
-                ))}
-              </ul>
+              {fileGroups ? (
+                <FindingsGroupedByFile groups={fileGroups} reviewId={id} />
+              ) : (
+                <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
+                  {filtered.map((f) => (
+                    <FindingRow key={f.id} finding={f} reviewId={id} />
+                  ))}
+                </ul>
+              )}
             </>
           )}
         </div>
