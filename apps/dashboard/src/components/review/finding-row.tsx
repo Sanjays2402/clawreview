@@ -1,9 +1,10 @@
 'use client';
 
 import { useEffect, useRef, useState, useTransition } from 'react';
-import { ArrowCounterClockwise, X, CaretRight } from '@phosphor-icons/react';
+import { ArrowCounterClockwise, X, CaretRight, LinkSimple, Check } from '@phosphor-icons/react';
 
 import { StatusPill } from './status-pill';
+import { Tooltip } from '@/components/ui/tooltip';
 import type { FindingDto } from '@/lib/data';
 import { dismissFindingAction, reopenFindingAction } from '@/app/app/reviews/actions';
 
@@ -23,17 +24,52 @@ const SEV_TEXT: Record<string, string> = {
   nit: 'text-severity-nit',
 };
 
-export function FindingRow({ finding, reviewId }: { finding: FindingDto; reviewId: string }) {
+export function FindingRow({
+  finding,
+  reviewId,
+  focus = false,
+}: {
+  finding: FindingDto;
+  reviewId: string;
+  focus?: boolean;
+}) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [reason, setReason] = useState('');
   const [showReason, setShowReason] = useState(false);
   const [expanded, setExpanded] = useState(false);
   const [focused, setFocused] = useState(false);
+  const [copied, setCopied] = useState(false);
   const ref = useRef<HTMLLIElement | null>(null);
 
   const dismissed = finding.state === 'dismissed';
   const status = dismissed ? 'dismissed' : 'open';
+
+  // When this row is the deep-link target, scroll it into view + focus it on
+  // mount so the operator lands directly on the finding they linked to.
+  useEffect(() => {
+    if (!focus) return;
+    const el = ref.current;
+    if (!el) return;
+    const t = setTimeout(() => {
+      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.focus();
+    }, 80);
+    return () => clearTimeout(t);
+  }, [focus]);
+
+  function copyLink() {
+    const url = `${window.location.origin}/app/reviews/${reviewId}/findings?focus=${encodeURIComponent(finding.id)}`;
+    const done = () => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1400);
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(url).then(done).catch(done);
+    } else {
+      done();
+    }
+  }
 
   function onDismiss(rsn?: string) {
     setError(null);
@@ -82,11 +118,12 @@ export function FindingRow({ finding, reviewId }: { finding: FindingDto; reviewI
       ref={ref}
       tabIndex={0}
       data-finding-row
+      id={`finding-${finding.id}`}
       onFocus={() => setFocused(true)}
       onBlur={() => setFocused(false)}
       className={`group relative outline-none ${dismissed ? 'opacity-55' : ''} ${
         focused ? 'bg-accent/[0.06]' : 'hover:bg-bg-subtle/40'
-      }`}
+      } ${focus ? 'ring-1 ring-inset ring-accent/50' : ''}`}
     >
       <span className={`sev-strip ${SEV_BAR[finding.severity] ?? 'bg-severity-nit'}`} />
       <div className="flex items-start gap-2 pl-3 pr-2 py-1.5">
@@ -116,6 +153,22 @@ export function FindingRow({ finding, reviewId }: { finding: FindingDto; reviewI
             {finding.category ? <span>· {finding.category}</span> : null}
             <span>·</span>
             <StatusPill status={status} />
+            <Tooltip label={copied ? 'copied link' : 'copy deep link'}>
+              <button
+                type="button"
+                aria-label="copy deep link to this finding"
+                onClick={copyLink}
+                className={`inline-flex h-4 w-4 items-center justify-center rounded-sm text-fg-subtle transition-all hover:text-fg ${
+                  copied ? 'opacity-100' : 'opacity-0 focus-visible:opacity-100 group-hover:opacity-100'
+                }`}
+              >
+                {copied ? (
+                  <Check size={11} weight="bold" className="text-emerald-400" />
+                ) : (
+                  <LinkSimple size={11} weight="bold" />
+                )}
+              </button>
+            </Tooltip>
           </div>
 
           {expanded ? (

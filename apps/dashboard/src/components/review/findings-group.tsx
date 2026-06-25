@@ -131,10 +131,12 @@ export function FindingsGroupedByFile({
   groups,
   reviewId,
   initiallyOpen = 5,
+  focusId,
 }: {
   groups: FileGroup[];
   reviewId: string;
   initiallyOpen?: number;
+  focusId?: string;
 }) {
   const files = groups.map((g) => g.file);
   const { isOpen, hasOverride, toggle } = usePersistentExpand(reviewId, files);
@@ -142,15 +144,19 @@ export function FindingsGroupedByFile({
   return (
     <ul className="space-y-1.5">
       {groups.map((g, i) => {
-        const fallback = i < initiallyOpen;
+        // A group containing the deep-link target must open regardless of
+        // persisted/default state so the row is actually visible.
+        const hasFocus = focusId ? g.findings.some((f) => f.id === focusId) : false;
+        const fallback = i < initiallyOpen || hasFocus;
         return (
           <FileGroupCard
             key={g.file}
             group={g}
             reviewId={reviewId}
-            open={isOpen(g.file, fallback)}
+            open={hasFocus || isOpen(g.file, fallback)}
             persisted={hasOverride(g.file)}
             onToggle={() => toggle(g.file, fallback)}
+            focusId={focusId}
           />
         );
       })}
@@ -164,12 +170,14 @@ function FileGroupCard({
   open,
   onToggle,
   persisted,
+  focusId,
 }: {
   group: FileGroup;
   reviewId: string;
   open: boolean;
   onToggle: () => void;
   persisted?: boolean;
+  focusId?: string;
 }) {
   return (
     <li className="overflow-hidden rounded-sm border border-border-subtle">
@@ -205,7 +213,7 @@ function FileGroupCard({
       {open ? (
         <ul className="divide-y divide-border-subtle/60 border-t border-border-subtle">
           {group.findings.map((f) => (
-            <FindingRow key={f.id} finding={f} reviewId={reviewId} />
+            <FindingRow key={f.id} finding={f} reviewId={reviewId} focus={f.id === focusId} />
           ))}
         </ul>
       ) : null}

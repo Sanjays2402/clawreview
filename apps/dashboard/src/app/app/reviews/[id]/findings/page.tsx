@@ -20,7 +20,7 @@ const GROUPS: Array<'flat' | 'file'> = ['flat', 'file'];
 
 interface PageProps {
   params: Promise<{ id: string }>;
-  searchParams: Promise<{ severity?: string; state?: string; agent?: string; group?: string }>;
+  searchParams: Promise<{ severity?: string; state?: string; agent?: string; group?: string; focus?: string }>;
 }
 
 export default async function FindingsPage({ params, searchParams }: PageProps) {
@@ -39,10 +39,13 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
   const groupBy = (GROUPS.includes((sp.group ?? 'flat') as 'flat' | 'file')
     ? sp.group
     : 'flat') as 'flat' | 'file';
+  const focusId = sp.focus?.trim() || '';
 
   const agents = Array.from(new Set(review.findings.map((f) => f.agent))).sort();
 
   const filtered = review.findings.filter((f) => {
+    // Always keep the deep-link target visible even if filters would hide it.
+    if (focusId && f.id === focusId) return true;
     if (sevFilter !== 'all' && f.severity !== sevFilter) return false;
     if (stateFilter !== 'all' && f.state !== stateFilter) return false;
     if (agentFilter && f.agent !== agentFilter) return false;
@@ -188,11 +191,11 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
                 })()}
               />
               {fileGroups ? (
-                <FindingsGroupedByFile groups={fileGroups} reviewId={id} />
+                <FindingsGroupedByFile groups={fileGroups} reviewId={id} focusId={focusId || undefined} />
               ) : (
                 <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
                   {filtered.map((f) => (
-                    <FindingRow key={f.id} finding={f} reviewId={id} />
+                    <FindingRow key={f.id} finding={f} reviewId={id} focus={focusId === f.id} />
                   ))}
                 </ul>
               )}
