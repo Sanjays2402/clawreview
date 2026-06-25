@@ -109,7 +109,11 @@ export default async function ReviewDetailPage({ params, searchParams }: PagePro
             <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">severity</div>
           </CardHeader>
           <CardBody>
-            <SeverityRow counts={sevCounts} total={review.findings.length} />
+            <SeverityRow
+              counts={sevCounts}
+              total={review.findings.length}
+              hrefFor={(sev) => `/app/reviews/${review.id}/findings?severity=${sev}`}
+            />
           </CardBody>
         </Card>
 
