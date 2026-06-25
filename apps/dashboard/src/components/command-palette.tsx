@@ -9,27 +9,73 @@ interface Cmd {
   hint?: string;
   href?: string;
   action?: () => void;
+  /** Grouping bucket for the sectioned list. */
+  group: 'navigate' | 'reviews';
+  /** Extra haystack text for fuzzy matching (repo slug, sha, etc). */
+  keywords?: string;
 }
 
 const ROUTES: Cmd[] = [
-  { id: 'overview', label: 'go: overview', hint: 'g o', href: '/app' },
-  { id: 'reviews', label: 'go: reviews', hint: 'g r', href: '/app/reviews' },
-  { id: 'repos', label: 'go: repos', href: '/app/repos' },
-  { id: 'installations', label: 'go: installations', href: '/app/installations' },
-  { id: 'trends', label: 'go: trends', href: '/app/trends' },
-  { id: 'sla', label: 'go: sla', href: '/app/sla' },
-  { id: 'budget', label: 'go: budget', href: '/app/budget' },
-  { id: 'audit', label: 'go: audit', href: '/app/audit' },
-  { id: 'config', label: 'go: config', href: '/app/config' },
-  { id: 'integrations', label: 'go: integrations', href: '/app/integrations' },
-  { id: 'team', label: 'go: team', href: '/app/team' },
-  { id: 'keys', label: 'go: api keys', href: '/app/api-keys' },
-  { id: 'settings', label: 'go: settings', href: '/app/settings' },
-  { id: 'shortcuts', label: 'shortcuts (page)', href: '/shortcuts' },
-  { id: 'docs', label: 'docs', href: '/docs' },
+  { id: 'overview', label: 'go: overview', hint: 'g o', href: '/app', group: 'navigate' },
+  { id: 'reviews', label: 'go: reviews', hint: 'g r', href: '/app/reviews', group: 'navigate' },
+  { id: 'repos', label: 'go: repos', href: '/app/repos', group: 'navigate' },
+  { id: 'installations', label: 'go: installations', href: '/app/installations', group: 'navigate' },
+  { id: 'trends', label: 'go: trends', href: '/app/trends', group: 'navigate' },
+  { id: 'sla', label: 'go: sla', href: '/app/sla', group: 'navigate' },
+  { id: 'budget', label: 'go: budget', href: '/app/budget', group: 'navigate' },
+  { id: 'audit', label: 'go: audit', href: '/app/audit', group: 'navigate' },
+  { id: 'config', label: 'go: config', href: '/app/config', group: 'navigate' },
+  { id: 'integrations', label: 'go: integrations', href: '/app/integrations', group: 'navigate' },
+  { id: 'team', label: 'go: team', href: '/app/team', group: 'navigate' },
+  { id: 'keys', label: 'go: api keys', href: '/app/api-keys', group: 'navigate' },
+  { id: 'settings', label: 'go: settings', href: '/app/settings', group: 'navigate' },
+  { id: 'shortcuts', label: 'shortcuts (page)', href: '/shortcuts', group: 'navigate' },
+  { id: 'docs', label: 'docs', href: '/docs', group: 'navigate' },
 ];
 
-export function CommandPalette() {
+const GROUP_LABEL: Record<Cmd['group'], string> = {
+  navigate: 'navigate',
+  reviews: 'recent reviews',
+};
+
+export interface RecentReviewEntry {
+  id: string;
+  owner: string;
+  repo: string;
+  prNumber: number;
+  status: string;
+}
+
+/**
+ * Subsequence fuzzy match: every char of `needle` appears in order in
+ * `haystack`. Cheap and good enough for a command palette over a handful of
+ * routes + recent reviews. Returns a rough score (lower = tighter match) so
+ * exact substring hits float above scattered subsequence hits.
+ */
+function fuzzyScore(needle: string, haystack: string): number | null {
+  if (!needle) return 0;
+  const idx = haystack.indexOf(needle);
+  if (idx >= 0) return idx; // contiguous substring: best, ranked by position
+  let h = 0;
+  let firstAt = -1;
+  for (let n = 0; n < needle.length; n++) {
+    const c = needle[n]!;
+    let found = -1;
+    for (; h < haystack.length; h++) {
+      if (haystack[h] === c) {
+        found = h;
+        h++;
+        break;
+      }
+    }
+    if (found < 0) return null;
+    if (firstAt < 0) firstAt = found;
+  }
+  // Scattered match ranks below any substring hit (offset by 1000).
+  return 1000 + firstAt;
+}
+
+export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentReviewEntry[] }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
@@ -68,11 +114,31 @@ export function CommandPalette() {
     };
   }, [open, close, router]);
 
+  // Build the full command set: static routes + a jump entry per recent review.
+  const commands = useMemo<Cmd[]>(() => {
+    const reviewCmds: Cmd[] = recentReviews.map((r) => ({
+      id: `review-${r.id}`,
+      label: `jump: ${r.owner}/${r.repo} #${r.prNumber}`,
+      hint: r.status,
+      href: `/app/reviews/${r.id}`,
+      group: 'reviews',
+      keywords: `${r.owner} ${r.repo} ${r.prNumber} #${r.prNumber} ${r.status} ${r.id}`,
+    }));
+    return [...ROUTES, ...reviewCmds];
+  }, [recentReviews]);
+
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
-    if (!needle) return ROUTES;
-    return ROUTES.filter((c) => c.label.toLowerCase().includes(needle) || c.id.includes(needle));
-  }, [q]);
+    if (!needle) return commands;
+    const scored: Array<{ cmd: Cmd; score: number }> = [];
+    for (const cmd of commands) {
+      const hay = `${cmd.label} ${cmd.id} ${cmd.keywords ?? ''}`.toLowerCase();
+      const score = fuzzyScore(needle, hay);
+      if (score != null) scored.push({ cmd, score });
+    }
+    scored.sort((a, b) => a.score - b.score);
+    return scored.map((s) => s.cmd);
+  }, [q, commands]);
 
   if (!open) return null;
 
@@ -81,6 +147,17 @@ export function CommandPalette() {
     if (cmd.href) router.push(cmd.href as any);
     else cmd.action?.();
   }
+
+  // Group the (already-ordered) filtered list into sections, preserving order.
+  const sections: Array<{ group: Cmd['group']; items: Array<{ cmd: Cmd; flatIndex: number }> }> = [];
+  filtered.forEach((cmd, i) => {
+    let sec = sections.find((s) => s.group === cmd.group);
+    if (!sec) {
+      sec = { group: cmd.group, items: [] };
+      sections.push(sec);
+    }
+    sec.items.push({ cmd, flatIndex: i });
+  });
 
   return (
     <div
@@ -110,24 +187,33 @@ export function CommandPalette() {
               if (cmd) run(cmd);
             }
           }}
-          placeholder="type a command..."
+          placeholder="jump to a page or review..."
           className="w-full border-b border-border-subtle bg-bg px-3 py-2.5 font-mono text-xs text-fg outline-none placeholder:text-fg-subtle"
         />
         <ul className="max-h-80 overflow-y-auto py-1">
           {filtered.length === 0 ? (
             <li className="px-3 py-2 font-mono text-xs text-fg-subtle">no matches</li>
           ) : (
-            filtered.map((c, i) => (
-              <li
-                key={c.id}
-                onMouseEnter={() => setIdx(i)}
-                onClick={() => run(c)}
-                className={`flex cursor-pointer items-center justify-between px-3 py-1.5 font-mono text-xs ${
-                  i === idx ? 'bg-accent/15 text-fg' : 'text-fg-muted'
-                }`}
-              >
-                <span>{c.label}</span>
-                {c.hint ? <span className="text-fg-subtle">{c.hint}</span> : null}
+            sections.map((sec) => (
+              <li key={sec.group}>
+                <div className="px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                  {GROUP_LABEL[sec.group]}
+                </div>
+                <ul>
+                  {sec.items.map(({ cmd, flatIndex }) => (
+                    <li
+                      key={cmd.id}
+                      onMouseEnter={() => setIdx(flatIndex)}
+                      onClick={() => run(cmd)}
+                      className={`flex cursor-pointer items-center justify-between px-3 py-1.5 font-mono text-xs ${
+                        flatIndex === idx ? 'bg-accent/15 text-fg' : 'text-fg-muted'
+                      }`}
+                    >
+                      <span className="truncate">{cmd.label}</span>
+                      {cmd.hint ? <span className="ml-2 shrink-0 text-fg-subtle">{cmd.hint}</span> : null}
+                    </li>
+                  ))}
+                </ul>
               </li>
             ))
           )}

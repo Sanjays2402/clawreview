@@ -44,7 +44,7 @@ const GROUPS: ShortcutGroup[] = [
     name: 'palette',
     items: [
       { keys: ['↑', '↓'], label: 'navigate results' },
-      { keys: ['↵'], label: 'run command' },
+      { keys: ['↵'], label: 'run command / jump to review' },
       { keys: ['ctrl', 'n / p'], label: 'navigate results' },
     ],
   },

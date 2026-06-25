@@ -2,9 +2,10 @@ import Link from 'next/link';
 import type { ReactNode } from 'react';
 
 import { Footer } from '@/components/footer';
-import { CommandPalette } from '@/components/command-palette';
+import { CommandPalette, type RecentReviewEntry } from '@/components/command-palette';
 import { ShortcutsOverlay } from '@/components/shortcuts-overlay';
 import { Tooltip } from '@/components/ui/tooltip';
+import { getRecentReviews } from '@/lib/data';
 
 const NAV: Array<{ href: string; label: string }> = [
   { href: '/app', label: 'overview' },
@@ -22,7 +23,19 @@ const NAV: Array<{ href: string; label: string }> = [
   { href: '/app/settings', label: 'settings' },
 ];
 
-export default function AppLayout({ children }: { children: ReactNode }) {
+export default async function AppLayout({ children }: { children: ReactNode }) {
+  // Recent reviews power the command palette's "jump to review" entries.
+  // Reads are best-effort (data layer returns [] on failure) so the chrome
+  // never errors if the API is briefly unreachable.
+  const recent = await getRecentReviews(12);
+  const recentReviews: RecentReviewEntry[] = recent.map((r) => ({
+    id: r.id,
+    owner: r.owner,
+    repo: r.repo,
+    prNumber: r.prNumber,
+    status: r.status,
+  }));
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-border-subtle bg-bg/85 backdrop-blur">
@@ -62,7 +75,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
       </header>
       <main className="mx-auto max-w-[1400px] px-4 py-5">{children}</main>
       <Footer />
-      <CommandPalette />
+      <CommandPalette recentReviews={recentReviews} />
       <ShortcutsOverlay />
     </div>
   );
