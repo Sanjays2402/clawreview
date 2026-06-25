@@ -36,11 +36,19 @@ export default function RootLayout({ children }: { children: ReactNode }) {
 }
 
 function ThemeBoot() {
+  // Resolve the effective theme before first paint so there's no flash:
+  //   'light' / 'dark'  -> explicit choice, applied verbatim
+  //   'system' / unset  -> follow the OS via prefers-color-scheme
+  // Legacy stores only ever wrote 'light' | 'dark', so unset falling through
+  // to system is the only behavior change (and the intended one).
   const script = `
     try {
-      const stored = localStorage.getItem('clawreview-theme');
-      const theme = stored || 'dark';
-      document.documentElement.classList.toggle('dark', theme !== 'light');
+      var stored = localStorage.getItem('clawreview-theme');
+      var dark;
+      if (stored === 'light') dark = false;
+      else if (stored === 'dark') dark = true;
+      else dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      document.documentElement.classList.toggle('dark', dark);
     } catch (_) {}
   `;
   return <script dangerouslySetInnerHTML={{ __html: script }} />;
