@@ -1,13 +1,25 @@
 import Link from 'next/link';
 import { GitPullRequest, Warning, CheckCircle } from '@phosphor-icons/react/dist/ssr';
 
-import { Card, CardBody, CardHeader, EmptyState, Sparkline, Stat } from '@clawreview/ui';
+import { Card, CardBody, CardHeader, EmptyState, Stat } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
+import { InteractiveSparkline } from '@/components/charts/interactive-sparkline';
 import { SeverityRow } from '@/components/review/severity-row';
 import { StatusPill } from '@/components/review/status-pill';
 import { getRecentReviews, getSlaBreaches, getWeeklyStats } from '@/lib/data';
 import { formatMs, formatRelative, formatUsd } from '@/lib/format';
+
+function dayLabels(n: number): string[] {
+  // dailyFindings is oldest-first; the final bucket is today.
+  const out: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    if (i === 0) out.push('today');
+    else if (i === 1) out.push('yesterday');
+    else out.push(`${i}d ago`);
+  }
+  return out;
+}
 
 export default async function AppOverviewPage() {
   const [reviews, weekly, sla] = await Promise.all([
@@ -36,7 +48,14 @@ export default async function AppOverviewPage() {
           </CardHeader>
           <CardBody>
             {weekly.dailyFindings.some((n) => n > 0) ? (
-              <Sparkline data={weekly.dailyFindings} width={600} height={48} className="w-full" />
+              <InteractiveSparkline
+                data={weekly.dailyFindings}
+                labels={dayLabels(weekly.dailyFindings.length)}
+                width={600}
+                height={48}
+                unit="finding"
+                className="w-full"
+              />
             ) : (
               <div className="flex h-12 items-center font-mono text-xs text-fg-subtle">no findings in window.</div>
             )}
