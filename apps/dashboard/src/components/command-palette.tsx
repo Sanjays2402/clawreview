@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 
 interface Cmd {
@@ -80,6 +80,9 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
   const router = useRouter();
+  // Per-row DOM handles (keyed by flat index) so arrow-key nav can keep the
+  // active row scrolled into view on a long fuzzy-filtered list.
+  const rowRefs = useRef<Map<number, HTMLLIElement>>(new Map());
 
   const close = useCallback(() => {
     setOpen(false);
@@ -139,6 +142,16 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     scored.sort((a, b) => a.score - b.score);
     return scored.map((s) => s.cmd);
   }, [q, commands]);
+
+  // Keep the active row visible as arrow-key / ctrl-n/p nav moves `idx`. The
+  // list is a fixed-height scroll container, so `block: 'nearest'` nudges just
+  // enough to reveal the row without yanking the whole palette around. Runs on
+  // every idx change AND whenever the filtered set shrinks/grows under the cursor.
+  useEffect(() => {
+    if (!open) return;
+    const el = rowRefs.current.get(idx);
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [idx, open, filtered]);
 
   if (!open) return null;
 
@@ -203,6 +216,10 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                   {sec.items.map(({ cmd, flatIndex }) => (
                     <li
                       key={cmd.id}
+                      ref={(el) => {
+                        if (el) rowRefs.current.set(flatIndex, el);
+                        else rowRefs.current.delete(flatIndex);
+                      }}
                       onMouseEnter={() => setIdx(flatIndex)}
                       onClick={() => run(cmd)}
                       className={`flex cursor-pointer items-center justify-between px-3 py-1.5 font-mono text-xs ${
