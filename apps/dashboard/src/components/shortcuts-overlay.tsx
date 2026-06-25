@@ -23,12 +23,18 @@ const GROUPS: ShortcutGroup[] = [
     ],
   },
   {
-    name: 'findings list',
+    name: 'lists (reviews / findings)',
     items: [
-      { keys: ['j'], label: 'next finding' },
-      { keys: ['k'], label: 'previous finding' },
+      { keys: ['j'], label: 'next row' },
+      { keys: ['k'], label: 'previous row' },
       { keys: ['g', 'g'], label: 'jump to first' },
       { keys: ['G'], label: 'jump to last' },
+      { keys: ['↵'], label: 'open focused row' },
+    ],
+  },
+  {
+    name: 'findings list',
+    items: [
       { keys: ['e'], label: 'expand / collapse focused' },
       { keys: ['x'], label: 'dismiss focused' },
       { keys: ['r'], label: 'reopen focused' },

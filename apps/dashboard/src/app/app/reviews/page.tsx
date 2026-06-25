@@ -5,6 +5,8 @@ import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusPill } from '@/components/review/status-pill';
+import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { Kbd } from '@/components/ui/kbd';
 import { listReviews, type ReviewListItem, type ReviewStatus } from '@/lib/data';
 import { formatMs, formatRelative, formatUsd } from '@/lib/format';
 
@@ -120,7 +122,22 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
 
   return (
     <div className="space-y-3">
-      <PageHeader title="reviews" description="every review across installations you can see." />
+      <ListKeyboardNav selector="[data-review-row]" enabled={items.length > 0} />
+      <PageHeader
+        title="reviews"
+        description="every review across installations you can see."
+        action={
+          items.length > 0 ? (
+            <div className="hidden items-center gap-1.5 font-mono text-[11px] text-fg-muted sm:flex">
+              <Kbd>j</Kbd>
+              <Kbd>k</Kbd>
+              <span>nav</span>
+              <Kbd>↵</Kbd>
+              <span>open</span>
+            </div>
+          ) : undefined
+        }
+      />
 
       <div className="flex flex-wrap items-center gap-px border-b border-border-subtle font-mono text-[11px]">
         {STATUS_TABS.map((t) => {
@@ -210,9 +227,13 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
                   {items.map((r) => (
-                    <tr key={r.id} className="hover:bg-bg-subtle/40">
+                    <tr key={r.id} className="group/row hover:bg-bg-subtle/40 focus-within:bg-accent/[0.07]">
                       <td className="px-3 py-1.5">
-                        <Link href={`/app/reviews/${r.id}` as any} className="block">
+                        <Link
+                          href={`/app/reviews/${r.id}` as any}
+                          data-review-row
+                          className="block rounded-sm outline-none ring-accent/60 focus-visible:ring-1"
+                        >
                           <div className="text-fg">
                             {r.owner}/{r.repo} <span className="text-fg-subtle">#</span>{r.prNumber}
                           </div>
