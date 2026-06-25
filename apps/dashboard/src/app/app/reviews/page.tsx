@@ -7,8 +7,9 @@ import { PageHeader } from '@/components/layout/page-header';
 import { StatusPill } from '@/components/review/status-pill';
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
 import { Kbd } from '@/components/ui/kbd';
+import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { listReviews, type ReviewListItem, type ReviewStatus } from '@/lib/data';
-import { formatMs, formatRelative, formatUsd } from '@/lib/format';
+import { formatMs, formatUsd } from '@/lib/format';
 
 const STATUS_TABS: Array<{ key: ReviewStatus | 'all'; label: string }> = [
   { key: 'all', label: 'all' },
@@ -247,7 +248,9 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                       </td>
                       <td className="tabular-nums text-fg-muted">{formatMs(r.durationMs)}</td>
                       <td className="tabular-nums text-fg-muted">{formatUsd(r.totalCostUsd)}</td>
-                      <td className="px-3 text-right tabular-nums text-fg-muted">{formatRelative(r.createdAt)}</td>
+                      <td className="px-3 text-right tabular-nums text-fg-muted">
+                        <LiveRelativeTime iso={r.createdAt} />
+                      </td>
                     </tr>
                   ))}
                 </tbody>

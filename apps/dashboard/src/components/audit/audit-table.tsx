@@ -4,8 +4,8 @@ import { ArrowUp, ArrowDown, X } from '@phosphor-icons/react/dist/ssr';
 import { EmptyState, LockIcon } from '@clawreview/ui';
 
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import type { AuditEntry } from '@/lib/data';
-import { formatRelative } from '@/lib/format';
 
 export type AuditSortKey = 'when' | 'actor' | 'action';
 export type AuditSortDir = 'asc' | 'desc';
@@ -210,7 +210,7 @@ export function AuditTable({ entries, action, query, sortKey, sortDir }: Props) 
                       title={new Date(e.createdAt).toLocaleString()}
                       className="block rounded-sm tabular-nums text-fg-muted outline-none ring-accent/60 focus-visible:ring-1"
                     >
-                      {formatRelative(e.createdAt)}
+                      <LiveRelativeTime iso={e.createdAt} />
                     </span>
                   </td>
                   <td className="font-medium text-fg">{e.actorLogin}</td>
