@@ -1,10 +1,15 @@
-import Link from 'next/link';
-import { Timer, ArrowRight } from '@phosphor-icons/react/dist/ssr';
+import { Timer } from '@phosphor-icons/react/dist/ssr';
 
-import { Card, CardBody, CardHeader, EmptyState, SeverityBadge, Stat } from '@clawreview/ui';
+import { Card, CardBody, CardHeader, EmptyState, Stat } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
 import { PolicyForm } from '@/components/sla/policy-form';
+import {
+  SlaBreachesTable,
+  parseSlaSort,
+  parseSlaDir,
+  parseSlaSeverity,
+} from '@/components/sla/sla-breaches-table';
 import { getSlaBreaches, type SlaPolicy } from '@/lib/data';
 
 const POLICY_KEYS = ['critical_hours', 'high_hours', 'medium_hours', 'low_hours', 'nit_hours'] as const;
@@ -31,6 +36,9 @@ export default async function SlaPage({ searchParams }: PageProps) {
   const overrides: Partial<SlaPolicy> = {};
   const qs = new URLSearchParams();
   qs.set('limit', '200');
+  // Policy-override params, echoed back into every in-page filter/sort link so
+  // the custom remediation window survives a column sort or severity tab click.
+  const policyParams: Record<string, string> = {};
   const keyToField: Record<(typeof POLICY_KEYS)[number], keyof SlaPolicy> = {
     critical_hours: 'critical',
     high_hours: 'high',
@@ -43,8 +51,13 @@ export default async function SlaPage({ searchParams }: PageProps) {
     if (v !== undefined) {
       overrides[keyToField[k]] = v;
       qs.set(k, String(v));
+      policyParams[k] = String(v);
     }
   }
+
+  const severity = parseSlaSeverity(typeof sp.sev === 'string' ? sp.sev : undefined);
+  const sortKey = parseSlaSort(typeof sp.sort === 'string' ? sp.sort : undefined);
+  const sortDir = parseSlaDir(typeof sp.dir === 'string' ? sp.dir : undefined, 'desc');
 
   const report = await getSlaBreaches(qs.toString());
 
@@ -82,90 +95,22 @@ export default async function SlaPage({ searchParams }: PageProps) {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2 text-sm font-medium">
-              <Timer size={16} weight="duotone" className="text-fg-muted" />
-              Breached findings
-            </div>
-            <div className="text-xs tabular-nums text-fg-muted">
-              showing {breaches.length} of {report.totalBreaches}
-            </div>
+          <div className="flex items-center gap-2 text-sm font-medium">
+            <Timer size={16} weight="duotone" className="text-fg-muted" />
+            Breached findings
           </div>
         </CardHeader>
         <CardBody>
-          {breaches.length === 0 ? (
-            <EmptyState
-              title="No SLA breaches"
-              description={
-                customized
-                  ? 'No open findings exceed the custom policy you applied.'
-                  : 'Every open finding is within its remediation window. Nice.'
-              }
-            />
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-sm">
-                <thead>
-                  <tr className="border-b border-border-subtle text-left text-[10px] uppercase tracking-wide text-fg-muted">
-                    <th className="py-2 pr-3 font-medium">Severity</th>
-                    <th className="py-2 pr-3 font-medium">Finding</th>
-                    <th className="py-2 pr-3 font-medium">Repo / PR</th>
-                    <th className="py-2 pr-3 font-medium">Location</th>
-                    <th className="py-2 pr-3 text-right font-medium">Age</th>
-                    <th className="py-2 pr-3 text-right font-medium">SLA</th>
-                    <th className="py-2 pr-3 text-right font-medium">Overdue</th>
-                    <th className="py-2 pl-3 font-medium" aria-label="open" />
-                  </tr>
-                </thead>
-                <tbody>
-                  {breaches.map((b) => {
-                    const overdue = b.overdueHours ?? Math.max(0, b.ageHours - b.slaHours);
-                    return (
-                      <tr key={`${b.reviewId}:${b.findingId}`} className="border-b border-border-subtle/60 last:border-0">
-                        <td className="py-2 pr-3 align-top">
-                          <SeverityBadge severity={b.severity} />
-                        </td>
-                        <td className="py-2 pr-3 align-top">
-                          <Link
-                            href={`/app/reviews/${encodeURIComponent(b.reviewId)}/findings#${encodeURIComponent(b.findingId)}` as any}
-                            className="font-medium hover:underline"
-                          >
-                            {b.title}
-                          </Link>
-                        </td>
-                        <td className="py-2 pr-3 align-top text-fg-muted">
-                          <span className="tabular-nums">{b.owner}/{b.repo}</span>
-                          <span className="px-1 text-fg-muted/60">#</span>
-                          <span className="tabular-nums">{b.prNumber}</span>
-                        </td>
-                        <td className="py-2 pr-3 align-top text-xs text-fg-muted">
-                          {b.file ? (
-                            <span className="tabular-nums">{b.file}{typeof b.startLine === 'number' ? `:${b.startLine}` : ''}</span>
-                          ) : (
-                            <span>unknown</span>
-                          )}
-                        </td>
-                        <td className="py-2 pr-3 text-right align-top tabular-nums">{formatHours(b.ageHours)}</td>
-                        <td className="py-2 pr-3 text-right align-top tabular-nums text-fg-muted">{formatHours(b.slaHours)}</td>
-                        <td className="py-2 pr-3 text-right align-top tabular-nums font-medium text-rose-500">
-                          {formatHours(overdue)}
-                        </td>
-                        <td className="py-2 pl-3 align-top">
-                          <Link
-                            href={`/app/reviews/${encodeURIComponent(b.reviewId)}` as any}
-                            className="inline-flex h-7 items-center gap-1 rounded-md border border-border bg-bg px-2 text-xs text-fg-muted hover:bg-bg-muted"
-                          >
-                            Open
-                            <ArrowRight size={12} weight="bold" />
-                          </Link>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
+          <SlaBreachesTable
+            breaches={breaches}
+            totalBreaches={report.totalBreaches}
+            severity={severity}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            policyParams={policyParams}
+            customized={customized}
+            formatHours={formatHours}
+          />
         </CardBody>
       </Card>
 
