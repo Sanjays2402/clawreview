@@ -8,18 +8,7 @@ import { InteractiveSparkline } from '@/components/charts/interactive-sparkline'
 import { SeverityRow } from '@/components/review/severity-row';
 import { StatusPill } from '@/components/review/status-pill';
 import { getRecentReviews, getSlaBreaches, getWeeklyStats } from '@/lib/data';
-import { formatMs, formatRelative, formatUsd } from '@/lib/format';
-
-function dayLabels(n: number): string[] {
-  // dailyFindings is oldest-first; the final bucket is today.
-  const out: string[] = [];
-  for (let i = n - 1; i >= 0; i--) {
-    if (i === 0) out.push('today');
-    else if (i === 1) out.push('yesterday');
-    else out.push(`${i}d ago`);
-  }
-  return out;
-}
+import { dayLabels, formatMs, formatRelative, formatUsd } from '@/lib/format';
 
 export default async function AppOverviewPage() {
   const [reviews, weekly, sla] = await Promise.all([

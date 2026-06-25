@@ -28,3 +28,19 @@ export function formatRelative(iso?: string): string {
 export function formatPct(n: number): string {
   return `${(n * 100).toFixed(n < 0.1 ? 1 : 0)}%`;
 }
+
+/**
+ * Per-bucket day labels for an oldest-first daily series of length `n`.
+ * The final bucket is "today", the one before it "yesterday", and the rest
+ * "Nd ago". Shared by the overview + trends sparklines so their hover
+ * readouts speak the same language.
+ */
+export function dayLabels(n: number): string[] {
+  const out: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    if (i === 0) out.push('today');
+    else if (i === 1) out.push('yesterday');
+    else out.push(`${i}d ago`);
+  }
+  return out;
+}

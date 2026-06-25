@@ -1,12 +1,13 @@
 import { ChartLineUp } from '@phosphor-icons/react/dist/ssr';
 
-import { Card, CardBody, CardHeader, EmptyState, Sparkline, Stat } from '@clawreview/ui';
+import { Card, CardBody, CardHeader, EmptyState, Stat } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
+import { InteractiveSparkline } from '@/components/charts/interactive-sparkline';
 import { SeverityRow } from '@/components/review/severity-row';
 import { WindowForm } from '@/components/trends/window-form';
 import { getWeeklyStats, type Severity } from '@/lib/data';
-import { formatMs, formatUsd } from '@/lib/format';
+import { dayLabels, formatMs, formatUsd } from '@/lib/format';
 
 const WINDOW_PRESETS = [7, 14, 30, 60, 90] as const;
 
@@ -57,7 +58,14 @@ export default async function TrendsPage({ searchParams }: PageProps) {
           </CardHeader>
           <CardBody>
             {dailyHasData ? (
-              <Sparkline data={stats.dailyFindings} width={600} height={80} className="w-full" />
+              <InteractiveSparkline
+                data={stats.dailyFindings}
+                labels={dayLabels(stats.dailyFindings.length)}
+                width={600}
+                height={80}
+                unit="finding"
+                className="w-full"
+              />
             ) : (
               <div className="flex h-20 items-center text-xs text-fg-subtle">
                 No findings landed in this window.
