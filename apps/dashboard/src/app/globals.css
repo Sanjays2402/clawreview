@@ -39,6 +39,28 @@
     background: hsl(var(--accent) / 0.4);
     color: hsl(var(--fg));
   }
+
+  /*
+   * Accessibility: honor the OS "reduce motion" setting. Collapses every
+   * animation (fade-in, skeleton shimmer, agent-scrub, tooltip, palette) and
+   * transition to a near-instant, single-frame change, and disables CSS
+   * smooth scrolling. Kept as !important so it overrides Tailwind's utility
+   * animations/transitions wherever they're applied. JS-driven smooth scroll
+   * (scrollIntoView) is gated separately via lib/motion.ts.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+    html {
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
 @layer components {

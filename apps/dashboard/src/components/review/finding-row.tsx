@@ -6,6 +6,7 @@ import { ArrowCounterClockwise, X, CaretRight, LinkSimple, Check } from '@phosph
 import { StatusPill } from './status-pill';
 import { Tooltip } from '@/components/ui/tooltip';
 import type { FindingDto } from '@/lib/data';
+import { motionScrollBehavior } from '@/lib/motion';
 import { dismissFindingAction, reopenFindingAction } from '@/app/app/reviews/actions';
 
 const SEV_BAR: Record<string, string> = {
@@ -52,7 +53,7 @@ export function FindingRow({
     const el = ref.current;
     if (!el) return;
     const t = setTimeout(() => {
-      el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.scrollIntoView({ block: 'center', behavior: motionScrollBehavior() });
       el.focus();
     }, 80);
     return () => clearTimeout(t);
