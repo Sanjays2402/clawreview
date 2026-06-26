@@ -188,12 +188,21 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             setIdx(0);
           }}
           onKeyDown={(e) => {
+            const len = filtered.length;
             if (e.key === 'ArrowDown' || (e.key === 'n' && e.ctrlKey)) {
               e.preventDefault();
-              setIdx((i) => Math.min(i + 1, filtered.length - 1));
+              // Wrap past the last row back to the first (standard palette feel).
+              setIdx((i) => (len === 0 ? 0 : (i + 1) % len));
             } else if (e.key === 'ArrowUp' || (e.key === 'p' && e.ctrlKey)) {
               e.preventDefault();
-              setIdx((i) => Math.max(i - 1, 0));
+              // Wrap before the first row to the last.
+              setIdx((i) => (len === 0 ? 0 : (i - 1 + len) % len));
+            } else if (e.key === 'Home') {
+              e.preventDefault();
+              setIdx(0);
+            } else if (e.key === 'End') {
+              e.preventDefault();
+              setIdx(len === 0 ? 0 : len - 1);
             } else if (e.key === 'Enter') {
               e.preventDefault();
               const cmd = filtered[idx];
@@ -236,7 +245,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           )}
         </ul>
         <div className="flex items-center justify-between border-t border-border-subtle bg-bg-subtle/40 px-3 py-1.5 font-mono text-[10px] text-fg-subtle">
-          <span>↑↓ navigate · ↵ select · esc close</span>
+          <span>↑↓ wrap · ⤒⤓ ends · ↵ select · esc close</span>
           <span>⌘K</span>
         </div>
       </div>
