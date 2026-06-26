@@ -5,6 +5,7 @@ import { EmptyState, SeverityBadge } from '@clawreview/ui';
 
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
 import { StickyBar } from '@/components/ui/sticky-bar';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import type { Severity, SlaBreach } from '@/lib/data';
 
 export type SlaSortKey = 'severity' | 'age' | 'sla' | 'overdue';
@@ -196,6 +197,12 @@ export function SlaBreachesTable({
             customized
               ? 'no open findings exceed the custom policy you applied.'
               : 'every open finding is within its remediation window. nice.'
+          }
+          action={
+            <EmptyStateActions
+              primary={{ label: 'view all reviews', href: '/app/reviews' }}
+              secondary={{ label: 'sla docs', href: '/docs', external: true }}
+            />
           }
         />
       ) : items.length === 0 ? (

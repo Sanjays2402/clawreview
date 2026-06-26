@@ -8,6 +8,7 @@ import { StatusPill } from '@/components/review/status-pill';
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
 import { Kbd } from '@/components/ui/kbd';
 import { StickyBar } from '@/components/ui/sticky-bar';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { listReviews, type ReviewListItem, type ReviewStatus } from '@/lib/data';
 import { formatMs, formatUsd } from '@/lib/format';
@@ -197,8 +198,25 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
             <div className="p-3">
               <EmptyState
                 icon={<GitPullRequest size={20} weight="duotone" />}
-                title="no matches"
-                description="try a different status, or open a pr on an installed repo."
+                title={chips.length > 0 ? 'no matches' : 'no reviews yet'}
+                description={
+                  chips.length > 0
+                    ? 'no reviews match the current filters.'
+                    : 'install the github app on a repo, then open a pr — the first review lands in seconds.'
+                }
+                action={
+                  chips.length > 0 ? (
+                    <EmptyStateActions
+                      primary={{ label: 'clear filters', href: '/app/reviews' }}
+                      secondary={{ label: 'view docs', href: '/docs', external: true }}
+                    />
+                  ) : (
+                    <EmptyStateActions
+                      primary={{ label: 'configure github app', href: '/app/installations' }}
+                      secondary={{ label: 'view docs', href: '/docs', external: true }}
+                    />
+                  )
+                }
               />
             </div>
           ) : (

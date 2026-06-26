@@ -5,6 +5,7 @@ import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
 import { StickyBar } from '@/components/ui/sticky-bar';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import { getRepoHealthList, type RepoHealth } from '@/lib/data';
 import { formatRelative } from '@/lib/format';
 
@@ -170,8 +171,24 @@ export default async function ReposPage({ searchParams }: PageProps) {
             <div className="p-3">
               <EmptyState
                 icon={<GitBranch size={20} weight="duotone" />}
-                title="no repos"
-                description="once a pull request opens on an installed repo, its health shows up here."
+                title={status === 'all' ? 'no repos' : `no ${status} repos`}
+                description={
+                  status === 'all'
+                    ? 'once a pull request opens on an installed repo, its health shows up here.'
+                    : 'no tracked repos are in this state right now.'
+                }
+                action={
+                  status === 'all' ? (
+                    <EmptyStateActions
+                      primary={{ label: 'configure github app', href: '/app/installations' }}
+                      secondary={{ label: 'view docs', href: '/docs', external: true }}
+                    />
+                  ) : (
+                    <EmptyStateActions
+                      primary={{ label: 'show all repos', href: '/app/repos' }}
+                    />
+                  )
+                }
               />
             </div>
           ) : (
