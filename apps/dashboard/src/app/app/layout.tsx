@@ -3,6 +3,7 @@ import type { ReactNode } from 'react';
 
 import { Footer } from '@/components/footer';
 import { CommandPalette, type RecentReviewEntry } from '@/components/command-palette';
+import { GlobalNav } from '@/components/global-nav';
 import { ShortcutsOverlay } from '@/components/shortcuts-overlay';
 import { Tooltip } from '@/components/ui/tooltip';
 import { getRecentReviews } from '@/lib/data';
@@ -76,6 +77,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       <main className="mx-auto max-w-[1400px] px-4 py-5">{children}</main>
       <Footer />
       <CommandPalette recentReviews={recentReviews} />
+      <GlobalNav />
       <ShortcutsOverlay />
     </div>
   );

@@ -23,6 +23,17 @@ const GROUPS: ShortcutGroup[] = [
     ],
   },
   {
+    name: 'go to (g then key)',
+    items: [
+      { keys: ['g', 'o'], label: 'overview' },
+      { keys: ['g', 'r'], label: 'reviews' },
+      { keys: ['g', 'p'], label: 'repos' },
+      { keys: ['g', 't'], label: 'trends' },
+      { keys: ['g', 's'], label: 'sla' },
+      { keys: ['g', 'a'], label: 'audit' },
+    ],
+  },
+  {
     name: 'lists (reviews / findings)',
     items: [
       { keys: ['j'], label: 'next row' },
