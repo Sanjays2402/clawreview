@@ -6,8 +6,10 @@ import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 import { PageHeader } from '@/components/layout/page-header';
 import { StickyBar } from '@/components/ui/sticky-bar';
 import { EmptyStateActions } from '@/components/ui/empty-state-actions';
+import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { Kbd } from '@/components/ui/kbd';
+import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { getRepoHealthList, type RepoHealth } from '@/lib/data';
-import { formatRelative } from '@/lib/format';
 
 type RepoStatus = RepoHealth['status'];
 type SortKey = 'repo' | 'failures' | 'lastReview';
@@ -112,9 +114,21 @@ export default async function ReposPage({ searchParams }: PageProps) {
 
   return (
     <div className="space-y-3">
+      <ListKeyboardNav selector="[data-repo-row]" enabled={items.length > 0} />
       <PageHeader
         title="repos"
         description="health, recent activity, pause controls for tracked repos."
+        action={
+          items.length > 0 ? (
+            <div className="hidden items-center gap-1.5 font-mono text-[11px] text-fg-muted sm:flex">
+              <Kbd>j</Kbd>
+              <Kbd>k</Kbd>
+              <span>nav</span>
+              <Kbd>↵</Kbd>
+              <span>open</span>
+            </div>
+          ) : undefined
+        }
       />
 
       <StickyBar>
@@ -211,9 +225,13 @@ export default async function ReposPage({ searchParams }: PageProps) {
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
                   {items.map((r) => (
-                    <tr key={`${r.owner}/${r.repo}`} className="hover:bg-bg-subtle/40">
+                    <tr key={`${r.owner}/${r.repo}`} className="group/row hover:bg-bg-subtle/40 focus-within:bg-accent/[0.07]">
                       <td className="px-3 py-1.5">
-                        <Link href={`/app/repos/${repoSlug(r)}` as any} className="block">
+                        <Link
+                          href={`/app/repos/${repoSlug(r)}` as any}
+                          data-repo-row
+                          className="block rounded-sm outline-none ring-accent/60 focus-visible:ring-1"
+                        >
                           <div className="text-fg">
                             {r.owner}<span className="text-fg-subtle">/</span>{r.repo}
                           </div>
@@ -233,7 +251,11 @@ export default async function ReposPage({ searchParams }: PageProps) {
                         <span className={r.failures > 0 ? 'text-severity-high' : 'text-fg-subtle'}>{r.failures}</span>
                       </td>
                       <td className="tabular-nums text-fg-muted">
-                        {r.lastReviewAt ? formatRelative(r.lastReviewAt) : 'never'}
+                        {r.lastReviewAt ? (
+                          <LiveRelativeTime iso={r.lastReviewAt} />
+                        ) : (
+                          <span className="text-fg-subtle">never</span>
+                        )}
                       </td>
                       <td className="px-3 text-right">
                         <Link
