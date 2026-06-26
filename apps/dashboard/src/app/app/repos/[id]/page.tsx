@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { ArrowLeft, GitPullRequest, PauseCircle, PlayCircle } from '@phosphor-icons/react/dist/ssr';
+import { ArrowLeft, GitPullRequest } from '@phosphor-icons/react/dist/ssr';
 
 import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 
@@ -15,6 +15,7 @@ import { getRepoHealth, listReviews, type RepoHealth } from '@/lib/data';
 import { formatMs, formatUsd } from '@/lib/format';
 
 import { pauseRepoAction, resumeRepoAction } from './actions';
+import { RepoPauseControls } from './repo-pause-controls';
 
 function parseSlug(id: string): { owner: string; repo: string } | null {
   const idx = id.indexOf('__');
@@ -131,42 +132,13 @@ export default async function RepoDetail({ params }: { params: Promise<{ id: str
           </div>
         </CardHeader>
         <CardBody>
-          {isPaused ? (
-            <form action={resumeRepoAction} className="flex flex-wrap items-center gap-3">
-              <input type="hidden" name="owner" value={slug.owner} />
-              <input type="hidden" name="repo" value={slug.repo} />
-              <p className="font-mono text-[11px] text-fg-muted">
-                reviews are paused on this repo. new pull requests will not trigger runs until you resume.
-              </p>
-              <button
-                type="submit"
-                className="inline-flex items-center gap-1.5 rounded-sm bg-fg px-2.5 py-1 font-mono text-[11px] font-medium lowercase text-bg hover:opacity-90"
-              >
-                <PlayCircle size={14} weight="duotone" /> resume
-              </button>
-            </form>
-          ) : (
-            <form
-              action={pauseRepoAction}
-              className="flex flex-col gap-2 sm:flex-row sm:items-center"
-            >
-              <input type="hidden" name="owner" value={slug.owner} />
-              <input type="hidden" name="repo" value={slug.repo} />
-              <input
-                name="reason"
-                type="text"
-                maxLength={280}
-                placeholder="why are you pausing? (optional)"
-                className="h-7 w-full flex-1 rounded-sm border border-border bg-bg px-2 font-mono text-[11px] text-fg placeholder:text-fg-subtle focus:border-accent focus:outline-none"
-              />
-              <button
-                type="submit"
-                className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg-subtle px-2.5 py-1 font-mono text-[11px] font-medium lowercase text-fg-muted hover:bg-bg-muted hover:text-fg"
-              >
-                <PauseCircle size={14} weight="duotone" /> pause
-              </button>
-            </form>
-          )}
+          <RepoPauseControls
+            owner={slug.owner}
+            repo={slug.repo}
+            isPaused={isPaused}
+            pauseAction={pauseRepoAction}
+            resumeAction={resumeRepoAction}
+          />
         </CardBody>
       </Card>
 
