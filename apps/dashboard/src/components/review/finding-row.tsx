@@ -5,6 +5,7 @@ import { ArrowCounterClockwise, X, CaretRight, LinkSimple, Check } from '@phosph
 
 import { StatusPill } from './status-pill';
 import { Tooltip } from '@/components/ui/tooltip';
+import { toast } from '@/components/ui/toaster';
 import type { FindingDto } from '@/lib/data';
 import { motionScrollBehavior } from '@/lib/motion';
 import { dismissFindingAction, reopenFindingAction } from '@/app/app/reviews/actions';
@@ -64,6 +65,9 @@ export function FindingRow({
     const done = () => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1400);
+      // Also fire a corner toast: the inline check is invisible once this row
+      // has scrolled off, so the always-visible toast is the real confirmation.
+      toast('deep link copied');
     };
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(url).then(done).catch(done);

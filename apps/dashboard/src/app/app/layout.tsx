@@ -5,6 +5,7 @@ import { Footer } from '@/components/footer';
 import { CommandPalette, type RecentReviewEntry } from '@/components/command-palette';
 import { GlobalNav } from '@/components/global-nav';
 import { ShortcutsOverlay } from '@/components/shortcuts-overlay';
+import { Toaster } from '@/components/ui/toaster';
 import { Tooltip } from '@/components/ui/tooltip';
 import { getRecentReviews } from '@/lib/data';
 
@@ -79,6 +80,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
       <CommandPalette recentReviews={recentReviews} />
       <GlobalNav />
       <ShortcutsOverlay />
+      <Toaster />
     </div>
   );
 }
