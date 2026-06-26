@@ -5,6 +5,7 @@ import { EmptyState, LockIcon } from '@clawreview/ui';
 
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
 import { LiveRelativeTime } from '@/components/ui/live-relative-time';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import type { AuditEntry } from '@/lib/data';
 
 export type AuditSortKey = 'when' | 'actor' | 'action';
@@ -108,6 +109,12 @@ export function AuditTable({ entries, action, query, sortKey, sortDir }: Props) 
         icon={<LockIcon size={24} />}
         title="no entries yet"
         description="sign-in events, dismissals, and config changes land here."
+        action={
+          <EmptyStateActions
+            primary={{ label: 'view reviews', href: '/app/reviews' }}
+            secondary={{ label: 'view docs', href: '/docs', external: true }}
+          />
+        }
       />
     );
   }

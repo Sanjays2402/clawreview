@@ -2,6 +2,7 @@ import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 import { Plugs } from '@phosphor-icons/react/dist/ssr';
 
 import { PageHeader } from '@/components/layout/page-header';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import { getReadiness } from '@/lib/data';
 
 function tone(ok: boolean | undefined): string {
@@ -78,6 +79,12 @@ export default async function IntegrationsPage() {
               icon={<Plugs size={28} weight="duotone" />}
               title="No providers reachable"
               description="Set LLM_OPENAI_API_KEY, LLM_COPILOT_API_KEY, or point LLM_HERMES_BASE_URL at a local model."
+              action={
+                <EmptyStateActions
+                  primary={{ label: 'configure providers', href: '/docs', external: true }}
+                  secondary={{ label: 'view config', href: '/app/config' }}
+                />
+              }
             />
           ) : (
             <table className="w-full text-sm">
