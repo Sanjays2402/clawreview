@@ -1,3 +1,6 @@
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 
 export interface StickyBarProps {
@@ -12,6 +15,12 @@ export interface StickyBarProps {
   border?: boolean;
 }
 
+/** Convert a Tailwind `top-N` class to its pixel value (N * 4px). */
+function topOffsetPx(top: string): number {
+  const m = /(?:^|\s)top-(\d+)(?:\s|$)/.exec(top.trim());
+  return m ? Number(m[1]) * 4 : 40;
+}
+
 /**
  * A filter / tab strip that pins under the app header when the page scrolls,
  * so the controls stay reachable on long dense lists instead of scrolling off
@@ -23,16 +32,40 @@ export interface StickyBarProps {
  * `backdrop-blur` keeps the pinned controls legible over the rows sliding
  * underneath, matching the header's own blur treatment.
  *
- * No negative margins: the strip already spans its container's content width,
- * so rows passing beneath are fully covered; the container's gutter has no
- * content to bleed through.
+ * Stuck-state shadow: CSS alone can't style "position: sticky is currently
+ * pinned", so we observe the bar with an IntersectionObserver whose root top
+ * is shrunk to the stick line (`top` + 1px). While the bar sits below the line
+ * it intersects fully (ratio 1, flat); the instant it pins at the line its top
+ * edge clips past the shrunk root (ratio < 1) and we raise a soft bottom
+ * shadow to lift the pinned controls off the content scrolling beneath. No
+ * sentinel sibling -> the single-div layout (and its `space-y` rhythm) is
+ * byte-for-byte unchanged.
  */
 export function StickyBar({ children, className, top = 'top-10', border = true }: StickyBarProps) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [stuck, setStuck] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    const offset = topOffsetPx(top);
+    const obs = new IntersectionObserver(
+      ([entry]) => {
+        if (entry) setStuck(entry.intersectionRatio < 1);
+      },
+      { threshold: [1], rootMargin: `-${offset + 1}px 0px 0px 0px` },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [top]);
+
   return (
     <div
-      className={`sticky z-20 ${top} bg-bg/80 backdrop-blur supports-[backdrop-filter]:bg-bg/60 ${
+      ref={ref}
+      data-stuck={stuck ? '' : undefined}
+      className={`sticky z-20 ${top} bg-bg/80 backdrop-blur transition-shadow supports-[backdrop-filter]:bg-bg/60 ${
         border ? 'border-b border-border-subtle' : ''
-      } ${className ?? ''}`}
+      } ${stuck ? 'shadow-[0_6px_16px_-10px_rgba(0,0,0,0.55)]' : ''} ${className ?? ''}`}
     >
       {children}
     </div>
