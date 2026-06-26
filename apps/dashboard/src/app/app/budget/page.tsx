@@ -5,8 +5,16 @@ import { Card, CardBody, CardHeader, EmptyState, Stat } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
 import { BudgetLookupForm } from '@/components/budget/budget-lookup-form';
-import { getInstallations, getRepoHealthList, getWeeklyStats } from '@/lib/data';
-import { formatRelative, formatUsd } from '@/lib/format';
+import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { Kbd } from '@/components/ui/kbd';
+import { LiveRelativeTime } from '@/components/ui/live-relative-time';
+import { EmptyStateActions } from '@/components/ui/empty-state-actions';
+import { getInstallations, getRepoHealthList, getWeeklyStats, type RepoHealth } from '@/lib/data';
+import { formatUsd } from '@/lib/format';
+
+function repoSlug(h: RepoHealth): string {
+  return `${h.owner}__${h.repo}`;
+}
 
 export default async function BudgetPage() {
   const [installs, health, weekly] = await Promise.all([
@@ -21,6 +29,7 @@ export default async function BudgetPage() {
 
   return (
     <div className="space-y-3">
+      <ListKeyboardNav selector="[data-health-row]" enabled={health.length > 0} />
       <PageHeader
         title="budget + health"
         description="per-installation spend over last 30d. live health for every monitored repo."
@@ -44,6 +53,12 @@ export default async function BudgetPage() {
                 icon={<ShieldCheck size={28} weight="duotone" />}
                 title="No installations on this account"
                 description="Install the ClawReview GitHub App on an org or user to start tracking spend here."
+                action={
+                  <EmptyStateActions
+                    primary={{ label: 'install on github', href: '/login' }}
+                    secondary={{ label: 'view installations', href: '/app/installations' }}
+                  />
+                }
               />
             ) : (
               <div className="overflow-x-auto">
@@ -107,9 +122,18 @@ export default async function BudgetPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Repo health</div>
-            <div className="text-xs text-fg-muted">{health.length} tracked</div>
+          <div className="text-sm font-medium">Repo health</div>
+          <div className="flex items-center gap-3">
+            {health.length > 0 ? (
+              <span className="hidden items-center gap-1.5 font-mono text-[11px] text-fg-muted sm:inline-flex">
+                <Kbd>j</Kbd>
+                <Kbd>k</Kbd>
+                <span>nav</span>
+                <Kbd>↵</Kbd>
+                <span>open</span>
+              </span>
+            ) : null}
+            <span className="text-xs text-fg-muted">{health.length} tracked</span>
           </div>
         </CardHeader>
         <CardBody>
@@ -118,26 +142,44 @@ export default async function BudgetPage() {
               icon={<ShieldCheck size={28} weight="duotone" />}
               title="No repos tracked yet"
               description="Repo health updates as reviews land. Open a PR on an installed repo to populate this list."
+              action={
+                <EmptyStateActions
+                  primary={{ label: 'view repos', href: '/app/repos' }}
+                  secondary={{ label: 'view docs', href: '/docs', external: true }}
+                />
+              }
             />
           ) : (
             <ul className="divide-y divide-border-subtle">
               {health.map((h) => (
-                <li key={`${h.owner}/${h.repo}`} className="grid grid-cols-12 items-center gap-3 py-3">
-                  <div className="col-span-12 sm:col-span-5">
-                    <div className="font-medium text-fg">{h.owner}/{h.repo}</div>
-                    {h.pauseReason ? (
-                      <div className="text-xs text-fg-muted">Paused: {h.pauseReason}</div>
-                    ) : null}
-                  </div>
-                  <div className="col-span-4 sm:col-span-2">
-                    <HealthPill status={h.status} />
-                  </div>
-                  <div className="col-span-4 text-xs text-fg-muted sm:col-span-2">
-                    {h.failures} failure{h.failures === 1 ? '' : 's'}
-                  </div>
-                  <div className="col-span-4 text-right text-xs text-fg-muted sm:col-span-3">
-                    {h.lastReviewAt ? `last ${formatRelative(h.lastReviewAt)}` : 'never reviewed'}
-                  </div>
+                <li key={`${h.owner}/${h.repo}`} className="focus-within:bg-accent/[0.07]">
+                  <Link
+                    href={`/app/repos/${repoSlug(h)}` as any}
+                    data-health-row
+                    className="grid grid-cols-12 items-center gap-3 rounded-sm px-1 py-3 outline-none ring-accent/60 hover:bg-bg-subtle/40 focus-visible:ring-1"
+                  >
+                    <div className="col-span-12 sm:col-span-5">
+                      <div className="font-medium text-fg">{h.owner}/{h.repo}</div>
+                      {h.pauseReason ? (
+                        <div className="text-xs text-fg-muted">Paused: {h.pauseReason}</div>
+                      ) : null}
+                    </div>
+                    <div className="col-span-4 sm:col-span-2">
+                      <HealthPill status={h.status} />
+                    </div>
+                    <div className="col-span-4 text-xs text-fg-muted sm:col-span-2">
+                      {h.failures} failure{h.failures === 1 ? '' : 's'}
+                    </div>
+                    <div className="col-span-4 text-right text-xs text-fg-muted sm:col-span-3">
+                      {h.lastReviewAt ? (
+                        <>
+                          last <LiveRelativeTime iso={h.lastReviewAt} />
+                        </>
+                      ) : (
+                        'never reviewed'
+                      )}
+                    </div>
+                  </Link>
                 </li>
               ))}
             </ul>
