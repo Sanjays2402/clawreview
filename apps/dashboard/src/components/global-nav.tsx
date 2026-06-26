@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 /**
@@ -22,6 +22,10 @@ import { useRouter } from 'next/navigation';
  *    sequence, so a stray `g` can't silently arm a later navigation.
  *  - Typing in an input / textarea / select / contentEditable is ignored,
  *    and modifier-chord keys (cmd-k etc.) pass straight through.
+ *  - While the sequence is armed a tiny "g …" corner toast gives the
+ *    two-key nav feedback (Linear shows the pending prefix), so a user who
+ *    pressed `g` knows the dashboard is waiting for the second key. It
+ *    auto-dismisses on the second key or the 900ms timeout.
  */
 const NAV_MAP: Record<string, string> = {
   o: '/app',
@@ -40,12 +44,35 @@ const SEQUENCE_WINDOW_MS = 900;
 
 export function GlobalNav() {
   const router = useRouter();
+  const [armed, setArmed] = useState(false);
+  const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     let pendingAt = 0;
 
     function isModifierKey(key: string): boolean {
       return key === 'Shift' || key === 'Control' || key === 'Alt' || key === 'Meta';
+    }
+
+    function disarm() {
+      pendingAt = 0;
+      if (dismissTimer.current) {
+        clearTimeout(dismissTimer.current);
+        dismissTimer.current = null;
+      }
+      setArmed(false);
+    }
+
+    function arm() {
+      pendingAt = Date.now();
+      setArmed(true);
+      if (dismissTimer.current) clearTimeout(dismissTimer.current);
+      // Mirror the keydown-side window so the toast clears itself even if the
+      // user walks away without pressing a second key.
+      dismissTimer.current = setTimeout(() => {
+        pendingAt = 0;
+        setArmed(false);
+      }, SEQUENCE_WINDOW_MS);
     }
 
     function onKey(e: KeyboardEvent) {
@@ -65,11 +92,11 @@ export function GlobalNav() {
       // cancel an in-flight `g` sequence.
       if (isModifierKey(e.key)) return;
 
-      const armed = pendingAt > 0 && Date.now() - pendingAt <= SEQUENCE_WINDOW_MS;
+      const isArmed = pendingAt > 0 && Date.now() - pendingAt <= SEQUENCE_WINDOW_MS;
 
-      if (armed) {
+      if (isArmed) {
         const dest = NAV_MAP[e.key];
-        pendingAt = 0; // a second key always ends the sequence
+        disarm(); // a second key always ends the sequence
         if (dest) {
           e.preventDefault();
           router.push(dest as never);
@@ -80,13 +107,28 @@ export function GlobalNav() {
       // Not armed yet: a lowercase `g` opens the window. Everything else is
       // a no-op here (and leaves any other handlers untouched).
       if (e.key === 'g') {
-        pendingAt = Date.now();
+        arm();
       }
     }
 
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      if (dismissTimer.current) clearTimeout(dismissTimer.current);
+    };
   }, [router]);
 
-  return null;
+  if (!armed) return null;
+
+  return (
+    <div
+      aria-hidden
+      className="pointer-events-none fixed bottom-4 left-4 z-40 flex items-center gap-1.5 rounded-md border border-border bg-bg/90 px-2 py-1 font-mono text-[11px] text-fg-muted shadow-lg backdrop-blur animate-fade-in"
+    >
+      <kbd className="inline-flex h-[18px] min-w-[18px] items-center justify-center rounded-sm border border-accent/40 bg-accent/15 px-1 text-[10px] font-medium text-fg">
+        g
+      </kbd>
+      <span className="text-fg-subtle">then o · r · p · t · s · …</span>
+    </div>
+  );
 }
