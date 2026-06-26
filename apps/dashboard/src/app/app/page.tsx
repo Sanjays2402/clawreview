@@ -7,8 +7,10 @@ import { PageHeader } from '@/components/layout/page-header';
 import { InteractiveSparkline } from '@/components/charts/interactive-sparkline';
 import { SeverityRow } from '@/components/review/severity-row';
 import { StatusPill } from '@/components/review/status-pill';
+import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { getRecentReviews, getSlaBreaches, getWeeklyStats } from '@/lib/data';
-import { dayLabels, formatMs, formatRelative, formatUsd } from '@/lib/format';
+import { dayLabels, formatMs, formatUsd } from '@/lib/format';
 
 export default async function AppOverviewPage() {
   const [reviews, weekly, sla] = await Promise.all([
@@ -20,6 +22,7 @@ export default async function AppOverviewPage() {
 
   return (
     <div className="space-y-4">
+      <ListKeyboardNav selector="[data-review-row]" enabled={reviews.length > 0} />
       <PageHeader title="overview" description="last 7d across installations." />
 
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -163,9 +166,18 @@ export default async function AppOverviewPage() {
       <Card>
         <CardHeader>
           <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">recent reviews</div>
-          <Link href={'/app/reviews' as any} className="font-mono text-[11px] text-fg-muted hover:text-fg">
-            view all
-          </Link>
+          <div className="flex items-center gap-3">
+            {reviews.length > 0 ? (
+              <span className="hidden items-center gap-1 font-mono text-[10px] text-fg-subtle sm:inline-flex">
+                <kbd className="inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-sm border border-border bg-bg-subtle px-1 text-[9px] text-fg-muted">j</kbd>
+                <kbd className="inline-flex h-[16px] min-w-[16px] items-center justify-center rounded-sm border border-border bg-bg-subtle px-1 text-[9px] text-fg-muted">k</kbd>
+                <span>nav</span>
+              </span>
+            ) : null}
+            <Link href={'/app/reviews' as any} className="font-mono text-[11px] text-fg-muted hover:text-fg">
+              view all
+            </Link>
+          </div>
         </CardHeader>
         <CardBody>
           {reviews.length === 0 ? (
@@ -177,10 +189,11 @@ export default async function AppOverviewPage() {
           ) : (
             <ul className="divide-y divide-border-subtle">
               {reviews.map((r) => (
-                <li key={r.id}>
+                <li key={r.id} className="focus-within:bg-accent/[0.07]">
                   <Link
                     href={`/app/reviews/${r.id}` as any}
-                    className="grid grid-cols-12 items-center gap-3 px-1 py-1.5 font-mono text-xs hover:bg-bg-subtle/40"
+                    data-review-row
+                    className="grid grid-cols-12 items-center gap-3 rounded-sm px-1 py-1.5 font-mono text-xs outline-none ring-accent/60 hover:bg-bg-subtle/40 focus-visible:ring-1"
                   >
                     <div className="col-span-12 sm:col-span-6">
                       <div className="truncate text-fg">
@@ -195,7 +208,7 @@ export default async function AppOverviewPage() {
                     </div>
                     <div className="col-span-4 tabular-nums text-fg-muted sm:col-span-2">{formatUsd(r.totalCostUsd)}</div>
                     <div className="col-span-4 text-right tabular-nums text-fg-muted sm:col-span-2">
-                      {formatRelative(r.createdAt)}
+                      <LiveRelativeTime iso={r.createdAt} />
                     </div>
                   </Link>
                 </li>
