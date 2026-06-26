@@ -13,7 +13,24 @@ interface Cmd {
   group: 'navigate' | 'reviews';
   /** Extra haystack text for fuzzy matching (repo slug, sha, etc). */
   keywords?: string;
+  /** Review status, when this command jumps to a review -- drives the dot. */
+  status?: string;
 }
+
+/**
+ * Status -> dot color, mirroring StatusPill's tone ladder so a review's state
+ * reads the same in the palette as it does in every list. A small filled dot
+ * makes running / failed reviews scannable without parsing the text hint.
+ */
+const STATUS_DOT: Record<string, string> = {
+  completed: 'bg-emerald-400',
+  resolved: 'bg-emerald-400',
+  failed: 'bg-severity-critical',
+  running: 'bg-accent',
+  queued: 'bg-severity-medium',
+  dismissed: 'bg-fg-subtle',
+  open: 'bg-severity-low',
+};
 
 const ROUTES: Cmd[] = [
   { id: 'overview', label: 'go: overview', hint: 'g o', href: '/app', group: 'navigate' },
@@ -126,6 +143,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
       href: `/app/reviews/${r.id}`,
       group: 'reviews',
       keywords: `${r.owner} ${r.repo} ${r.prNumber} #${r.prNumber} ${r.status} ${r.id}`,
+      status: r.status,
     }));
     return [...ROUTES, ...reviewCmds];
   }, [recentReviews]);
@@ -250,7 +268,17 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                         flatIndex === idx ? 'bg-accent/15 text-fg' : 'text-fg-muted'
                       }`}
                     >
-                      <span className="truncate">{cmd.label}</span>
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        {cmd.status ? (
+                          <span
+                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                              STATUS_DOT[cmd.status] ?? 'bg-fg-subtle'
+                            }`}
+                            aria-hidden
+                          />
+                        ) : null}
+                        <span className="truncate">{cmd.label}</span>
+                      </span>
                       {cmd.hint ? <span className="ml-2 shrink-0 text-fg-subtle">{cmd.hint}</span> : null}
                     </li>
                   ))}
