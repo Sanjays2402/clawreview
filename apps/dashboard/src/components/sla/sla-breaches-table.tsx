@@ -143,7 +143,7 @@ export function SlaBreachesTable({
       <ListKeyboardNav selector="[data-sla-row]" enabled={items.length > 0} />
 
       {/* Severity filter tabs with live counts — pinned on long breach lists */}
-      <StickyBar top="top-10" className="-mx-3 px-3">
+      <StickyBar top="top-10" className="-mx-3 px-3" backToTop>
         <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
           {SLA_SEVERITY_TABS.map((t) => {
             const active = t.key === severity;

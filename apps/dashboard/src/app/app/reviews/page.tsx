@@ -142,7 +142,7 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
         }
       />
 
-      <StickyBar>
+      <StickyBar backToTop>
         <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
           {STATUS_TABS.map((t) => {
             const active = t.key === status;
