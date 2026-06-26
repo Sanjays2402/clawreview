@@ -177,14 +177,40 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
                     </span>
                   ) : null}
                 </span>
-                <span className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-bg-muted">
+                <span className="flex flex-1 flex-col gap-0.5">
+                  <span className="relative h-1.5 w-full overflow-hidden rounded-sm bg-bg-muted">
+                    <span
+                      className={`absolute inset-y-0 left-0 transition-colors ${
+                        isActive ? STATUS_BAR_ACTIVE[ex.status] : STATUS_BAR[ex.status]
+                      }`}
+                      style={{ width: `${pct}%` }}
+                      aria-hidden
+                    />
+                  </span>
+                  {/* Share-of-total track: a thinner, fainter bar whose width is
+                      this agent's fraction of total wall time (so the tracks
+                      across every row sum to 100%). The duration bar above is
+                      normalised to the SLOWEST agent (max), which answers "how
+                      does this compare to the slowest?"; this answers the more
+                      decision-relevant "where does the time actually go?" --
+                      now glanceable without hovering each row. The bottleneck's
+                      track is always tinted to draw the eye. */}
                   <span
-                    className={`absolute inset-y-0 left-0 transition-colors ${
-                      isActive ? STATUS_BAR_ACTIVE[ex.status] : STATUS_BAR[ex.status]
-                    }`}
-                    style={{ width: `${pct}%` }}
-                    aria-hidden
-                  />
+                    className="relative h-[3px] w-full overflow-hidden rounded-full bg-bg-muted/40"
+                    title={`${shareOfTotal.toFixed(shareOfTotal < 10 ? 1 : 0)}% of total time`}
+                  >
+                    <span
+                      className={`absolute inset-y-0 left-0 transition-colors ${
+                        isBottleneck
+                          ? 'bg-severity-high/50'
+                          : isActive
+                            ? 'bg-accent/45'
+                            : 'bg-fg-subtle/30'
+                      }`}
+                      style={{ width: `${Math.max(shareOfTotal, MIN_BAR_PCT)}%` }}
+                      aria-hidden
+                    />
+                  </span>
                 </span>
                 <span className={`w-12 shrink-0 text-right tabular-nums ${isActive ? 'text-fg' : 'text-fg-muted'}`}>
                   {formatMs(ms)}
