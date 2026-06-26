@@ -94,8 +94,8 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
       />
 
       <div className="rounded-md border border-border">
-        {/* Filter strip */}
-        <div className="flex flex-wrap items-center gap-1 border-b border-border-subtle bg-bg-subtle/30 px-2 py-1.5 font-mono text-[11px]">
+        {/* Filter strip — sticks under the app header on long file-grouped lists */}
+        <div className="sticky top-10 z-20 flex flex-wrap items-center gap-1 rounded-t-md border-b border-border-subtle bg-bg/85 px-2 py-1.5 font-mono text-[11px] backdrop-blur supports-[backdrop-filter]:bg-bg/65">
           <span className="uppercase tracking-wider text-fg-subtle">sev</span>
           {SEVERITIES.map((s) => {
             const active = s === sevFilter;

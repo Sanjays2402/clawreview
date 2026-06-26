@@ -4,6 +4,7 @@ import { GitBranch, X, ArrowUp, ArrowDown } from '@phosphor-icons/react/dist/ssr
 import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 
 import { PageHeader } from '@/components/layout/page-header';
+import { StickyBar } from '@/components/ui/sticky-bar';
 import { getRepoHealthList, type RepoHealth } from '@/lib/data';
 import { formatRelative } from '@/lib/format';
 
@@ -115,24 +116,26 @@ export default async function ReposPage({ searchParams }: PageProps) {
         description="health, recent activity, pause controls for tracked repos."
       />
 
-      <div className="flex flex-wrap items-center gap-px border-b border-border-subtle font-mono text-[11px]">
-        {STATUS_TABS.map((t) => {
-          const active = t.key === status;
-          const href = t.key === 'all' ? hrefWith({ status: '' }) : hrefWith({ status: t.key });
-          return (
-            <Link
-              key={t.key}
-              href={href as any}
-              className={`-mb-px flex items-center gap-1 border-b-2 px-2.5 py-1 lowercase transition-colors ${
-                active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
-              }`}
-            >
-              {t.label}
-              <span className="tabular-nums text-fg-subtle">{counts[t.key]}</span>
-            </Link>
-          );
-        })}
-      </div>
+      <StickyBar>
+        <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
+          {STATUS_TABS.map((t) => {
+            const active = t.key === status;
+            const href = t.key === 'all' ? hrefWith({ status: '' }) : hrefWith({ status: t.key });
+            return (
+              <Link
+                key={t.key}
+                href={href as any}
+                className={`-mb-px flex items-center gap-1 border-b-2 px-2.5 py-1 lowercase transition-colors ${
+                  active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
+                }`}
+              >
+                {t.label}
+                <span className="tabular-nums text-fg-subtle">{counts[t.key]}</span>
+              </Link>
+            );
+          })}
+        </div>
+      </StickyBar>
 
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">

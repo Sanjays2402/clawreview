@@ -4,6 +4,7 @@ import { ArrowUp, ArrowDown, ArrowRight, Timer, X } from '@phosphor-icons/react/
 import { EmptyState, SeverityBadge } from '@clawreview/ui';
 
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { StickyBar } from '@/components/ui/sticky-bar';
 import type { Severity, SlaBreach } from '@/lib/data';
 
 export type SlaSortKey = 'severity' | 'age' | 'sla' | 'overdue';
@@ -140,31 +141,33 @@ export function SlaBreachesTable({
     <div className="space-y-3">
       <ListKeyboardNav selector="[data-sla-row]" enabled={items.length > 0} />
 
-      {/* Severity filter tabs with live counts */}
-      <div className="flex flex-wrap items-center gap-px border-b border-border-subtle font-mono text-[11px]">
-        {SLA_SEVERITY_TABS.map((t) => {
-          const active = t.key === severity;
-          const count = t.key === 'all' ? breaches.length : counts[t.key];
-          return (
-            <Link
-              key={t.key}
-              href={(t.key === 'all' ? hrefWith({ sev: '' }) : hrefWith({ sev: t.key })) as any}
-              className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-2.5 py-1 lowercase transition-colors ${
-                active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
-              }`}
-            >
-              <span>{t.label}</span>
-              <span
-                className={`rounded-sm px-1 text-[10px] tabular-nums ${
-                  active ? 'bg-accent/20 text-fg' : 'bg-bg-muted text-fg-subtle'
+      {/* Severity filter tabs with live counts — pinned on long breach lists */}
+      <StickyBar top="top-10" className="-mx-3 px-3">
+        <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
+          {SLA_SEVERITY_TABS.map((t) => {
+            const active = t.key === severity;
+            const count = t.key === 'all' ? breaches.length : counts[t.key];
+            return (
+              <Link
+                key={t.key}
+                href={(t.key === 'all' ? hrefWith({ sev: '' }) : hrefWith({ sev: t.key })) as any}
+                className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-2.5 py-1 lowercase transition-colors ${
+                  active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
                 }`}
               >
-                {count}
-              </span>
-            </Link>
-          );
-        })}
-      </div>
+                <span>{t.label}</span>
+                <span
+                  className={`rounded-sm px-1 text-[10px] tabular-nums ${
+                    active ? 'bg-accent/20 text-fg' : 'bg-bg-muted text-fg-subtle'
+                  }`}
+                >
+                  {count}
+                </span>
+              </Link>
+            );
+          })}
+        </div>
+      </StickyBar>
 
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">

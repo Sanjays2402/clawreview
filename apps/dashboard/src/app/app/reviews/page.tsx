@@ -7,6 +7,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { StatusPill } from '@/components/review/status-pill';
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
 import { Kbd } from '@/components/ui/kbd';
+import { StickyBar } from '@/components/ui/sticky-bar';
 import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { listReviews, type ReviewListItem, type ReviewStatus } from '@/lib/data';
 import { formatMs, formatUsd } from '@/lib/format';
@@ -140,23 +141,25 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
         }
       />
 
-      <div className="flex flex-wrap items-center gap-px border-b border-border-subtle font-mono text-[11px]">
-        {STATUS_TABS.map((t) => {
-          const active = t.key === status;
-          const href = t.key === 'all' ? hrefWith({ status: '' }) : hrefWith({ status: t.key });
-          return (
-            <Link
-              key={t.key}
-              href={href as any}
-              className={`-mb-px border-b-2 px-2.5 py-1 lowercase transition-colors ${
-                active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
-              }`}
-            >
-              {t.label}
-            </Link>
-          );
-        })}
-      </div>
+      <StickyBar>
+        <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
+          {STATUS_TABS.map((t) => {
+            const active = t.key === status;
+            const href = t.key === 'all' ? hrefWith({ status: '' }) : hrefWith({ status: t.key });
+            return (
+              <Link
+                key={t.key}
+                href={href as any}
+                className={`-mb-px border-b-2 px-2.5 py-1 lowercase transition-colors ${
+                  active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
+                }`}
+              >
+                {t.label}
+              </Link>
+            );
+          })}
+        </div>
+      </StickyBar>
 
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
