@@ -38,6 +38,13 @@ const MIN_BAR_PCT = 1.5; // minimum visible width for a row so a 0-ms run is sti
 
 export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] }) {
   const [active, setActive] = useState<string | null>(null);
+  // Which row currently holds DOM focus (null = none / mouse-only). Distinct
+  // from `active` (which also fires on hover) so the keyboard discoverability
+  // hint never shows for a mouse user just gliding over rows.
+  const [focusedIdx, setFocusedIdx] = useState<number | null>(null);
+  // Flips true the first time the user actually presses an arrow / Home / End.
+  // Once they've discovered the scrub keys we stop advertising them.
+  const [scrubbed, setScrubbed] = useState(false);
   // Per-row DOM handles (by sorted index) so Up/Down arrow keys can rove
   // focus between rows without a focus trap or external library.
   const rowRefs = useRef<Array<HTMLLIElement | null>>([]);
@@ -123,27 +130,37 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
               tabIndex={0}
               onMouseEnter={() => setActive(ex.agent)}
               onMouseLeave={() => setActive((cur) => (cur === ex.agent ? null : cur))}
-              onFocus={() => setActive(ex.agent)}
-              onBlur={() => setActive((cur) => (cur === ex.agent ? null : cur))}
+              onFocus={() => {
+                setActive(ex.agent);
+                setFocusedIdx(i);
+              }}
+              onBlur={() => {
+                setActive((cur) => (cur === ex.agent ? null : cur));
+                setFocusedIdx((cur) => (cur === i ? null : cur));
+              }}
               onKeyDown={(e) => {
                 if (e.key === 'ArrowDown') {
                   e.preventDefault();
+                  setScrubbed(true);
                   focusRow(i + 1);
                 } else if (e.key === 'ArrowUp') {
                   e.preventDefault();
+                  setScrubbed(true);
                   focusRow(i - 1);
                 } else if (e.key === 'Home') {
                   e.preventDefault();
+                  setScrubbed(true);
                   focusRow(0);
                 } else if (e.key === 'End') {
                   e.preventDefault();
+                  setScrubbed(true);
                   focusRow(sorted.length - 1);
                 }
               }}
               aria-label={`${ex.agent}: ${STATUS_LABEL[ex.status]}, ${formatMs(ms)}, ${ex.findings} finding${ex.findings === 1 ? '' : 's'}, ${shareOfTotal.toFixed(0)}% of total time${isBottleneck ? ', slowest agent' : ''}`}
               className={`group/agent px-2.5 py-1.5 outline-none transition-colors ${
                 isActive ? 'bg-accent/[0.06]' : 'hover:bg-bg-subtle/40'
-              } focus-visible:bg-accent/[0.08]`}
+              } focus-visible:bg-accent/[0.08] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent/40`}
             >
               <div className="flex items-center gap-2 font-mono text-xs">
                 <StatusGlyph status={ex.status} />
@@ -204,6 +221,19 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
               {ex.error ? (
                 <div className="ml-6 mt-0.5 font-mono text-[11px] text-severity-critical/90">
                   {ex.error}
+                </div>
+              ) : null}
+
+              {/* First-Tab discoverability: the moment a keyboard user lands on
+                  a row (focus, not hover) we surface the scrub keys inline --
+                  the header hint is easy to miss once you've Tabbed past it.
+                  Suppressed the instant they actually press an arrow, and only
+                  shown when there's more than one row to move between. */}
+              {focusedIdx === i && !scrubbed && sorted.length > 1 ? (
+                <div className="ml-6 mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-fg-subtle animate-fade-in">
+                  <Kbd>↑</Kbd>
+                  <Kbd>↓</Kbd>
+                  <span>move between agents</span>
                 </div>
               ) : null}
             </li>
