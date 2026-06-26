@@ -197,6 +197,21 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
               e.preventDefault();
               // Wrap before the first row to the last.
               setIdx((i) => (len === 0 ? 0 : (i - 1 + len) % len));
+            } else if (e.key === 'Tab') {
+              // Section-jump: hop the cursor to the top row of the next (or
+              // previous, with Shift) section instead of stepping row-by-row.
+              // Always preventDefault so Tab never escapes the modal palette.
+              e.preventDefault();
+              if (sections.length > 1) {
+                const dir = e.shiftKey ? -1 : 1;
+                const curSec = sections.findIndex((s) =>
+                  s.items.some((it) => it.flatIndex === idx),
+                );
+                const from = curSec < 0 ? 0 : curSec;
+                const target = (from + dir + sections.length) % sections.length;
+                const first = sections[target]?.items[0]?.flatIndex ?? 0;
+                setIdx(first);
+              }
             } else if (e.key === 'Home') {
               e.preventDefault();
               setIdx(0);
@@ -245,7 +260,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           )}
         </ul>
         <div className="flex items-center justify-between border-t border-border-subtle bg-bg-subtle/40 px-3 py-1.5 font-mono text-[10px] text-fg-subtle">
-          <span>↑↓ wrap · ⤒⤓ ends · ↵ select · esc close</span>
+          <span>↑↓ wrap · ⇥ section · ⤒⤓ ends · ↵ select · esc close</span>
           <span>⌘K</span>
         </div>
       </div>

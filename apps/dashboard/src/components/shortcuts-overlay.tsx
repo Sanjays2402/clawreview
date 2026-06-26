@@ -55,6 +55,8 @@ const GROUPS: ShortcutGroup[] = [
     name: 'palette',
     items: [
       { keys: ['↑', '↓'], label: 'navigate (wraps at ends)' },
+      { keys: ['⇥'], label: 'jump to next section' },
+      { keys: ['⇧', '⇥'], label: 'jump to previous section' },
       { keys: ['home', 'end'], label: 'jump to first / last' },
       { keys: ['↵'], label: 'run command / jump to review' },
       { keys: ['ctrl', 'n / p'], label: 'navigate results' },
