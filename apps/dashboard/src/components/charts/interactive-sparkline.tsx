@@ -11,6 +11,13 @@ export interface InteractiveSparklineProps {
   className?: string;
   /** Singular unit shown in the hover readout, e.g. "finding". */
   unit?: string;
+  /**
+   * Optional custom renderer for the active bucket's value in the hover
+   * readout. When provided it fully replaces the default `{v} {unit}{plural}`
+   * text -- e.g. a spend series can render `$0.42` instead of `0.42 finding`.
+   * Receives the raw bucket value.
+   */
+  formatValue?: (v: number) => string;
 }
 
 interface Pt {
@@ -38,6 +45,7 @@ export function InteractiveSparkline({
   height = 48,
   className,
   unit = 'finding',
+  formatValue,
 }: InteractiveSparklineProps) {
   const id = useId();
   const [active, setActive] = useState<number | null>(null);
@@ -153,11 +161,17 @@ export function InteractiveSparkline({
           }`}
           style={{ left: `${(cur.x / width) * 100}%` }}
         >
-          <span className="tabular-nums font-semibold text-fg">{cur.v}</span>{' '}
-          <span className="text-fg-muted">
-            {unit}
-            {cur.v === 1 ? '' : 's'}
-          </span>
+          {formatValue ? (
+            <span className="tabular-nums font-semibold text-fg">{formatValue(cur.v)}</span>
+          ) : (
+            <>
+              <span className="tabular-nums font-semibold text-fg">{cur.v}</span>{' '}
+              <span className="text-fg-muted">
+                {unit}
+                {cur.v === 1 ? '' : 's'}
+              </span>
+            </>
+          )}
           <span className="ml-1 text-fg-subtle">· {cur.label}</span>
         </div>
       ) : null}

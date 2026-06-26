@@ -7,7 +7,6 @@ import { Card, CardBody, CardHeader, EmptyState } from '@clawreview/ui';
 import { PageHeader } from '@/components/layout/page-header';
 import { StatusPill } from '@/components/review/status-pill';
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
-import { InteractiveSparkline } from '@/components/charts/interactive-sparkline';
 import { Kbd } from '@/components/ui/kbd';
 import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { EmptyStateActions } from '@/components/ui/empty-state-actions';
@@ -16,6 +15,7 @@ import { formatMs, formatUsd } from '@/lib/format';
 
 import { pauseRepoAction, resumeRepoAction } from './actions';
 import { RepoPauseControls } from './repo-pause-controls';
+import { RepoTrendCard } from './repo-trend-card';
 
 function parseSlug(id: string): { owner: string; repo: string } | null {
   const idx = id.indexOf('__');
@@ -44,20 +44,17 @@ export default async function RepoDetail({ params }: { params: Promise<{ id: str
   const reviews = reviewsRes.items;
   const isPaused = health.status === 'paused';
 
-  // Findings-per-review trend. `listReviews` returns newest-first; reverse to
+  // Per-review trends. `listReviews` returns newest-first; reverse to
   // chronological (oldest -> newest) so the sparkline reads left-to-right like
-  // every other chart in the dashboard. Each point is one review's total
-  // findings, labelled by PR number so the hover readout is legible. Only
-  // worth drawing when there are at least two reviews to connect.
+  // every other chart in the dashboard. Each point is one review, labelled by
+  // PR number so the hover readout is legible. The card toggles between the
+  // findings series and the spend series over the same x-axis. Only worth
+  // drawing when there are at least two reviews to connect.
   const chronological = reviews.slice().reverse();
   const findingsSeries = chronological.map((r) => r.totalFindings);
+  const spendSeries = chronological.map((r) => r.totalCostUsd);
   const findingsLabels = chronological.map((r) => `#${r.prNumber}`);
   const showTrend = chronological.length >= 2;
-  const peakFindings = findingsSeries.length > 0 ? Math.max(...findingsSeries) : 0;
-  const avgFindings =
-    findingsSeries.length > 0
-      ? Math.round(findingsSeries.reduce((a, b) => a + b, 0) / findingsSeries.length)
-      : 0;
 
   return (
     <div className="space-y-3">
@@ -143,40 +140,11 @@ export default async function RepoDetail({ params }: { params: Promise<{ id: str
       </Card>
 
       {showTrend ? (
-        <Card>
-          <CardHeader>
-            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">
-              findings per review
-            </div>
-            <div className="flex items-center gap-3 font-mono text-[11px] tabular-nums text-fg-muted">
-              <span>
-                avg <span className="text-fg">{avgFindings}</span>
-              </span>
-              <span className="text-fg-subtle">·</span>
-              <span>
-                peak <span className="text-fg">{peakFindings}</span>
-              </span>
-              <span className="text-fg-subtle">·</span>
-              <span>
-                <span className="text-fg">{chronological.length}</span> reviews
-              </span>
-            </div>
-          </CardHeader>
-          <CardBody>
-            <InteractiveSparkline
-              data={findingsSeries}
-              labels={findingsLabels}
-              width={600}
-              height={72}
-              unit="finding"
-              className="w-full"
-            />
-            <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-fg-subtle">
-              <span>oldest</span>
-              <span>newest</span>
-            </div>
-          </CardBody>
-        </Card>
+        <RepoTrendCard
+          findings={findingsSeries}
+          spend={spendSeries}
+          labels={findingsLabels}
+        />
       ) : null}
 
       <Card>
