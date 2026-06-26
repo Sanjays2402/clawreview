@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { CheckCircle, WarningCircle, MinusCircle } from '@phosphor-icons/react';
 import type { ReactNode } from 'react';
 
@@ -38,6 +38,9 @@ const MIN_BAR_PCT = 1.5; // minimum visible width for a row so a 0-ms run is sti
 
 export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] }) {
   const [active, setActive] = useState<string | null>(null);
+  // Per-row DOM handles (by sorted index) so Up/Down arrow keys can rove
+  // focus between rows without a focus trap or external library.
+  const rowRefs = useRef<Array<HTMLLIElement | null>>([]);
 
   if (executions.length === 0) {
     return <div className="font-mono text-xs text-fg-subtle">no runs.</div>;
@@ -51,6 +54,21 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
   const totalMs = sorted.reduce((sum, e) => sum + (e.durationMs ?? 0), 0);
   const totalFindings = sorted.reduce((sum, e) => sum + e.findings, 0);
   const totalErrors = sorted.filter((e) => e.status === 'error').length;
+
+  // The bottleneck is the slowest agent (index 0 after the sort), but only
+  // call it out when there's a real contest: 2+ agents AND it actually owns
+  // a meaningful slice of wall time (>= 40%). A near-even split has no single
+  // bottleneck worth flagging.
+  const slowestShare = totalMs > 0 ? ((sorted[0]?.durationMs ?? 0) / totalMs) * 100 : 0;
+  const bottleneckAgent =
+    sorted.length >= 2 && (sorted[0]?.durationMs ?? 0) > 0 && slowestShare >= 40
+      ? sorted[0]!.agent
+      : null;
+
+  function focusRow(i: number) {
+    const clamped = Math.max(0, Math.min(i, sorted.length - 1));
+    rowRefs.current[clamped]?.focus();
+  }
 
   return (
     <div className="space-y-2">
@@ -78,33 +96,69 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
             </span>
           </>
         ) : null}
+        {sorted.length > 1 ? (
+          <span className="ml-auto hidden items-center gap-1 text-fg-subtle sm:inline-flex">
+            <Kbd>↑</Kbd>
+            <Kbd>↓</Kbd>
+            <span>scrub</span>
+          </span>
+        ) : null}
       </div>
 
       {/* Per-agent timing rows */}
       <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
-        {sorted.map((ex) => {
+        {sorted.map((ex, i) => {
           const ms = ex.durationMs ?? 0;
           const rawPct = (ms / maxMs) * 100;
           const pct = Math.max(rawPct, MIN_BAR_PCT);
           const shareOfTotal = totalMs > 0 ? (ms / totalMs) * 100 : 0;
           const isActive = active === ex.agent;
+          const isBottleneck = bottleneckAgent === ex.agent;
           return (
             <li
               key={ex.agent}
+              ref={(el) => {
+                rowRefs.current[i] = el;
+              }}
               tabIndex={0}
               onMouseEnter={() => setActive(ex.agent)}
               onMouseLeave={() => setActive((cur) => (cur === ex.agent ? null : cur))}
               onFocus={() => setActive(ex.agent)}
               onBlur={() => setActive((cur) => (cur === ex.agent ? null : cur))}
-              aria-label={`${ex.agent}: ${STATUS_LABEL[ex.status]}, ${formatMs(ms)}, ${ex.findings} finding${ex.findings === 1 ? '' : 's'}, ${shareOfTotal.toFixed(0)}% of total time`}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  focusRow(i + 1);
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  focusRow(i - 1);
+                } else if (e.key === 'Home') {
+                  e.preventDefault();
+                  focusRow(0);
+                } else if (e.key === 'End') {
+                  e.preventDefault();
+                  focusRow(sorted.length - 1);
+                }
+              }}
+              aria-label={`${ex.agent}: ${STATUS_LABEL[ex.status]}, ${formatMs(ms)}, ${ex.findings} finding${ex.findings === 1 ? '' : 's'}, ${shareOfTotal.toFixed(0)}% of total time${isBottleneck ? ', slowest agent' : ''}`}
               className={`group/agent px-2.5 py-1.5 outline-none transition-colors ${
                 isActive ? 'bg-accent/[0.06]' : 'hover:bg-bg-subtle/40'
               } focus-visible:bg-accent/[0.08]`}
             >
               <div className="flex items-center gap-2 font-mono text-xs">
                 <StatusGlyph status={ex.status} />
-                <span className="min-w-[8rem] shrink-0 truncate text-fg" title={ex.agent}>
-                  {ex.agent}
+                <span className="flex min-w-[8rem] shrink-0 items-center gap-1.5">
+                  <span className="truncate text-fg" title={ex.agent}>
+                    {ex.agent}
+                  </span>
+                  {isBottleneck ? (
+                    <span
+                      className="shrink-0 rounded-sm border border-severity-high/40 bg-severity-high/10 px-1 text-[9px] uppercase tracking-wider text-severity-high"
+                      title={`slowest agent: ${shareOfTotal.toFixed(0)}% of total time`}
+                    >
+                      slowest
+                    </span>
+                  ) : null}
                 </span>
                 <span className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-bg-muted">
                   <span
@@ -157,6 +211,14 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
         })}
       </ul>
     </div>
+  );
+}
+
+function Kbd({ children }: { children: ReactNode }) {
+  return (
+    <kbd className="rounded-sm border border-border bg-bg-subtle px-1 text-[10px] leading-none text-fg-muted">
+      {children}
+    </kbd>
   );
 }
 
