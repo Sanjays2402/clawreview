@@ -9,6 +9,7 @@ import { PageHeader } from '@/components/layout/page-header';
 import { FindingRow } from '@/components/review/finding-row';
 import { FindingsKeyNav } from '@/components/review/findings-key-nav';
 import { FindingsGroupedByFile, groupFindingsByFile } from '@/components/review/findings-group';
+import { SeverityRow } from '@/components/review/severity-row';
 import { Kbd } from '@/components/ui/kbd';
 import { getReview, type Severity, type BulkFindingFilter } from '@/lib/data';
 
@@ -69,6 +70,27 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
   }
 
   const fileGroups = groupBy === 'file' ? groupFindingsByFile(filtered) : null;
+
+  // Severity mix for the summary bar. Counted over the state/agent scope but
+  // IGNORING the active severity filter, so every non-empty severity stays a
+  // live deep-link -- the bar is a one-click severity *switcher*, not just a
+  // readout of the (already severity-narrowed) list. Each segment links into
+  // this same view's `?severity=` filter, composing with the active state /
+  // agent / group params via hrefWith.
+  const sevScope = review.findings.filter((f) => {
+    if (stateFilter !== 'all' && f.state !== stateFilter) return false;
+    if (agentFilter && f.agent !== agentFilter) return false;
+    return true;
+  });
+  const sevCounts: Record<Severity, number> = {
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    nit: 0,
+  };
+  for (const f of sevScope) sevCounts[f.severity] = (sevCounts[f.severity] ?? 0) + 1;
+  const sevScopeTotal = sevScope.length;
 
   return (
     <div className="space-y-3">
@@ -179,6 +201,25 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
             />
           ) : (
             <>
+              <div className="mb-2 rounded-sm border border-border-subtle bg-bg-subtle/30 px-2.5 py-2">
+                <div className="mb-1.5 flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                  <span>severity mix</span>
+                  <span className="tabular-nums text-fg-muted">
+                    {sevFilter === 'all'
+                      ? `${sevScopeTotal} in scope`
+                      : `filtered to ${sevFilter}`}
+                  </span>
+                </div>
+                {sevScopeTotal === 0 ? (
+                  <div className="font-mono text-[11px] text-fg-subtle">no findings in scope.</div>
+                ) : (
+                  <SeverityRow
+                    counts={sevCounts}
+                    total={sevScopeTotal}
+                    hrefFor={(sev) => hrefWith({ severity: sevFilter === sev ? 'all' : sev })}
+                  />
+                )}
+              </div>
               <BulkFindingsBar
                 reviewId={id}
                 matchCount={filtered.length}
