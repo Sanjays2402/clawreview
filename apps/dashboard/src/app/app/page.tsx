@@ -12,6 +12,22 @@ import { LiveRelativeTime } from '@/components/ui/live-relative-time';
 import { getRecentReviews, getSlaBreaches, getWeeklyStats } from '@/lib/data';
 import { dayLabels, formatMs, formatUsd } from '@/lib/format';
 
+// Severity -> dot/text tint (literal classes so Tailwind JIT keeps them).
+const SEV_DOT: Record<string, string> = {
+  critical: 'bg-severity-critical',
+  high: 'bg-severity-high',
+  medium: 'bg-severity-medium',
+  low: 'bg-severity-low',
+  nit: 'bg-severity-nit',
+};
+const SEV_TEXT: Record<string, string> = {
+  critical: 'text-severity-critical',
+  high: 'text-severity-high',
+  medium: 'text-severity-medium',
+  low: 'text-severity-low',
+  nit: 'text-severity-nit',
+};
+
 export default async function AppOverviewPage() {
   const [reviews, weekly, sla] = await Promise.all([
     getRecentReviews(8),
@@ -122,42 +138,72 @@ export default async function AppOverviewPage() {
               no open findings past sla.
             </div>
           ) : (
-            <div className="space-y-3">
-              <div className="text-2xl font-semibold tracking-tight">{sla.totalBreaches}</div>
-              <div className="flex flex-wrap gap-2 text-xs">
+            <div className="space-y-2.5">
+              <div className="flex items-baseline gap-2 font-mono">
+                <span className="text-2xl font-semibold tabular-nums tracking-tight text-severity-critical">
+                  {sla.totalBreaches}
+                </span>
+                <span className="text-[11px] text-fg-subtle">
+                  open finding{sla.totalBreaches === 1 ? '' : 's'} past sla
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1 font-mono text-[11px]">
                 {(['critical', 'high', 'medium', 'low', 'nit'] as const).map((sev) => {
                   const n = sla.bySeverity[sev] ?? 0;
                   if (!n) return null;
                   return (
-                    <span
+                    <Link
                       key={sev}
-                      className="rounded-full border border-border bg-bg-subtle px-2 py-0.5 text-fg-muted"
+                      href={`/app/sla?sev=${sev}` as any}
+                      className="group inline-flex items-center gap-1.5 rounded-sm border border-border-subtle bg-bg-subtle/50 px-1.5 py-0.5 lowercase text-fg-muted transition-colors hover:border-border hover:bg-bg-subtle"
                     >
-                      <span className="font-medium text-fg">{n}</span> {sev}
-                    </span>
+                      <span className={`h-1.5 w-1.5 rounded-full ${SEV_DOT[sev]}`} aria-hidden />
+                      <span className="tabular-nums text-fg">{n}</span>
+                      <span className={SEV_TEXT[sev]}>{sev}</span>
+                    </Link>
                   );
                 })}
               </div>
-              <ul className="divide-y divide-border-subtle text-sm">
-                {sla.breaches.slice(0, 5).map((b) => (
-                  <li key={b.findingId} className="py-2">
-                    <Link
-                      href={`/app/reviews/${b.reviewId}` as any}
-                      className="flex items-center justify-between gap-3 hover:bg-bg-subtle/40"
-                    >
-                      <span className="min-w-0 flex-1 truncate">
-                        <span className="font-medium text-fg">
-                          {b.owner}/{b.repo} #{b.prNumber}
-                        </span>{' '}
-                        <span className="text-fg-muted">{b.title}</span>
-                      </span>
-                      <span className="shrink-0 text-xs text-fg-muted">
-                        {Math.round(b.ageHours)}h / {b.slaHours}h
-                      </span>
-                    </Link>
-                  </li>
-                ))}
+              <ul className="divide-y divide-border-subtle font-mono text-xs">
+                {sla.breaches.slice(0, 5).map((b) => {
+                  const overdue = b.overdueHours ?? Math.max(0, b.ageHours - b.slaHours);
+                  return (
+                    <li key={b.findingId} className="focus-within:bg-accent/[0.07]">
+                      <Link
+                        href={`/app/reviews/${b.reviewId}` as any}
+                        className="flex items-center gap-2 rounded-sm px-1 py-1.5 outline-none ring-accent/60 hover:bg-bg-subtle/40 focus-visible:ring-1"
+                      >
+                        <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${SEV_DOT[b.severity]}`} aria-hidden />
+                        <span className="min-w-0 flex-1 truncate">
+                          <span className="text-fg">
+                            {b.owner}/{b.repo} <span className="text-fg-subtle">#</span>{b.prNumber}
+                          </span>{' '}
+                          <span className="text-fg-muted">{b.title}</span>
+                        </span>
+                        <span className="shrink-0 tabular-nums text-fg-subtle">
+                          {Math.round(b.ageHours)}h / {b.slaHours}h
+                        </span>
+                        {overdue > 0 ? (
+                          <span
+                            className="shrink-0 tabular-nums font-medium text-severity-critical"
+                            title="hours overdue"
+                          >
+                            +{Math.round(overdue)}h
+                          </span>
+                        ) : null}
+                      </Link>
+                    </li>
+                  );
+                })}
               </ul>
+              {sla.totalBreaches > 5 ? (
+                <Link
+                  href={'/app/sla' as any}
+                  className="inline-block font-mono text-[11px] text-fg-subtle hover:text-fg"
+                >
+                  +{sla.totalBreaches - 5} more breaches
+                </Link>
+              ) : null}
             </div>
           )}
         </CardBody>
