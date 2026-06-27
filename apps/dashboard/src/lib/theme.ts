@@ -54,10 +54,37 @@ export function resolveDark(mode: ThemeMode): boolean {
 /** Apply a mode to <html> and persist it. Safe to call only on the client. */
 export function applyThemeMode(mode: ThemeMode): void {
   if (typeof document === 'undefined') return;
+  // Briefly mark the document so the CSS-var palette flip crossfades instead
+  // of hard-cutting. The class self-removes after the transition window. The
+  // crossfade CSS is itself gated behind `prefers-reduced-motion: no-pref`,
+  // so reduced-motion users get the instant cut regardless of this class.
+  beginThemeTransition();
   document.documentElement.classList.toggle('dark', resolveDark(mode));
   try {
     window.localStorage.setItem(THEME_STORAGE_KEY, mode);
   } catch {
     /* storage may be unavailable (private mode / quota); the class still applied */
   }
+}
+
+/** Duration the `.theme-transition` crossfade class stays on <html>, ms. */
+export const THEME_TRANSITION_MS = 220;
+
+let themeTransitionTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Add `.theme-transition` to <html> for THEME_TRANSITION_MS so palette-bearing
+ * properties fade across a light/dark flip. Coalesces rapid toggles (each call
+ * resets the timer) so a quick light->dark->system spin doesn't leave the class
+ * stuck on. No-op during SSR.
+ */
+export function beginThemeTransition(): void {
+  if (typeof document === 'undefined') return;
+  const root = document.documentElement;
+  root.classList.add('theme-transition');
+  if (themeTransitionTimer) clearTimeout(themeTransitionTimer);
+  themeTransitionTimer = setTimeout(() => {
+    root.classList.remove('theme-transition');
+    themeTransitionTimer = null;
+  }, THEME_TRANSITION_MS);
 }

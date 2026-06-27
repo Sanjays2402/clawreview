@@ -61,6 +61,31 @@
       scroll-behavior: auto !important;
     }
   }
+
+  /*
+   * Theme-switch crossfade. The `.theme-transition` class is added to <html>
+   * for ~220ms around a palette flip (see lib/theme.ts) so the CSS variables
+   * (bg / fg / border / accent) fade between light and dark instead of hard-
+   * cutting in a single frame. Scoped to the color-bearing properties only,
+   * and only present DURING the switch, so it never slows ordinary hover /
+   * focus transitions. Deliberately gated behind `no-preference`: a user who
+   * asked the OS to reduce motion gets the instant cut with zero crossfade,
+   * which keeps the tri-state toggle flash-free either way.
+   */
+  @media (prefers-reduced-motion: no-preference) {
+    .theme-transition,
+    .theme-transition *,
+    .theme-transition *::before,
+    .theme-transition *::after {
+      transition:
+        background-color 200ms ease,
+        border-color 200ms ease,
+        color 200ms ease,
+        fill 200ms ease,
+        stroke 200ms ease !important;
+      transition-delay: 0ms !important;
+    }
+  }
 }
 
 @layer components {

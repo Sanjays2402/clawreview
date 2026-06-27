@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { Tooltip } from '@/components/ui/tooltip';
 import {
   applyThemeMode,
+  beginThemeTransition,
   nextThemeMode,
   prefersDark,
   readStoredMode,
@@ -39,6 +40,10 @@ export function ThemeToggle() {
     const onChange = (e: MediaQueryListEvent) => {
       setSystemDark(e.matches);
       if (mode === 'system') {
+        // Crossfade the live OS day/night flip too -- it's a full-screen
+        // palette swap the user didn't click for, so the hard cut reads worse
+        // here than on a deliberate toggle.
+        beginThemeTransition();
         document.documentElement.classList.toggle('dark', e.matches);
       }
     };
