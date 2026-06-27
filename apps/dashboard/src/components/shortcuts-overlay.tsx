@@ -38,7 +38,7 @@ const GROUPS: ShortcutGroup[] = [
     items: [
       { keys: ['j'], label: 'next row' },
       { keys: ['k'], label: 'previous row' },
-      { keys: ['g', 'g'], label: 'jump to first' },
+      { keys: ['g', 'g'], label: 'jump to first (or scroll to top)' },
       { keys: ['G'], label: 'jump to last' },
       { keys: ['↵'], label: 'open focused row' },
     ],

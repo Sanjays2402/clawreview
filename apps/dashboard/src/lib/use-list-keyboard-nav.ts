@@ -2,6 +2,8 @@
 
 import { useEffect } from 'react';
 
+import { motionScrollBehavior } from '@/lib/motion';
+
 export interface ListKeyboardNavOptions {
   /** CSS selector for the focusable list items. Defaults to `[data-nav-item]`. */
   selector?: string;
@@ -14,8 +16,16 @@ export interface ListKeyboardNavOptions {
  * elements matched by `selector`.
  *
  * - `j` / `k`  -> move focus down / up (clamped at the ends).
- * - `g g`      -> jump to the first item (double-tap within 500ms).
+ * - `g g`      -> jump to the first item (double-tap within 500ms) when a row
+ *                 is focused; otherwise scroll the WINDOW to the top.
  * - `G`        -> jump to the last item.
+ *
+ * The `g g` disambiguation completes the back-to-top affordance: the StickyBar
+ * surfaces a mouse-only "back to top" control once pinned, and now the keyboard
+ * has parity -- press `g g` with no row focused (you've scrolled past the list,
+ * or focus is on the page chrome) and the page returns to the top, honoring
+ * `prefers-reduced-motion` via {@link motionScrollBehavior}. With a row focused,
+ * `g g` keeps its original "jump to first row" meaning, so the two never fight.
  *
  * Enter / Space are intentionally NOT handled here: the matched elements are
  * expected to be anchors (or buttons), which already activate natively on
@@ -67,7 +77,14 @@ export function useListKeyboardNav({
         const now = Date.now();
         if (now - lastG < 500) {
           e.preventDefault();
-          focusAt(0);
+          if (currentIdx() >= 0) {
+            // A list row is focused: jump to the first row (original behavior).
+            focusAt(0);
+          } else {
+            // No row focused -- bare-page `g g` scrolls the window to the top,
+            // the keyboard twin of the StickyBar's mouse-only back-to-top.
+            window.scrollTo({ top: 0, behavior: motionScrollBehavior() });
+          }
           lastG = 0;
         } else {
           lastG = now;
