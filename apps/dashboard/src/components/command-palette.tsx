@@ -251,7 +251,12 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           ) : (
             sections.map((sec) => (
               <li key={sec.group}>
-                <div className="flex items-center justify-between px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                {/* Sticky section header: stays pinned at the top of the scroll
+                    container while its rows scroll under it, so on a long
+                    fuzzy-filtered list (or after a Tab section-jump) you can
+                    always see which group the active row belongs to. Opaque bg
+                    so rows don't bleed through; z-10 sits above the rows. */}
+                <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle/50 bg-bg px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
                   <span>{GROUP_LABEL[sec.group]}</span>
                   {/* Per-section match count: when a fuzzy query narrows the
                       list, this makes "2 reviews vs 8 routes" legible without
@@ -273,7 +278,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                       }}
                       onMouseEnter={() => setIdx(flatIndex)}
                       onClick={() => run(cmd)}
-                      className={`flex cursor-pointer items-center justify-between px-3 py-1.5 font-mono text-xs ${
+                      className={`flex scroll-mt-7 cursor-pointer items-center justify-between px-3 py-1.5 font-mono text-xs ${
                         flatIndex === idx ? 'bg-accent/15 text-fg' : 'text-fg-muted'
                       }`}
                     >
