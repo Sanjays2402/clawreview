@@ -92,6 +92,22 @@ function fuzzyScore(needle: string, haystack: string): number | null {
   return 1000 + firstAt;
 }
 
+/**
+ * Pull a `status:<value>` token out of the query. When present, the palette
+ * scopes results to review commands whose status matches `<value>` (prefix, so
+ * `status:fail` -> failed), and the leftover text fuzzy-matches as usual --
+ * e.g. `status:failed api` finds failed reviews on the api repo. Returns the
+ * lowercased status value (or null) plus the remaining query with the token
+ * removed. The token can sit anywhere in the string.
+ */
+export function parseStatusFilter(raw: string): { statusFilter: string | null; restQuery: string } {
+  const m = raw.match(/\bstatus:([a-z]+)/i);
+  if (!m || m.index === undefined) return { statusFilter: null, restQuery: raw };
+  const value = m[1]!.toLowerCase();
+  const rest = (raw.slice(0, m.index) + raw.slice(m.index + m[0].length)).replace(/\s+/g, ' ').trim();
+  return { statusFilter: value, restQuery: rest };
+}
+
 export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentReviewEntry[] }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -148,9 +164,27 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     return [...ROUTES, ...reviewCmds];
   }, [recentReviews]);
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    if (!needle) return commands;
+  const { filtered, statusFilter } = useMemo(() => {
+    const { statusFilter: sf, restQuery } = parseStatusFilter(q);
+    const needle = restQuery.trim().toLowerCase();
+
+    // With an active status: filter, scope to review commands whose status
+    // matches (prefix), then fuzzy-rank the leftover text within that scope.
+    // Routes carry no status, so they drop out entirely while the filter is on.
+    if (sf) {
+      const scoped = commands.filter((c) => c.status != null && c.status.toLowerCase().startsWith(sf));
+      if (!needle) return { filtered: scoped, statusFilter: sf };
+      const scored: Array<{ cmd: Cmd; score: number }> = [];
+      for (const cmd of scoped) {
+        const hay = `${cmd.label} ${cmd.id} ${cmd.keywords ?? ''}`.toLowerCase();
+        const score = fuzzyScore(needle, hay);
+        if (score != null) scored.push({ cmd, score });
+      }
+      scored.sort((a, b) => a.score - b.score);
+      return { filtered: scored.map((s) => s.cmd), statusFilter: sf };
+    }
+
+    if (!needle) return { filtered: commands, statusFilter: null };
     const scored: Array<{ cmd: Cmd; score: number }> = [];
     for (const cmd of commands) {
       const hay = `${cmd.label} ${cmd.id} ${cmd.keywords ?? ''}`.toLowerCase();
@@ -158,7 +192,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
       if (score != null) scored.push({ cmd, score });
     }
     scored.sort((a, b) => a.score - b.score);
-    return scored.map((s) => s.cmd);
+    return { filtered: scored.map((s) => s.cmd), statusFilter: null };
   }, [q, commands]);
 
   // Keep the active row visible as arrow-key / ctrl-n/p nav moves `idx`. The
@@ -208,7 +242,11 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   const navigateMatched = sections.some((s) => s.group === 'navigate');
   const showEmptyReviews =
     querying && filtered.length > 0 && !reviewsMatched && recentReviews.length > 0;
-  const showEmptyNavigate = querying && filtered.length > 0 && !navigateMatched;
+  // When a status: filter is active, routes are intentionally excluded (they
+  // carry no status), so a "no matching pages" placeholder would mislead --
+  // suppress the navigate affordance for the duration of the filter.
+  const showEmptyNavigate =
+    querying && !statusFilter && filtered.length > 0 && !navigateMatched;
 
   return (
     <div
@@ -262,12 +300,45 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
               if (cmd) run(cmd);
             }
           }}
-          placeholder="jump to a page or review..."
+          placeholder="jump to a page or review... (try status:failed)"
           className="w-full border-b border-border-subtle bg-bg px-3 py-2.5 font-mono text-xs text-fg outline-none placeholder:text-fg-subtle"
         />
+        {/* Active status-filter pill: when a `status:<value>` token is parsed
+            out of the query, show a removable chip with the matching status dot
+            so the active scope is legible (and the dots in the rows below have
+            a key). Clicking the chip strips the token from the query, restoring
+            the full list. */}
+        {statusFilter ? (
+          <div className="flex items-center gap-2 border-b border-border-subtle/60 bg-bg-subtle/30 px-3 py-1.5 font-mono text-[10px]">
+            <span className="uppercase tracking-wider text-fg-subtle">filter</span>
+            <button
+              type="button"
+              onClick={() => {
+                setQ((cur) => parseStatusFilter(cur).restQuery);
+                setIdx(0);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg px-1.5 py-0.5 text-fg-muted transition-colors hover:border-border hover:text-fg"
+              title="clear status filter"
+            >
+              <span
+                className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[statusFilter] ?? 'bg-fg-subtle'}`}
+                aria-hidden
+              />
+              <span>status: {statusFilter}</span>
+              <span className="text-fg-subtle" aria-hidden>
+                &times;
+              </span>
+            </button>
+            <span className="tabular-nums text-fg-subtle">
+              {filtered.length} match{filtered.length === 1 ? '' : 'es'}
+            </span>
+          </div>
+        ) : null}
         <ul className="max-h-80 overflow-y-auto py-1">
           {filtered.length === 0 ? (
-            <li className="px-3 py-2 font-mono text-xs text-fg-subtle">no matches</li>
+            <li className="px-3 py-2 font-mono text-xs text-fg-subtle">
+              {statusFilter ? `no reviews with status: ${statusFilter}` : 'no matches'}
+            </li>
           ) : (
             <>
               {/* Empty navigate-section affordance: a query that matched only
