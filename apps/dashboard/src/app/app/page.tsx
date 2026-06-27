@@ -234,9 +234,26 @@ export default async function AppOverviewPage() {
                 })}
               </div>
               <ul className="divide-y divide-border-subtle font-mono text-xs">
-                {sla.breaches.slice(0, 5).map((b) => {
-                  const overdue = b.overdueHours ?? Math.max(0, b.ageHours - b.slaHours);
-                  return (
+                {(() => {
+                  // Compact overdue-bar idiom, mirroring the full SLA table
+                  // (tick 40): the +Nh readout alone makes a 2-hour breach read
+                  // the same as a 40-day one. Draw a proportional bar (normalised
+                  // to the worst breach shown) and brighten the worst-in-view row
+                  // so the breach most needing attention pops. Only worth it with
+                  // 3+ rows AND real spread -- a couple of similar breaches has no
+                  // meaningful "worst" to flag.
+                  const shown = sla.breaches.slice(0, 5);
+                  const overdueOf = (b: (typeof shown)[number]) =>
+                    b.overdueHours ?? Math.max(0, b.ageHours - b.slaHours);
+                  const vals = shown.map(overdueOf);
+                  const maxOverdue = vals.length > 0 ? Math.max(...vals) : 0;
+                  const minOverdue = vals.length > 0 ? Math.min(...vals) : 0;
+                  const emphasisOn = shown.length >= 3 && maxOverdue > minOverdue;
+                  return shown.map((b) => {
+                    const overdue = overdueOf(b);
+                    const worst = emphasisOn && overdue >= maxOverdue;
+                    const overduePct = maxOverdue > 0 ? Math.max((overdue / maxOverdue) * 100, 6) : 0;
+                    return (
                     <li key={b.findingId} className="focus-within:bg-accent/[0.07]">
                       <Link
                         href={`/app/reviews/${b.reviewId}` as any}
@@ -253,17 +270,31 @@ export default async function AppOverviewPage() {
                           {Math.round(b.ageHours)}h / {b.slaHours}h
                         </span>
                         {overdue > 0 ? (
-                          <span
-                            className="shrink-0 tabular-nums font-medium text-severity-critical"
-                            title="hours overdue"
-                          >
-                            +{Math.round(overdue)}h
+                          <span className="flex shrink-0 items-center gap-1.5">
+                            {emphasisOn ? (
+                              <span
+                                className="relative hidden h-1.5 w-10 shrink-0 overflow-hidden rounded-sm bg-bg-muted sm:block"
+                                aria-hidden
+                              >
+                                <span
+                                  className={`absolute inset-y-0 left-0 ${worst ? 'bg-severity-critical' : 'bg-severity-critical/45'}`}
+                                  style={{ width: `${overduePct}%` }}
+                                />
+                              </span>
+                            ) : null}
+                            <span
+                              className={`tabular-nums font-medium ${worst ? 'text-severity-critical' : 'text-severity-critical/80'}`}
+                              title={worst ? 'most overdue breach shown' : 'hours overdue'}
+                            >
+                              +{Math.round(overdue)}h
+                            </span>
                           </span>
                         ) : null}
                       </Link>
                     </li>
-                  );
-                })}
+                    );
+                  });
+                })()}
               </ul>
               {sla.totalBreaches > 5 ? (
                 <Link
