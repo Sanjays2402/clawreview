@@ -6,6 +6,7 @@ import type { ReactNode } from 'react';
 
 import { Tooltip } from '@/components/ui/tooltip';
 import { AgentDurationBar } from '@/components/charts/agent-duration-bar';
+import { LeaderPill } from '@/components/charts/leader-pill';
 import type { AgentExecutionDto } from '@/lib/data';
 import { formatMs } from '@/lib/format';
 
@@ -170,12 +171,10 @@ export function AgentTimeline({ executions }: { executions: AgentExecutionDto[] 
                     {ex.agent}
                   </span>
                   {isBottleneck ? (
-                    <span
-                      className="shrink-0 rounded-sm border border-severity-high/40 bg-severity-high/10 px-1 text-[9px] uppercase tracking-wider text-severity-high"
+                    <LeaderPill
+                      label="slowest"
                       title={`slowest agent: ${shareOfTotal.toFixed(0)}% of total time`}
-                    >
-                      slowest
-                    </span>
+                    />
                   ) : null}
                 </span>
                 <AgentDurationBar

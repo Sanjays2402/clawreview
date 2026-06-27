@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 
 import { AgentDurationBar } from '@/components/charts/agent-duration-bar';
+import { LeaderPill } from '@/components/charts/leader-pill';
 import { formatMs } from '@/lib/format';
 
 export interface AgentPerfRow {
@@ -117,12 +118,7 @@ export function AgentPerformanceTable({ rows }: { rows: AgentPerfRow[] }) {
                         {row.agent}
                       </span>
                       {isLeader ? (
-                        <span
-                          className="shrink-0 rounded-sm border border-severity-high/40 bg-severity-high/10 px-1 text-[9px] uppercase tracking-wider text-severity-high"
-                          title={leaderTitle}
-                        >
-                          {leaderLabel}
-                        </span>
+                        <LeaderPill label={leaderLabel} title={leaderTitle} />
                       ) : null}
                     </span>
                   </td>
