@@ -94,7 +94,12 @@ export function FindingRow({
         // scrolls off during a long triage pass -- the inline state change
         // alone is easy to miss when you're moving fast with x / r. Neutral
         // tone: a dismiss is a deactivation, distinct from the reopen below.
-        toast('finding dismissed', { tone: 'neutral' });
+        // Carry an "undo" action that reopens this finding, so a too-fast x is
+        // forgiving -- one click restores it without hunting the row back down.
+        toast('finding dismissed', {
+          tone: 'neutral',
+          action: { label: 'undo', onClick: () => onReopen() },
+        });
       }
     });
   }

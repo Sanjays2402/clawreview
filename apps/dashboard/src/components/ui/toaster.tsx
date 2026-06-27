@@ -34,21 +34,39 @@ import type { Icon } from '@phosphor-icons/react';
  * lifetime so the running tally stays on-screen while you keep working. Only
  * the MOST RECENT toast dedupes -- an interleaved different message starts a
  * fresh entry, so "dismissed / reopened / dismissed" stays legible as three.
+ *
+ * Undo affordance: a destructive-feeling action (a single-finding dismiss) can
+ * attach an `action` -- an "undo" button rendered inline. An actionable toast
+ * is NEVER deduped (each undo targets a different finding, so collapsing them
+ * would point undo at the wrong one) and gets a longer default lifetime so
+ * there's time to actually reach for it. The CustomEvent detail carries the
+ * callback by reference (same realm, no serialization), so the button just
+ * invokes it and dismisses itself.
  */
 
 export type ToastTone = 'success' | 'info' | 'neutral' | 'error';
 
+export interface ToastAction {
+  /** Short verb shown on the inline button, e.g. "undo". */
+  label: string;
+  /** Invoked on click. The toast dismisses itself afterward. */
+  onClick: () => void;
+}
+
 export interface ToastOptions {
   /** Action-scoped glyph + accent. Default 'success'. */
   tone?: ToastTone;
-  /** Lifetime before auto-dismiss, ms. Default 1800. */
+  /** Lifetime before auto-dismiss, ms. Default 1800 (5000 when an action is set). */
   durationMs?: number;
+  /** Optional inline action button (e.g. undo). Disables dedupe for this toast. */
+  action?: ToastAction;
 }
 
 export interface ToastDetail {
   message: string;
   tone: ToastTone;
   durationMs?: number;
+  action?: ToastAction;
 }
 
 const TOAST_EVENT = 'cr:toast';
@@ -67,6 +85,7 @@ export function toast(message: string, opts?: number | ToastOptions): void {
         message,
         tone: normalized.tone ?? 'success',
         durationMs: normalized.durationMs,
+        action: normalized.action,
       },
     }),
   );
@@ -97,6 +116,8 @@ interface ActiveToast {
   /** Latest expiry token. Each repeat mints a fresh token so the previous
    *  removal timer becomes a harmless no-op (its token no longer matches). */
   token: number;
+  /** Optional inline action; when present the toast is never deduped. */
+  action?: ToastAction;
 }
 
 export function Toaster() {
@@ -108,18 +129,24 @@ export function Toaster() {
       const detail = (e as CustomEvent<ToastDetail>).detail;
       if (!detail?.message) return;
       const token = ++seq;
-      const ttl = detail.durationMs ?? 1800;
+      // An actionable toast lingers longer so there's time to reach the button.
+      const ttl = detail.durationMs ?? (detail.action ? 5000 : 1800);
       const tone = detail.tone ?? 'success';
       setToasts((cur) => {
         const last = cur[cur.length - 1];
         // Collapse a repeat of the most-recent message: bump its count and
         // re-token it (refreshing the lifetime) instead of stacking a clone.
         // A tone change on the same message also re-tones the live toast.
-        if (last && last.message === detail.message) {
+        // BUT never collapse an actionable toast (or onto one): each carries a
+        // distinct callback, so merging would point undo at the wrong target.
+        if (last && last.message === detail.message && !last.action && !detail.action) {
           const merged: ActiveToast = { ...last, count: last.count + 1, token, tone };
           return [...cur.slice(0, -1), merged];
         }
-        return [...cur, { key: token, message: detail.message, tone, count: 1, token }].slice(-3);
+        return [
+          ...cur,
+          { key: token, message: detail.message, tone, count: 1, token, action: detail.action },
+        ].slice(-3);
       });
       window.setTimeout(() => {
         // Only removes the toast still carrying THIS token. A toast that was
@@ -160,6 +187,19 @@ export function Toaster() {
               >
                 &times;{t.count}
               </span>
+            ) : null}
+            {t.action ? (
+              <button
+                type="button"
+                onClick={() => {
+                  t.action?.onClick();
+                  // Dismiss this toast immediately once the action fires.
+                  setToasts((cur) => cur.filter((x) => x.token !== t.token));
+                }}
+                className="pointer-events-auto ml-0.5 shrink-0 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
+              >
+                {t.action.label}
+              </button>
             ) : null}
           </div>
         );
