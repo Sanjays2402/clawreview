@@ -87,26 +87,80 @@ export default async function AppOverviewPage() {
         <Card>
           <CardHeader>
             <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">reliability</div>
+            <div className="font-mono text-[11px] tabular-nums text-fg-muted">
+              {Math.round((1 - failRate) * 100)}% clean
+            </div>
           </CardHeader>
           <CardBody>
-            <div className="flex items-center gap-3">
-              {failRate === 0 ? (
-                <CheckCircle size={22} weight="duotone" className="text-emerald-400" />
-              ) : (
-                <Warning size={22} weight="duotone" className="text-severity-medium" />
-              )}
-              <div>
-                <div className="font-mono text-xl font-semibold tracking-tight tabular-nums">
-                  {weekly.completedReviews}/{weekly.totalReviews}
+            {(() => {
+              // Dense reliability readout: a completion bar split into clean
+              // (emerald), failed (critical) and any still-running (neutral)
+              // segments so the health mix reads at a glance, plus a mono
+              // N/M + percentage. Mirrors the dense lowercase/mono language
+              // the SLA block (tick 41) and the rest of the overview already use.
+              const total = weekly.totalReviews;
+              const completed = weekly.completedReviews;
+              const failed = weekly.failedReviews;
+              const inProgress = Math.max(0, total - completed - failed);
+              const pct = (n: number) => (total > 0 ? (n / total) * 100 : 0);
+              return (
+                <div className="space-y-2.5">
+                  <div className="flex items-center gap-2.5">
+                    {failRate === 0 ? (
+                      <CheckCircle size={18} weight="duotone" className="shrink-0 text-emerald-400" />
+                    ) : (
+                      <Warning size={18} weight="duotone" className="shrink-0 text-severity-medium" />
+                    )}
+                    <div className="flex items-baseline gap-1.5 font-mono">
+                      <span className="text-xl font-semibold tracking-tight tabular-nums text-fg">
+                        {completed}
+                      </span>
+                      <span className="text-sm tabular-nums text-fg-subtle">/ {total}</span>
+                      <span className="text-[11px] text-fg-muted">clean reviews</span>
+                    </div>
+                  </div>
+
+                  {total > 0 ? (
+                    <span
+                      className="flex h-1.5 w-full overflow-hidden rounded-full bg-bg-muted"
+                      title={`${completed} clean / ${failed} failed${inProgress > 0 ? ` / ${inProgress} running` : ''}`}
+                      aria-hidden
+                    >
+                      {completed > 0 ? (
+                        <span className="h-full bg-emerald-500/70" style={{ width: `${pct(completed)}%` }} />
+                      ) : null}
+                      {failed > 0 ? (
+                        <span className="h-full bg-severity-critical/70" style={{ width: `${pct(failed)}%` }} />
+                      ) : null}
+                      {inProgress > 0 ? (
+                        <span className="h-full bg-fg-subtle/30" style={{ width: `${pct(inProgress)}%` }} />
+                      ) : null}
+                    </span>
+                  ) : (
+                    <div className="font-mono text-[11px] text-fg-subtle">no reviews in window.</div>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px] text-fg-muted">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" aria-hidden />
+                      <span className="tabular-nums text-fg">{completed}</span> clean
+                    </span>
+                    {failed > 0 ? (
+                      <span className="inline-flex items-center gap-1.5 text-severity-critical">
+                        <span className="h-1.5 w-1.5 rounded-full bg-severity-critical/70" aria-hidden />
+                        <span className="tabular-nums">{failed}</span> failed in {weekly.windowDays}d
+                      </span>
+                    ) : null}
+                    {inProgress > 0 ? (
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-1.5 w-1.5 rounded-full bg-fg-subtle/40" aria-hidden />
+                        <span className="tabular-nums text-fg">{inProgress}</span> running
+                      </span>
+                    ) : null}
+                  </div>
                 </div>
-                <div className="font-mono text-[11px] text-fg-muted">clean reviews</div>
-              </div>
-            </div>
-            {weekly.failedReviews > 0 ? (
-              <div className="mt-2 rounded-sm border border-severity-medium/40 bg-severity-medium/5 px-2 py-1 font-mono text-[11px] text-severity-medium">
-                {weekly.failedReviews} failed in {weekly.windowDays}d.
-              </div>
-            ) : null}
+              );
+            })()}
           </CardBody>
         </Card>
       </div>
