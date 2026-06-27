@@ -84,6 +84,19 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   });
   const items = sortItems(rawItems, sortKey, sortDir);
 
+  // Spend-outlier detection over the displayed page: a review whose cost is a
+  // clear spike vs the page mean gets a hollow ring + tint, so a runaway
+  // review pops out of a long list without reading every number. Same idiom
+  // (and threshold) as the repo-detail spend sparkline -- "at least 1.6x the
+  // mean AND above an absolute floor" so a uniformly-cheap account doesn't
+  // light up every tiny wobble. Membership is the same regardless of sort.
+  const spendMean =
+    items.length > 0 ? items.reduce((sum, r) => sum + r.totalCostUsd, 0) / items.length : 0;
+  const spendFloor = Math.max(spendMean * 1.6, 0.05);
+  const spendOutliersOn = items.length >= 2 && spendMean > 0;
+  const isSpendOutlier = (v: number) => spendOutliersOn && v >= spendFloor;
+  const spikeCount = spendOutliersOn ? items.filter((r) => isSpendOutlier(r.totalCostUsd)).length : 0;
+
   function hrefWith(
     next: Partial<{ status: string; owner: string; repo: string; sort: string; dir: string }>,
   ): string {
@@ -189,8 +202,17 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
           <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">
             {items.length} result{items.length === 1 ? '' : 's'}
           </div>
-          <div className="font-mono text-[11px] text-fg-muted">
-            sorted by {sortKey} {sortDir === 'desc' ? 'desc' : 'asc'}
+          <div className="flex items-center gap-2.5 font-mono text-[11px] text-fg-muted">
+            {spikeCount > 0 ? (
+              <span className="inline-flex items-center gap-1" title={`${spikeCount} review${spikeCount === 1 ? '' : 's'} with spend >= ${spendFloor.toFixed(2)} (page mean ${spendMean.toFixed(2)})`}>
+                <span
+                  className="inline-block h-2 w-2 rounded-full border-[1.5px] border-severity-high"
+                  aria-hidden
+                />
+                <span className="tabular-nums">{spikeCount}</span> cost {spikeCount === 1 ? 'spike' : 'spikes'}
+              </span>
+            ) : null}
+            <span>sorted by {sortKey} {sortDir === 'desc' ? 'desc' : 'asc'}</span>
           </div>
         </CardHeader>
         <CardBody className="p-0">
@@ -268,7 +290,22 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                         <span className="tabular-nums text-fg-subtle"> / {r.totalFindings}</span>
                       </td>
                       <td className="tabular-nums text-fg-muted">{formatMs(r.durationMs)}</td>
-                      <td className="tabular-nums text-fg-muted">{formatUsd(r.totalCostUsd)}</td>
+                      <td className="tabular-nums">
+                        {isSpendOutlier(r.totalCostUsd) ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-severity-high"
+                            title={`cost spike: >= ${spendFloor.toFixed(2)} (page mean ${spendMean.toFixed(2)})`}
+                          >
+                            <span
+                              className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border-[1.5px] border-severity-high"
+                              aria-hidden
+                            />
+                            {formatUsd(r.totalCostUsd)}
+                          </span>
+                        ) : (
+                          <span className="text-fg-muted">{formatUsd(r.totalCostUsd)}</span>
+                        )}
+                      </td>
                       <td className="px-3 text-right tabular-nums text-fg-muted">
                         <LiveRelativeTime iso={r.createdAt} />
                       </td>
