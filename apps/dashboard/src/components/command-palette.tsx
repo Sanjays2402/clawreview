@@ -251,8 +251,17 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           ) : (
             sections.map((sec) => (
               <li key={sec.group}>
-                <div className="px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
-                  {GROUP_LABEL[sec.group]}
+                <div className="flex items-center justify-between px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                  <span>{GROUP_LABEL[sec.group]}</span>
+                  {/* Per-section match count: when a fuzzy query narrows the
+                      list, this makes "2 reviews vs 8 routes" legible without
+                      counting rows. Hidden when the section is a single row
+                      (the count adds no information there). */}
+                  {sec.items.length > 1 ? (
+                    <span className="tabular-nums text-fg-subtle/70" aria-hidden>
+                      {sec.items.length}
+                    </span>
+                  ) : null}
                 </div>
                 <ul>
                   {sec.items.map(({ cmd, flatIndex }) => (
