@@ -190,6 +190,18 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     sec.items.push({ cmd, flatIndex: i });
   });
 
+  // Empty-section affordance: when a fuzzy query filters every recent-review
+  // command out but the account HAS recent reviews, the "recent reviews"
+  // group silently vanishes -- leaving the user unsure whether the group
+  // exists or just didn't match. Surface a non-interactive placeholder so the
+  // group's absence is explained ("no matching reviews") rather than mysterious.
+  // Only while querying (the unfiltered list always shows the section) and only
+  // when there's a non-navigate group to explain.
+  const querying = q.trim().length > 0;
+  const reviewsMatched = sections.some((s) => s.group === 'reviews');
+  const showEmptyReviews =
+    querying && filtered.length > 0 && !reviewsMatched && recentReviews.length > 0;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-start justify-center bg-black/60 p-4 pt-[12vh]"
@@ -300,6 +312,20 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
               </li>
             ))
           )}
+          {/* Empty-section affordance: explain the absent "recent reviews"
+              group rather than letting it vanish silently under a query that
+              matched only routes. Non-interactive (no flatIndex, never the
+              active row) so arrow-key nav skips it. */}
+          {showEmptyReviews ? (
+            <li>
+              <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle/50 bg-bg px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                <span>{GROUP_LABEL.reviews}</span>
+              </div>
+              <div className="px-3 py-1.5 font-mono text-xs text-fg-subtle">
+                no matching reviews
+              </div>
+            </li>
+          ) : null}
         </ul>
         <div className="flex items-center justify-between border-t border-border-subtle bg-bg-subtle/40 px-3 py-1.5 font-mono text-[10px] text-fg-subtle">
           <span>↑↓ wrap · ⇥ section · ⤒⤓ ends · ↵ select · esc close</span>
