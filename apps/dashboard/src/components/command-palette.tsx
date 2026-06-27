@@ -108,6 +108,41 @@ export function parseStatusFilter(raw: string): { statusFilter: string | null; r
   return { statusFilter: value, restQuery: rest };
 }
 
+/**
+ * True when the query is a bare `status:` token with no value typed yet (the
+ * `[a-z]+` requirement in {@link parseStatusFilter} means bare `status:` parses
+ * to no filter and dead-ends in a meaningless fuzzy match). We special-case it
+ * to surface a status-completion hint row instead.
+ */
+export function isBareStatusQuery(raw: string): boolean {
+  return /^\s*status:\s*$/i.test(raw);
+}
+
+/**
+ * Distinct review statuses present in the given set, with counts, ordered by a
+ * stable operational priority (running first, dismissed last) then any unknown
+ * statuses alphabetically. Drives the `status:` completion hint chips.
+ */
+export function statusSuggestions(
+  reviews: ReadonlyArray<{ status: string }>,
+): Array<{ status: string; count: number }> {
+  const PRIORITY = ['running', 'queued', 'failed', 'completed', 'resolved', 'open', 'dismissed'];
+  const counts = new Map<string, number>();
+  for (const r of reviews) {
+    const s = (r.status ?? '').toLowerCase();
+    if (s) counts.set(s, (counts.get(s) ?? 0) + 1);
+  }
+  return [...counts.keys()]
+    .sort((a, b) => {
+      const ai = PRIORITY.indexOf(a);
+      const bi = PRIORITY.indexOf(b);
+      const ar = ai < 0 ? 999 : ai;
+      const br = bi < 0 ? 999 : bi;
+      return ar !== br ? ar - br : a.localeCompare(b);
+    })
+    .map((s) => ({ status: s, count: counts.get(s)! }));
+}
+
 export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentReviewEntry[] }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
@@ -165,6 +200,12 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   }, [recentReviews]);
 
   const { filtered, statusFilter } = useMemo(() => {
+    // A bare `status:` (value not yet typed) is handled by the completion-hint
+    // chips below, not the fuzzy list -- and `status:` as a raw needle would
+    // otherwise fuzzy-match route labels that happen to contain a colon. Return
+    // an empty result so the list is quiet and Enter has nothing stray to run.
+    if (isBareStatusQuery(q)) return { filtered: [] as Cmd[], statusFilter: null };
+
     const { statusFilter: sf, restQuery } = parseStatusFilter(q);
     const needle = restQuery.trim().toLowerCase();
 
@@ -194,6 +235,16 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     scored.sort((a, b) => a.score - b.score);
     return { filtered: scored.map((s) => s.cmd), statusFilter: null };
   }, [q, commands]);
+
+  // Bare `status:` (no value yet) is a discoverability dead-end: it parses to
+  // no filter and fuzzy-matches nothing useful. Detect it and offer the
+  // statuses that actually exist in the recent-review set as one-click
+  // completions, so the operator learns the vocabulary without guessing.
+  const bareStatus = isBareStatusQuery(q);
+  const statusOptions = useMemo(
+    () => (bareStatus ? statusSuggestions(recentReviews) : []),
+    [bareStatus, recentReviews],
+  );
 
   // Keep the active row visible as arrow-key / ctrl-n/p nav moves `idx`. The
   // list is a fixed-height scroll container, so `block: 'nearest'` nudges just
@@ -335,9 +386,44 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           </div>
         ) : null}
         <ul className="max-h-80 overflow-y-auto py-1">
-          {filtered.length === 0 ? (
+          {/* Bare `status:` completion hint: instead of dead-ending on "no
+              matches", surface the statuses that actually exist in the recent
+              reviews as one-click chips. Clicking one fills the query with the
+              full token (plus a trailing space, ready for an optional fuzzy
+              term) so the operator discovers the vocabulary by doing. */}
+          {bareStatus && statusOptions.length > 0 ? (
+            <li>
+              <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle/50 bg-bg px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                <span>filter by status</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 px-3 py-2">
+                {statusOptions.map((s) => (
+                  <button
+                    key={s.status}
+                    type="button"
+                    onClick={() => {
+                      setQ(`status:${s.status} `);
+                      setIdx(0);
+                    }}
+                    className="group inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg-subtle/50 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s.status] ?? 'bg-fg-subtle'}`}
+                      aria-hidden
+                    />
+                    <span>{s.status}</span>
+                    <span className="tabular-nums text-fg-subtle">{s.count}</span>
+                  </button>
+                ))}
+              </div>
+            </li>
+          ) : filtered.length === 0 ? (
             <li className="px-3 py-2 font-mono text-xs text-fg-subtle">
-              {statusFilter ? `no reviews with status: ${statusFilter}` : 'no matches'}
+              {bareStatus
+                ? 'no recent reviews to filter'
+                : statusFilter
+                  ? `no reviews with status: ${statusFilter}`
+                  : 'no matches'}
             </li>
           ) : (
             <>
