@@ -4,6 +4,7 @@ import { ArrowUp, ArrowDown, ArrowRight, Timer, X } from '@phosphor-icons/react/
 import { EmptyState, SeverityBadge } from '@clawreview/ui';
 
 import { ListKeyboardNav } from '@/components/list-keyboard-nav';
+import { SeverityRow } from '@/components/review/severity-row';
 import { StickyBar } from '@/components/ui/sticky-bar';
 import { EmptyStateActions } from '@/components/ui/empty-state-actions';
 import type { Severity, SlaBreach } from '@/lib/data';
@@ -169,6 +170,31 @@ export function SlaBreachesTable({
           })}
         </div>
       </StickyBar>
+
+      {/* Severity-mix bar: proportions across ALL breaches (ignores the active
+          sev filter so every segment stays a live switcher, like the findings
+          page). Each segment deep-links to its ?sev= tab; clicking the active
+          severity toggles back to all. Only worth drawing with 2+ severities
+          present -- a single-severity bar is just the tab count restated. */}
+      {(() => {
+        const present = SEV_ORDER.filter((s) => counts[s] > 0).length;
+        if (breaches.length === 0 || present < 2) return null;
+        return (
+          <div className="rounded-sm border border-border-subtle bg-bg-subtle/30 px-2.5 py-2">
+            <div className="mb-1.5 flex items-center justify-between font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+              <span>severity mix</span>
+              <span className="tabular-nums text-fg-muted">
+                {severity === 'all' ? `${breaches.length} breaches` : `filtered to ${severity}`}
+              </span>
+            </div>
+            <SeverityRow
+              counts={counts}
+              total={breaches.length}
+              hrefFor={(sev) => hrefWith({ sev: severity === sev ? '' : sev })}
+            />
+          </div>
+        );
+      })()}
 
       {chips.length > 0 ? (
         <div className="flex flex-wrap items-center gap-1.5 font-mono text-[11px]">
