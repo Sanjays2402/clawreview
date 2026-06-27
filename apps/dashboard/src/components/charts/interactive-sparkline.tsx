@@ -18,6 +18,20 @@ export interface InteractiveSparklineProps {
    * Receives the raw bucket value.
    */
   formatValue?: (v: number) => string;
+  /**
+   * Bucket indices to flag as outliers. Each gets an always-visible hollow
+   * ring (in {@link markerColor}) so a spike reads at a glance without
+   * hovering -- e.g. a review whose spend is well above the repo average.
+   * Out-of-range indices are ignored.
+   */
+  markers?: number[];
+  /**
+   * Stroke color for the outlier rings. A plain CSS color string (not a
+   * Tailwind class) so the SVG renders regardless of JIT class generation;
+   * the severity palette is static hex across themes. Defaults to the
+   * `severity.high` token (#f97316).
+   */
+  markerColor?: string;
 }
 
 interface Pt {
@@ -46,6 +60,8 @@ export function InteractiveSparkline({
   className,
   unit = 'finding',
   formatValue,
+  markers,
+  markerColor = '#f97316',
 }: InteractiveSparklineProps) {
   const id = useId();
   const [active, setActive] = useState<number | null>(null);
@@ -64,6 +80,14 @@ export function InteractiveSparkline({
     }));
     return { pts: points, min: lo, max: hi };
   }, [data, labels, width, height]);
+
+  const markerSet = useMemo(() => {
+    const s = new Set<number>();
+    for (const m of markers ?? []) {
+      if (Number.isInteger(m) && m >= 0 && m < data.length) s.add(m);
+    }
+    return s;
+  }, [markers, data.length]);
 
   if (pts.length === 0) {
     return <svg width={width} height={height} className={className} />;
@@ -126,6 +150,25 @@ export function InteractiveSparkline({
           strokeLinecap="round"
           strokeLinejoin="round"
         />
+        {/* Outlier rings: always-visible hollow markers so a spike (e.g. a
+            costly review) reads without hovering. Drawn under the active
+            cursor dot so hovering an outlier still shows the filled accent
+            dot on top. */}
+        {markerSet.size > 0
+          ? pts.map((p, i) =>
+              markerSet.has(i) ? (
+                <circle
+                  key={`mk-${i}`}
+                  cx={p.x}
+                  cy={p.y}
+                  r={3.5}
+                  fill="none"
+                  stroke={markerColor}
+                  strokeWidth={1.5}
+                />
+              ) : null,
+            )
+          : null}
         {cur ? (
           <>
             <line

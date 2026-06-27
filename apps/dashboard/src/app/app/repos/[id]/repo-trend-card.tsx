@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { Card, CardBody, CardHeader } from '@clawreview/ui';
 
@@ -34,6 +34,24 @@ export function RepoTrendCard({
   const peak = count > 0 ? Math.max(...series) : 0;
   const sum = series.reduce((a, b) => a + b, 0);
   const avg = count > 0 ? sum / count : 0;
+
+  // Spend outliers: reviews whose cost is a clear spike vs the repo's own
+  // average, so a runaway review pops without reading every hover. Threshold
+  // is "at least 1.6x the mean AND above an absolute floor" so a repo that's
+  // uniformly cheap doesn't light up every tiny wobble. Findings are not
+  // marked -- a high finding count is signal, not an anomaly to flag.
+  const spendAvg = spend.length > 0 ? spend.reduce((a, b) => a + b, 0) / spend.length : 0;
+  const spendMarkers = useMemo(() => {
+    if (spendAvg <= 0) return [];
+    const floor = Math.max(spendAvg * 1.6, 0.05);
+    const out: number[] = [];
+    spend.forEach((v, i) => {
+      if (v >= floor) out.push(i);
+    });
+    return out;
+  }, [spend, spendAvg]);
+  const markers = isFindings ? undefined : spendMarkers;
+  const outlierCount = isFindings ? 0 : spendMarkers.length;
 
   const fmt = (v: number) => (isFindings ? String(Math.round(v)) : formatUsd(v));
 
@@ -86,10 +104,20 @@ export function RepoTrendCard({
           height={72}
           unit={isFindings ? 'finding' : 'spend'}
           formatValue={isFindings ? undefined : (v) => formatUsd(v)}
+          markers={markers}
           className="w-full"
         />
         <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-fg-subtle">
           <span>oldest</span>
+          {outlierCount > 0 ? (
+            <span className="inline-flex items-center gap-1 text-fg-muted">
+              <span
+                className="inline-block h-2 w-2 rounded-full border-[1.5px] border-severity-high"
+                aria-hidden
+              />
+              {outlierCount} cost {outlierCount === 1 ? 'spike' : 'spikes'}
+            </span>
+          ) : null}
           <span>newest</span>
         </div>
       </CardBody>
