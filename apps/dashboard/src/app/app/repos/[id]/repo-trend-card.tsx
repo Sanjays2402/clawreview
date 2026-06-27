@@ -38,8 +38,8 @@ export function RepoTrendCard({
   // Spend outliers: reviews whose cost is a clear spike vs the repo's own
   // average, so a runaway review pops without reading every hover. Threshold
   // is "at least 1.6x the mean AND above an absolute floor" so a repo that's
-  // uniformly cheap doesn't light up every tiny wobble. Findings are not
-  // marked -- a high finding count is signal, not an anomaly to flag.
+  // uniformly cheap doesn't light up every tiny wobble. Drawn in the alarming
+  // severity-high orange -- a cost spike is something to act on.
   const spendAvg = spend.length > 0 ? spend.reduce((a, b) => a + b, 0) / spend.length : 0;
   const spendMarkers = useMemo(() => {
     if (spendAvg <= 0) return [];
@@ -50,8 +50,30 @@ export function RepoTrendCard({
     });
     return out;
   }, [spend, spendAvg]);
-  const markers = isFindings ? undefined : spendMarkers;
-  const outlierCount = isFindings ? 0 : spendMarkers.length;
+
+  // Findings "above baseline" markers: a high finding count is signal, not an
+  // anomaly to alarm on -- but a sudden JUMP from this repo's own baseline is
+  // worth a quiet flag (a big PR, or a quality regression worth a look). We
+  // require both a ratio (>= 1.8x mean) AND an absolute gap (>= mean + 3) so a
+  // 1 -> 2 wobble never triggers. Distinct from spend: a neutral accent ring,
+  // not the orange cost-spike alarm, to keep the "interesting, not urgent"
+  // framing the spend markers deliberately avoid.
+  const findingsAvg =
+    findings.length > 0 ? findings.reduce((a, b) => a + b, 0) / findings.length : 0;
+  const findingsMarkers = useMemo(() => {
+    if (findingsAvg <= 0) return [];
+    const ratioFloor = findingsAvg * 1.8;
+    const gapFloor = findingsAvg + 3;
+    const out: number[] = [];
+    findings.forEach((v, i) => {
+      if (v >= ratioFloor && v >= gapFloor) out.push(i);
+    });
+    return out;
+  }, [findings, findingsAvg]);
+
+  const markers = isFindings ? findingsMarkers : spendMarkers;
+  const markerColor = isFindings ? 'hsl(var(--accent))' : '#f97316';
+  const outlierCount = markers.length;
 
   const fmt = (v: number) => (isFindings ? String(Math.round(v)) : formatUsd(v));
 
@@ -105,18 +127,29 @@ export function RepoTrendCard({
           unit={isFindings ? 'finding' : 'spend'}
           formatValue={isFindings ? undefined : (v) => formatUsd(v)}
           markers={markers}
+          markerColor={markerColor}
           className="w-full"
         />
         <div className="mt-2 flex items-center justify-between font-mono text-[10px] text-fg-subtle">
           <span>oldest</span>
           {outlierCount > 0 ? (
-            <span className="inline-flex items-center gap-1 text-fg-muted">
-              <span
-                className="inline-block h-2 w-2 rounded-full border-[1.5px] border-severity-high"
-                aria-hidden
-              />
-              {outlierCount} cost {outlierCount === 1 ? 'spike' : 'spikes'}
-            </span>
+            isFindings ? (
+              <span className="inline-flex items-center gap-1 text-fg-muted">
+                <span
+                  className="inline-block h-2 w-2 rounded-full border-[1.5px] border-accent"
+                  aria-hidden
+                />
+                {outlierCount} above baseline
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 text-fg-muted">
+                <span
+                  className="inline-block h-2 w-2 rounded-full border-[1.5px] border-severity-high"
+                  aria-hidden
+                />
+                {outlierCount} cost {outlierCount === 1 ? 'spike' : 'spikes'}
+              </span>
+            )
           ) : null}
           <span>newest</span>
         </div>
