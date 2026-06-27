@@ -27,7 +27,13 @@ export function BudgetForm({ installationId, currentLimit }: { installationId: n
         // "% used" readouts elsewhere on the page re-render on the server round
         // trip, so a glanceable success cue ties the save to the visible change.
         toast(`budget set to ${formatUsd(n)}/mo`, { tone: 'success' });
-      } else setResult({ ok: false, message: res.error ?? 'Failed' });
+      } else {
+        setResult({ ok: false, message: res.error ?? 'Failed' });
+        // Mirror the success toast on failure so a save that didn't land gets
+        // the same always-visible treatment (error tone), not just the inline
+        // message beside the button.
+        toast(res.error ?? 'budget update failed', { tone: 'error' });
+      }
     });
   }
 

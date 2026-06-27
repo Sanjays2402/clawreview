@@ -34,6 +34,10 @@ export function RerunForm({ review }: { review: ReviewDetail }) {
         router.push(`/app/reviews/${res.reviewId}` as any);
       } else {
         setResult({ ok: false, message: res.error ?? 'failed' });
+        // No navigation happens on failure, so the inline message does read --
+        // but fire the error toast too for parity with the success path and so
+        // a failed re-run is unmissable if the button has scrolled off.
+        toast(res.error ?? 're-run failed', { tone: 'error' });
       }
     });
   }

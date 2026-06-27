@@ -81,8 +81,13 @@ export function FindingRow({
     setError(null);
     startTransition(async () => {
       const res = await dismissFindingAction(finding.id, reviewId, rsn ?? reason);
-      if (!res.ok) setError(res.error ?? 'failed');
-      else {
+      if (!res.ok) {
+        setError(res.error ?? 'failed');
+        // A failed action that scrolls off is as invisible as a silent success
+        // was -- surface the failure in the always-visible corner toast too, so
+        // a fast triage pass doesn't miss that the dismiss didn't take.
+        toast(res.error ?? 'dismiss failed', { tone: 'error' });
+      } else {
         setShowReason(false);
         setReason('');
         // A corner toast confirms the action even after the row collapses or
@@ -98,8 +103,10 @@ export function FindingRow({
     setError(null);
     startTransition(async () => {
       const res = await reopenFindingAction(finding.id, reviewId);
-      if (!res.ok) setError(res.error ?? 'failed');
-      else toast('finding reopened', { tone: 'success' });
+      if (!res.ok) {
+        setError(res.error ?? 'failed');
+        toast(res.error ?? 'reopen failed', { tone: 'error' });
+      } else toast('finding reopened', { tone: 'success' });
     });
   }
 

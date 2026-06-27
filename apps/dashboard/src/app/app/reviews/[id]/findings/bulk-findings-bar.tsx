@@ -46,6 +46,11 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
         toast(`${verb} ${res.updated} finding${res.updated === 1 ? '' : 's'}`, {
           tone: kind === 'dismiss' ? 'neutral' : 'success',
         });
+      } else if (!res.ok) {
+        // A bulk action over a large filter is the most painful to silently
+        // lose -- surface the failure in the corner too, matching the
+        // single-finding error toasts.
+        toast(res.error ?? 'bulk action failed', { tone: 'error' });
       }
     });
   }
