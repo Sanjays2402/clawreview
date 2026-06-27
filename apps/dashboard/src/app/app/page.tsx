@@ -140,22 +140,37 @@ export default async function AppOverviewPage() {
                     <div className="font-mono text-[11px] text-fg-subtle">no reviews in window.</div>
                   )}
 
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 font-mono text-[11px] text-fg-muted">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500/70" aria-hidden />
-                      <span className="tabular-nums text-fg">{completed}</span> clean
-                    </span>
+                  {/* Legend chips deep-link into the filtered reviews list so the
+                      reliability readout is actionable, not just informational --
+                      clicking "failed" lands on /app/reviews?status=failed. The
+                      reviews list already parses ?status=. A subtle hover chevron
+                      (the SeverityRow deep-link idiom) signals they're links. */}
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 font-mono text-[11px] text-fg-muted">
+                    <ReliabilityChip
+                      href="/app/reviews?status=completed"
+                      dot="bg-emerald-500/70"
+                      count={completed}
+                      label="clean"
+                      linked={completed > 0}
+                    />
                     {failed > 0 ? (
-                      <span className="inline-flex items-center gap-1.5 text-severity-critical">
-                        <span className="h-1.5 w-1.5 rounded-full bg-severity-critical/70" aria-hidden />
-                        <span className="tabular-nums">{failed}</span> failed in {weekly.windowDays}d
-                      </span>
+                      <ReliabilityChip
+                        href="/app/reviews?status=failed"
+                        dot="bg-severity-critical/70"
+                        count={failed}
+                        label={`failed in ${weekly.windowDays}d`}
+                        tone="text-severity-critical"
+                        linked
+                      />
                     ) : null}
                     {inProgress > 0 ? (
-                      <span className="inline-flex items-center gap-1.5">
-                        <span className="h-1.5 w-1.5 rounded-full bg-fg-subtle/40" aria-hidden />
-                        <span className="tabular-nums text-fg">{inProgress}</span> running
-                      </span>
+                      <ReliabilityChip
+                        href="/app/reviews?status=running"
+                        dot="bg-fg-subtle/40"
+                        count={inProgress}
+                        label="running"
+                        linked
+                      />
                     ) : null}
                   </div>
                 </div>
@@ -321,4 +336,49 @@ export default async function AppOverviewPage() {
   );
 }
 
+/**
+ * A reliability legend chip. When `linked` (the segment has a non-zero count,
+ * so the filtered list will actually show rows) it renders as a deep link into
+ * /app/reviews with the matching `?status=` filter, with a hover surface + a
+ * chevron that fades in -- the SeverityRow deep-link affordance. A zero-count
+ * "clean" chip stays inert (filtering to it would show nothing).
+ */
+function ReliabilityChip({
+  href,
+  dot,
+  count,
+  label,
+  tone,
+  linked,
+}: {
+  href: string;
+  dot: string;
+  count: number;
+  label: string;
+  tone?: string;
+  linked: boolean;
+}) {
+  const inner = (
+    <>
+      <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden />
+      <span className={`tabular-nums ${tone ? '' : 'text-fg'}`}>{count}</span>
+      <span>{label}</span>
+    </>
+  );
+  if (!linked) {
+    return <span className={`inline-flex items-center gap-1.5 ${tone ?? ''}`}>{inner}</span>;
+  }
+  return (
+    <Link
+      href={href as any}
+      aria-label={`view ${count} ${label} review${count === 1 ? '' : 's'}`}
+      className={`group inline-flex items-center gap-1.5 rounded-sm border border-transparent px-1 py-0.5 transition-colors hover:border-border hover:bg-bg-subtle/60 ${tone ?? ''}`}
+    >
+      {inner}
+      <span className="text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" aria-hidden>
+        &rsaquo;
+      </span>
+    </Link>
+  );
+}
 
