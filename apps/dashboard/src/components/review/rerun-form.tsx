@@ -4,6 +4,7 @@ import { useState, useTransition } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowsClockwise } from '@phosphor-icons/react';
 
+import { toast } from '@/components/ui/toaster';
 import { rerunReviewAction } from '@/app/app/reviews/actions';
 import type { ReviewDetail } from '@/lib/data';
 
@@ -25,6 +26,10 @@ export function RerunForm({ review }: { review: ReviewDetail }) {
       });
       if (res.ok && res.reviewId) {
         setResult({ ok: true, message: `queued ${res.reviewId.slice(0, 8)}` });
+        // The router.push below replaces this page immediately, so the inline
+        // message never gets read. The corner toast lives in the app shell and
+        // survives the navigation, confirming the re-run on the new review page.
+        toast('review re-run queued');
         router.push(`/app/reviews/${res.reviewId}` as any);
       } else {
         setResult({ ok: false, message: res.error ?? 'failed' });

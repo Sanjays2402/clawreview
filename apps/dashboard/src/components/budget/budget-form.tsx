@@ -2,6 +2,8 @@
 
 import { useState, useTransition } from 'react';
 
+import { toast } from '@/components/ui/toaster';
+import { formatUsd } from '@/lib/format';
 import { updateBudgetAction } from '@/app/app/installations/[id]/billing/actions';
 
 export function BudgetForm({ installationId, currentLimit }: { installationId: number; currentLimit: number }) {
@@ -19,8 +21,13 @@ export function BudgetForm({ installationId, currentLimit }: { installationId: n
     setResult(null);
     startTransition(async () => {
       const res = await updateBudgetAction(installationId, n);
-      if (res.ok) setResult({ ok: true, message: 'Saved' });
-      else setResult({ ok: false, message: res.error ?? 'Failed' });
+      if (res.ok) {
+        setResult({ ok: true, message: 'Saved' });
+        // Confirm in the always-visible corner toast too: the budget bar /
+        // "% used" readouts elsewhere on the page re-render on the server round
+        // trip, so a glanceable success cue ties the save to the visible change.
+        toast(`budget set to ${formatUsd(n)}/mo`);
+      } else setResult({ ok: false, message: res.error ?? 'Failed' });
     });
   }
 
