@@ -18,6 +18,14 @@ import { Check } from '@phosphor-icons/react';
  * recent messages, each self-expiring. Mirrors the global-nav toast's visual
  * language (mono, translucent, backdrop-blur, fade-in) so the chrome stays
  * coherent.
+ *
+ * Stack-aware dedupe: a fast triage pass (x/r/x/r...) fires the SAME message
+ * repeatedly. Rather than show three identical "finding dismissed" toasts that
+ * crowd the corner and read as noise, consecutive identical messages collapse
+ * into a single toast with a `xN` counter, and each repeat refreshes the
+ * lifetime so the running tally stays on-screen while you keep working. Only
+ * the MOST RECENT toast dedupes -- an interleaved different message starts a
+ * fresh entry, so "dismissed / reopened / dismissed" stays legible as three.
  */
 
 export interface ToastDetail {
@@ -37,8 +45,14 @@ export function toast(message: string, durationMs?: number): void {
 }
 
 interface ActiveToast {
-  id: number;
+  /** Stable identity for React's key -- preserved across dedupe bumps so the
+   *  collapsed toast updates in place (no remount/flash) when its count ticks. */
+  key: number;
   message: string;
+  count: number;
+  /** Latest expiry token. Each repeat mints a fresh token so the previous
+   *  removal timer becomes a harmless no-op (its token no longer matches). */
+  token: number;
 }
 
 export function Toaster() {
@@ -49,11 +63,23 @@ export function Toaster() {
     function onToast(e: Event) {
       const detail = (e as CustomEvent<ToastDetail>).detail;
       if (!detail?.message) return;
-      const id = ++seq;
+      const token = ++seq;
       const ttl = detail.durationMs ?? 1800;
-      setToasts((cur) => [...cur, { id, message: detail.message }].slice(-3));
+      setToasts((cur) => {
+        const last = cur[cur.length - 1];
+        // Collapse a repeat of the most-recent message: bump its count and
+        // re-token it (refreshing the lifetime) instead of stacking a clone.
+        if (last && last.message === detail.message) {
+          const merged: ActiveToast = { ...last, count: last.count + 1, token };
+          return [...cur.slice(0, -1), merged];
+        }
+        return [...cur, { key: token, message: detail.message, count: 1, token }].slice(-3);
+      });
       window.setTimeout(() => {
-        setToasts((cur) => cur.filter((t) => t.id !== id));
+        // Only removes the toast still carrying THIS token. A toast that was
+        // bumped after this timer was scheduled now holds a newer token, so
+        // this fires as a no-op and its own (later) timer owns the removal.
+        setToasts((cur) => cur.filter((t) => t.token !== token));
       }, ttl);
     }
     window.addEventListener(TOAST_EVENT, onToast as EventListener);
@@ -69,11 +95,19 @@ export function Toaster() {
     >
       {toasts.map((t) => (
         <div
-          key={t.id}
+          key={t.key}
           className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg/90 px-2.5 py-1.5 font-mono text-[11px] text-fg shadow-lg backdrop-blur animate-fade-in"
         >
           <Check size={12} weight="bold" className="shrink-0 text-emerald-400" />
           <span>{t.message}</span>
+          {t.count > 1 ? (
+            <span
+              className="shrink-0 rounded-sm bg-bg-muted px-1 text-[10px] tabular-nums text-fg-muted"
+              aria-label={`${t.count} times`}
+            >
+              &times;{t.count}
+            </span>
+          ) : null}
         </div>
       ))}
     </div>
