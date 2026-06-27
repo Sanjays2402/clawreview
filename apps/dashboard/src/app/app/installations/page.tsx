@@ -68,9 +68,19 @@ export default async function InstallationsPage() {
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
                   {items.map((i) => {
-                    const pct = i.monthlyBudgetUsd > 0 ? Math.min(1, i.spentUsd / i.monthlyBudgetUsd) : 0;
+                    const hasBudget = i.monthlyBudgetUsd > 0;
+                    const ratio = hasBudget ? i.spentUsd / i.monthlyBudgetUsd : 0;
+                    const utilization = Math.min(100, Math.round(ratio * 100));
+                    // Tone ladder matched to the installation settings page:
+                    // over-limit (spend >= budget) -> critical, >=80% -> medium,
+                    // else emerald. The list DTO has no `overLimit` flag, so
+                    // spend >= budget is the proxy for it.
                     const barTone =
-                      pct >= 1 ? 'bg-severity-critical' : pct > 0.8 ? 'bg-severity-medium' : 'bg-emerald-500';
+                      hasBudget && ratio >= 1
+                        ? 'bg-severity-critical'
+                        : utilization >= 80
+                          ? 'bg-severity-medium'
+                          : 'bg-emerald-500';
                     return (
                       <tr key={i.id} className="group/row hover:bg-bg-subtle/40 focus-within:bg-accent/[0.07]">
                         <td className="px-3 py-1.5">
@@ -101,7 +111,10 @@ export default async function InstallationsPage() {
                         <td className="text-fg-muted">
                           <div className="tabular-nums text-fg">{formatUsd(i.spentUsd)}</div>
                           <div className="mt-1 h-1 w-24 overflow-hidden rounded-full bg-bg-muted">
-                            <div className={barTone} style={{ width: `${pct * 100}%`, height: '100%' }} />
+                            <div className={barTone} style={{ width: `${utilization}%`, height: '100%' }} />
+                          </div>
+                          <div className="mt-0.5 text-[10px] tabular-nums text-fg-subtle">
+                            {hasBudget ? `${utilization}% used` : 'no budget set'}
                           </div>
                         </td>
                         <td className="px-3 text-right">
