@@ -67,7 +67,8 @@ export function FindingRow({
       setTimeout(() => setCopied(false), 1400);
       // Also fire a corner toast: the inline check is invisible once this row
       // has scrolled off, so the always-visible toast is the real confirmation.
-      toast('deep link copied');
+      // Info tone -- a copy is a neutral acknowledgement, not a state change.
+      toast('deep link copied', { tone: 'info' });
     };
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(url).then(done).catch(done);
@@ -86,8 +87,9 @@ export function FindingRow({
         setReason('');
         // A corner toast confirms the action even after the row collapses or
         // scrolls off during a long triage pass -- the inline state change
-        // alone is easy to miss when you're moving fast with x / r.
-        toast('finding dismissed');
+        // alone is easy to miss when you're moving fast with x / r. Neutral
+        // tone: a dismiss is a deactivation, distinct from the reopen below.
+        toast('finding dismissed', { tone: 'neutral' });
       }
     });
   }
@@ -97,7 +99,7 @@ export function FindingRow({
     startTransition(async () => {
       const res = await reopenFindingAction(finding.id, reviewId);
       if (!res.ok) setError(res.error ?? 'failed');
-      else toast('finding reopened');
+      else toast('finding reopened', { tone: 'success' });
     });
   }
 

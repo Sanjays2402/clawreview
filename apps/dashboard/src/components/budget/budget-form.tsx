@@ -26,7 +26,7 @@ export function BudgetForm({ installationId, currentLimit }: { installationId: n
         // Confirm in the always-visible corner toast too: the budget bar /
         // "% used" readouts elsewhere on the page re-render on the server round
         // trip, so a glanceable success cue ties the save to the visible change.
-        toast(`budget set to ${formatUsd(n)}/mo`);
+        toast(`budget set to ${formatUsd(n)}/mo`, { tone: 'success' });
       } else setResult({ ok: false, message: res.error ?? 'Failed' });
     });
   }

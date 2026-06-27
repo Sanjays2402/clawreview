@@ -40,7 +40,12 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
       // "dismissed N findings" confirmation visible wherever the operator is.
       if (res.ok && typeof res.updated === 'number') {
         const verb = kind === 'dismiss' ? 'dismissed' : 'reopened';
-        toast(`${verb} ${res.updated} finding${res.updated === 1 ? '' : 's'}`);
+        // Neutral tone for a bulk dismiss (deactivation), success for reopen --
+        // matches the single-finding row toasts so a mixed triage pass reads
+        // consistently whether you act on one finding or the whole filter.
+        toast(`${verb} ${res.updated} finding${res.updated === 1 ? '' : 's'}`, {
+          tone: kind === 'dismiss' ? 'neutral' : 'success',
+        });
       }
     });
   }

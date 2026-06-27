@@ -37,14 +37,16 @@ export function RepoPauseControls({
   function onResume(formData: FormData) {
     startTransition(async () => {
       await resumeAction(formData);
-      toast(`reviews resumed on ${owner}/${repo}`);
+      // Success tone: resuming re-activates reviews on the repo.
+      toast(`reviews resumed on ${owner}/${repo}`, { tone: 'success' });
     });
   }
 
   function onPause(formData: FormData) {
     startTransition(async () => {
       await pauseAction(formData);
-      toast(`reviews paused on ${owner}/${repo}`);
+      // Neutral tone: pausing is a deactivation, mirroring the resume's success.
+      toast(`reviews paused on ${owner}/${repo}`, { tone: 'neutral' });
     });
   }
 

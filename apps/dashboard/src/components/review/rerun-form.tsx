@@ -29,7 +29,8 @@ export function RerunForm({ review }: { review: ReviewDetail }) {
         // The router.push below replaces this page immediately, so the inline
         // message never gets read. The corner toast lives in the app shell and
         // survives the navigation, confirming the re-run on the new review page.
-        toast('review re-run queued');
+        // Info tone: a queued job is pending work, not a completed state change.
+        toast('review re-run queued', { tone: 'info' });
         router.push(`/app/reviews/${res.reviewId}` as any);
       } else {
         setResult({ ok: false, message: res.error ?? 'failed' });
