@@ -33,6 +33,13 @@ export default async function TrendsPage({ searchParams }: PageProps) {
   const completionRate = stats.totalReviews > 0 ? stats.completedReviews / stats.totalReviews : 0;
   const dailyHasData = stats.dailyFindings.some((n) => n > 0);
 
+  // Agent performance, slowest-first so the bottleneck pops to the top (the
+  // same idiom as the per-review AgentTimeline). The duration bars are
+  // normalised to the slowest agent's average, and tinted by error rate so a
+  // flaky agent reads red without scanning the rightmost column.
+  const byAgent = stats.byAgent.slice().sort((a, b) => b.avgMs - a.avgMs);
+  const maxAvgMs = Math.max(...byAgent.map((r) => r.avgMs), 1);
+
   return (
     <div className="space-y-8">
       <PageHeader
@@ -110,29 +117,67 @@ export default async function TrendsPage({ searchParams }: PageProps) {
             />
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[520px] text-sm">
-                <thead className="text-left text-xs uppercase tracking-wide text-fg-subtle">
+              <table className="w-full min-w-[560px] font-mono text-xs">
+                <thead className="text-left text-[10px] uppercase tracking-wider text-fg-subtle">
                   <tr>
-                    <th className="py-2 font-medium">Agent</th>
-                    <th className="font-medium">Runs</th>
-                    <th className="font-medium">Findings</th>
-                    <th className="font-medium">Avg duration</th>
-                    <th className="font-medium">Error rate</th>
+                    <th className="py-1.5 font-medium">agent</th>
+                    <th className="font-medium tabular-nums">runs</th>
+                    <th className="font-medium tabular-nums">findings</th>
+                    <th className="w-[34%] font-medium">avg duration</th>
+                    <th className="text-right font-medium tabular-nums">error rate</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border-subtle">
-                  {stats.byAgent
-                    .slice()
-                    .sort((a, b) => b.runs - a.runs)
-                    .map((row) => (
-                      <tr key={row.agent}>
-                        <td className="py-2 font-medium text-fg">{row.agent}</td>
-                        <td className="text-fg-muted">{row.runs}</td>
-                        <td className="text-fg-muted">{row.findings}</td>
-                        <td className="text-fg-muted">{formatMs(row.avgMs)}</td>
-                        <td className="text-fg-muted">{Math.round(row.errorRate * 100)}%</td>
+                  {byAgent.map((row, i) => {
+                    const pct = Math.max((row.avgMs / maxAvgMs) * 100, 1.5);
+                    // Tint the duration bar by error rate: a clean agent reads
+                    // emerald, a flaky one shifts toward critical -- so "which
+                    // agent is slow AND failing?" is one glance, not a column scan.
+                    const barTone =
+                      row.errorRate >= 0.25
+                        ? 'bg-severity-critical/70'
+                        : row.errorRate > 0
+                          ? 'bg-severity-medium/70'
+                          : 'bg-emerald-500/60';
+                    const errPct = Math.round(row.errorRate * 100);
+                    const isSlowest = i === 0 && byAgent.length > 1 && row.avgMs > 0;
+                    return (
+                      <tr key={row.agent} className="hover:bg-bg-subtle/40">
+                        <td className="py-1.5">
+                          <span className="flex items-center gap-1.5">
+                            <span className="text-fg" title={row.agent}>{row.agent}</span>
+                            {isSlowest ? (
+                              <span
+                                className="shrink-0 rounded-sm border border-severity-high/40 bg-severity-high/10 px-1 text-[9px] uppercase tracking-wider text-severity-high"
+                                title="slowest agent on average"
+                              >
+                                slowest
+                              </span>
+                            ) : null}
+                          </span>
+                        </td>
+                        <td className="tabular-nums text-fg-muted">{row.runs}</td>
+                        <td className="tabular-nums text-fg-muted">{row.findings}</td>
+                        <td className="pr-3">
+                          <span className="flex items-center gap-2">
+                            <span className="relative h-1.5 flex-1 overflow-hidden rounded-sm bg-bg-muted">
+                              <span
+                                className={`absolute inset-y-0 left-0 ${barTone}`}
+                                style={{ width: `${pct}%` }}
+                                aria-hidden
+                              />
+                            </span>
+                            <span className="w-12 shrink-0 text-right tabular-nums text-fg-muted">
+                              {formatMs(row.avgMs)}
+                            </span>
+                          </span>
+                        </td>
+                        <td className={`text-right tabular-nums ${errPct > 0 ? 'text-severity-critical' : 'text-fg-subtle'}`}>
+                          {errPct}%
+                        </td>
                       </tr>
-                    ))}
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
