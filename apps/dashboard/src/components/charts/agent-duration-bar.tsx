@@ -10,8 +10,11 @@
  * track heights, min-widths and emphasis treatment.
  *
  * Presentational only -- callers compute the percentages (so each can use its
- * own normalisation basis) and pass tone classes. The primary bar is `h-1.5`,
- * the share sub-track `h-[3px]`, matching the existing AgentTimeline rows.
+ * own normalisation basis) and pass tone classes. Tone changes animate via
+ * `transition-colors`, so a caller that swaps tone on hover/focus (e.g. the
+ * per-review AgentTimeline brightening the active row) gets a smooth crossfade
+ * for free. The primary bar is `h-1.5`, the share sub-track `h-[3px]`, matching
+ * the existing AgentTimeline rows.
  */
 
 const MIN_BAR_PCT = 1.5;
@@ -61,7 +64,7 @@ export function AgentDurationBar({
         }`}
       >
         <span
-          className={`absolute inset-y-0 left-0 ${tone}`}
+          className={`absolute inset-y-0 left-0 transition-colors ${tone}`}
           style={{ width: `${barPct}%` }}
           aria-hidden
         />
@@ -69,7 +72,7 @@ export function AgentDurationBar({
       {hasShare ? (
         <span className="relative h-[3px] w-full overflow-hidden rounded-full bg-bg-muted/40">
           <span
-            className={`absolute inset-y-0 left-0 ${shareTone}`}
+            className={`absolute inset-y-0 left-0 transition-colors ${shareTone}`}
             style={{ width: `${Math.max(sharePct!, MIN_BAR_PCT)}%` }}
             aria-hidden
           />
