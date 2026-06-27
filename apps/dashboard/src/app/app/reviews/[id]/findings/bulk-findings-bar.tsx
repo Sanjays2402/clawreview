@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 
 import type { BulkFindingFilter } from '@/lib/data';
+import { toast } from '@/components/ui/toaster';
 
 import { bulkDismissAction, bulkReopenAction, type BulkActionResult } from './actions';
 
@@ -34,6 +35,13 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
           ? await bulkDismissAction(reviewId, filter, reason)
           : await bulkReopenAction(reviewId, filter);
       setResult(res);
+      // Corner toast on success: the inline message lives in this bar, which
+      // scrolls off the top of long filtered lists -- the toast keeps the
+      // "dismissed N findings" confirmation visible wherever the operator is.
+      if (res.ok && typeof res.updated === 'number') {
+        const verb = kind === 'dismiss' ? 'dismissed' : 'reopened';
+        toast(`${verb} ${res.updated} finding${res.updated === 1 ? '' : 's'}`);
+      }
     });
   }
 

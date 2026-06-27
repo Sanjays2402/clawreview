@@ -84,6 +84,10 @@ export function FindingRow({
       else {
         setShowReason(false);
         setReason('');
+        // A corner toast confirms the action even after the row collapses or
+        // scrolls off during a long triage pass -- the inline state change
+        // alone is easy to miss when you're moving fast with x / r.
+        toast('finding dismissed');
       }
     });
   }
@@ -93,6 +97,7 @@ export function FindingRow({
     startTransition(async () => {
       const res = await reopenFindingAction(finding.id, reviewId);
       if (!res.ok) setError(res.error ?? 'failed');
+      else toast('finding reopened');
     });
   }
 
