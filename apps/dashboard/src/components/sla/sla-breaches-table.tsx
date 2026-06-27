@@ -111,6 +111,22 @@ export function SlaBreachesTable({
   const filtered = filterSlaBreaches(breaches, severity);
   const items = sortSlaBreaches(filtered, sortKey, sortDir);
 
+  // Overdue-outlier emphasis: the overdue column is uniformly critical text,
+  // so in a long list the single 40-day breach reads the same as a 2-hour
+  // one. Add a proportional bar (normalised to the worst breach in the
+  // current view) so relative severity is glanceable, and brighten the worst
+  // decile of rows so the breaches that most need attention pop regardless of
+  // the active sort. Only worth it with enough rows AND real spread -- a
+  // handful of similarly-overdue breaches has no meaningful "worst" to flag.
+  const overdueVals = items.map(overdueOf);
+  const maxOverdue = overdueVals.length > 0 ? Math.max(...overdueVals) : 0;
+  const minOverdue = overdueVals.length > 0 ? Math.min(...overdueVals) : 0;
+  const worstCount = Math.max(1, Math.ceil(items.length * 0.1));
+  const sortedDesc = overdueVals.slice().sort((a, b) => b - a);
+  const worstThreshold = sortedDesc[worstCount - 1] ?? Infinity;
+  const overdueEmphasisOn = items.length >= 4 && maxOverdue > minOverdue;
+  const isWorstOverdue = (v: number) => overdueEmphasisOn && v >= worstThreshold;
+
   function hrefWith(next: Partial<{ sev: string; sort: string; dir: string }>): string {
     const qs = new URLSearchParams();
     // Policy overrides are always preserved -- they drive which findings breach.
@@ -261,6 +277,11 @@ export function SlaBreachesTable({
             <tbody className="divide-y divide-border-subtle">
               {items.map((b) => {
                 const overdue = overdueOf(b);
+                const worst = isWorstOverdue(overdue);
+                // Bar width is this breach's overdue time as a fraction of the
+                // worst in view, so the longest breach fills the track and the
+                // rest read proportionally. Min 4% keeps a tiny breach visible.
+                const overduePct = maxOverdue > 0 ? Math.max((overdue / maxOverdue) * 100, 4) : 0;
                 return (
                   <tr key={`${b.reviewId}:${b.findingId}`} className="group/row hover:bg-bg-subtle/40 focus-within:bg-accent/[0.07]">
                     <td className="px-3 py-1.5 align-top">
@@ -289,8 +310,25 @@ export function SlaBreachesTable({
                     </td>
                     <td className="py-1.5 text-right align-top tabular-nums text-fg-muted">{formatHours(b.ageHours)}</td>
                     <td className="py-1.5 text-right align-top tabular-nums text-fg-subtle">{formatHours(b.slaHours)}</td>
-                    <td className="py-1.5 text-right align-top tabular-nums font-medium text-severity-critical">
-                      {formatHours(overdue)}
+                    <td className="py-1.5 align-top">
+                      <span className="flex items-center justify-end gap-2">
+                        {overdueEmphasisOn ? (
+                          <span className="relative hidden h-1.5 w-14 shrink-0 overflow-hidden rounded-sm bg-bg-muted sm:block" aria-hidden>
+                            <span
+                              className={`absolute inset-y-0 left-0 ${worst ? 'bg-severity-critical' : 'bg-severity-critical/45'}`}
+                              style={{ width: `${overduePct}%` }}
+                            />
+                          </span>
+                        ) : null}
+                        <span
+                          className={`w-12 shrink-0 text-right tabular-nums font-medium ${
+                            worst ? 'text-severity-critical' : 'text-severity-critical/80'
+                          }`}
+                          title={worst ? 'among the most overdue breaches in view' : undefined}
+                        >
+                          {formatHours(overdue)}
+                        </span>
+                      </span>
                     </td>
                     <td className="px-3 py-1.5 align-top">
                       <Link
