@@ -197,10 +197,18 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   // group's absence is explained ("no matching reviews") rather than mysterious.
   // Only while querying (the unfiltered list always shows the section) and only
   // when there's a non-navigate group to explain.
+  //
+  // The symmetric case: a query like a repo slug can match reviews but zero
+  // routes, silently dropping the "navigate" group the same way. Mirror the
+  // affordance so the navigate group's absence is explained too. Routes always
+  // exist (ROUTES is static + non-empty), so no existence guard is needed --
+  // unlike reviews, which gate on recentReviews.length.
   const querying = q.trim().length > 0;
   const reviewsMatched = sections.some((s) => s.group === 'reviews');
+  const navigateMatched = sections.some((s) => s.group === 'navigate');
   const showEmptyReviews =
     querying && filtered.length > 0 && !reviewsMatched && recentReviews.length > 0;
+  const showEmptyNavigate = querying && filtered.length > 0 && !navigateMatched;
 
   return (
     <div
@@ -261,7 +269,23 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           {filtered.length === 0 ? (
             <li className="px-3 py-2 font-mono text-xs text-fg-subtle">no matches</li>
           ) : (
-            sections.map((sec) => (
+            <>
+              {/* Empty navigate-section affordance: a query that matched only
+                  reviews (e.g. a repo slug) silently drops the navigate group.
+                  Surface a placeholder in its usual leading position so its
+                  absence is explained, mirroring the reviews placeholder below.
+                  Non-interactive (no flatIndex) so arrow-key nav skips it. */}
+              {showEmptyNavigate ? (
+                <li>
+                  <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle/50 bg-bg px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
+                    <span>{GROUP_LABEL.navigate}</span>
+                  </div>
+                  <div className="px-3 py-1.5 font-mono text-xs text-fg-subtle">
+                    no matching pages
+                  </div>
+                </li>
+              ) : null}
+              {sections.map((sec) => (
               <li key={sec.group}>
                 {/* Sticky section header: stays pinned at the top of the scroll
                     container while its rows scroll under it, so on a long
@@ -310,7 +334,8 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                   ))}
                 </ul>
               </li>
-            ))
+              ))}
+            </>
           )}
           {/* Empty-section affordance: explain the absent "recent reviews"
               group rather than letting it vanish silently under a query that
