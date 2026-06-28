@@ -129,6 +129,43 @@ export function isBareStatusQuery(raw: string): boolean {
 }
 
 /**
+ * When the query ends with a `status:` comma-list that has a TRAILING comma
+ * (e.g. `status:failed,`), the operator is mid-building a multi-status filter
+ * and ready to pick the next one. Return the statuses already chosen (so the
+ * completion chips can exclude them) plus the `prefix` string to keep when
+ * appending the next status -- everything up to and including the trailing
+ * comma, e.g. `status:failed,` or `api status:failed,`. The status token must
+ * sit at the END of the query, so a completed filter with trailing fuzzy text
+ * (`status:failed,running api`) is NOT treated as a continuation.
+ */
+export function parseStatusContinuation(
+  raw: string,
+): { selected: string[]; prefix: string } | null {
+  const m = raw.match(/^(.*?\bstatus:([a-z]+(?:,[a-z]+)*),)\s*$/i);
+  if (!m) return null;
+  const seen = new Set<string>();
+  const selected = m[2]!
+    .toLowerCase()
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
+  return { selected, prefix: m[1]! };
+}
+
+/**
+ * Unified completion state for the `status:` chips: a bare `status:` offers all
+ * statuses (nothing selected yet, append onto `status:`), while a trailing-comma
+ * continuation offers the remaining statuses (append onto the existing list).
+ * Returns null when the query is neither -- i.e. the chips should not show.
+ */
+export function statusCompletionState(
+  raw: string,
+): { prefix: string; selected: string[] } | null {
+  if (isBareStatusQuery(raw)) return { prefix: 'status:', selected: [] };
+  return parseStatusContinuation(raw);
+}
+
+/**
  * Distinct review statuses present in the given set, with counts, ordered by a
  * stable operational priority (running first, dismissed last) then any unknown
  * statuses alphabetically. Drives the `status:` completion hint chips.
@@ -249,15 +286,20 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     return { filtered: scored.map((s) => s.cmd), statusFilter: null };
   }, [q, commands]);
 
-  // Bare `status:` (no value yet) is a discoverability dead-end: it parses to
-  // no filter and fuzzy-matches nothing useful. Detect it and offer the
-  // statuses that actually exist in the recent-review set as one-click
-  // completions, so the operator learns the vocabulary without guessing.
+  // The `status:` completion chips appear in two situations: a BARE `status:`
+  // (nothing chosen yet -- offer every status) OR a trailing-comma continuation
+  // like `status:failed,` (mid-building a multi-status filter -- offer the
+  // REMAINING statuses so a click appends to the list). `completion` carries the
+  // prefix to prepend and the statuses already chosen; chips exclude the latter
+  // so you never pick the same status twice. Bare `status:` still empties the
+  // fuzzy list (handled above); a continuation keeps showing its current scope.
   const bareStatus = isBareStatusQuery(q);
-  const statusOptions = useMemo(
-    () => (bareStatus ? statusSuggestions(recentReviews) : []),
-    [bareStatus, recentReviews],
-  );
+  const completion = useMemo(() => statusCompletionState(q), [q]);
+  const statusOptions = useMemo(() => {
+    if (!completion) return [];
+    const selected = new Set(completion.selected);
+    return statusSuggestions(recentReviews).filter((s) => !selected.has(s.status));
+  }, [completion, recentReviews]);
 
   // Keep the active row visible as arrow-key / ctrl-n/p nav moves `idx`. The
   // list is a fixed-height scroll container, so `block: 'nearest'` nudges just
@@ -407,15 +449,24 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           </div>
         ) : null}
         <ul className="max-h-80 overflow-y-auto py-1">
-          {/* Bare `status:` completion hint: instead of dead-ending on "no
-              matches", surface the statuses that actually exist in the recent
-              reviews as one-click chips. Clicking one fills the query with the
-              full token (plus a trailing space, ready for an optional fuzzy
-              term) so the operator discovers the vocabulary by doing. */}
-          {bareStatus && statusOptions.length > 0 ? (
+          {/* `status:` completion chips. Shown for a bare `status:` (pick the
+              first status) AND for a trailing-comma continuation like
+              `status:failed,` (pick the NEXT status -- the chip appends onto the
+              existing list via completion.prefix, and already-chosen statuses
+              are filtered out of statusOptions). Clicking fills the query with
+              the prefix + status + a trailing space, ready for either an
+              optional fuzzy term or another comma to keep building the list. */}
+          {completion && statusOptions.length > 0 ? (
             <li>
               <div className="sticky top-0 z-10 flex items-center justify-between border-b border-border-subtle/50 bg-bg px-3 pb-0.5 pt-1.5 font-mono text-[10px] uppercase tracking-wider text-fg-subtle">
-                <span>filter by status</span>
+                <span>
+                  {completion.selected.length > 0 ? 'add another status' : 'filter by status'}
+                </span>
+                {completion.selected.length > 0 ? (
+                  <span className="tabular-nums text-fg-subtle/70">
+                    {completion.selected.length} selected
+                  </span>
+                ) : null}
               </div>
               <div className="flex flex-wrap gap-1.5 px-3 py-2">
                 {statusOptions.map((s) => (
@@ -423,7 +474,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                     key={s.status}
                     type="button"
                     onClick={() => {
-                      setQ(`status:${s.status} `);
+                      setQ(`${completion.prefix}${s.status} `);
                       setIdx(0);
                     }}
                     className="group inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg-subtle/50 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
@@ -438,13 +489,20 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                 ))}
               </div>
             </li>
+          ) : null}
+          {bareStatus ? (
+            // Bare `status:` with no statuses to offer (no recent reviews): the
+            // chips block above renders nothing, so explain the dead-end here.
+            statusOptions.length === 0 ? (
+              <li className="px-3 py-2 font-mono text-xs text-fg-subtle">
+                no recent reviews to filter
+              </li>
+            ) : null
           ) : filtered.length === 0 ? (
             <li className="px-3 py-2 font-mono text-xs text-fg-subtle">
-              {bareStatus
-                ? 'no recent reviews to filter'
-                : statusFilter
-                  ? `no reviews with status: ${statusFilter.join(', ')}`
-                  : 'no matches'}
+              {statusFilter
+                ? `no reviews with status: ${statusFilter.join(', ')}`
+                : 'no matches'}
             </li>
           ) : (
             <>
