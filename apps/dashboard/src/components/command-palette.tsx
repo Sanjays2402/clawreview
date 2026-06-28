@@ -206,6 +206,28 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   // Per-row DOM handles (keyed by flat index) so arrow-key nav can keep the
   // active row scrolled into view on a long fuzzy-filtered list.
   const rowRefs = useRef<Map<number, HTMLLIElement>>(new Map());
+  // Input + chip-row handles so the `status:` completion chips are reachable by
+  // keyboard: ArrowDown from the input drops into the first chip, arrows move
+  // between chips, ArrowUp from the top row / Escape returns focus to the input.
+  const inputRef = useRef<HTMLInputElement>(null);
+  const chipRowRef = useRef<HTMLDivElement>(null);
+
+  // Move focus into / out of the chip row. Used by both the input's ArrowDown
+  // and the chip buttons' arrow handlers so the keyboard story stays one model.
+  const focusChip = useCallback((dir: 1 | -1, from?: HTMLElement) => {
+    const chips = Array.from(
+      chipRowRef.current?.querySelectorAll<HTMLButtonElement>('[data-status-chip]') ?? [],
+    );
+    if (chips.length === 0) return false;
+    const cur = from ? chips.indexOf(from as HTMLButtonElement) : -1;
+    const next = cur < 0 ? (dir === 1 ? 0 : chips.length - 1) : cur + dir;
+    if (next < 0) {
+      inputRef.current?.focus();
+      return true;
+    }
+    chips[Math.min(next, chips.length - 1)]?.focus();
+    return true;
+  }, []);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -372,6 +394,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     >
       <div className="w-full max-w-lg overflow-hidden rounded-md border border-border bg-bg shadow-2xl">
         <input
+          ref={inputRef}
           autoFocus
           value={q}
           onChange={(e) => {
@@ -384,6 +407,13 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           onKeyDown={(e) => {
             const len = filtered.length;
             if (e.key === 'ArrowDown' || (e.key === 'n' && e.ctrlKey)) {
+              // When the status-completion chips are showing, ArrowDown drops
+              // into the chip row (it sits between the input and the fuzzy list)
+              // so they're reachable without the mouse. Otherwise step the list.
+              if (completion && statusOptions.length > 0 && focusChip(1)) {
+                e.preventDefault();
+                return;
+              }
               e.preventDefault();
               // Wrap past the last row back to the first (standard palette feel).
               setIdx((i) => (len === 0 ? 0 : (i + 1) % len));
@@ -549,16 +579,34 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                   </span>
                 ) : null}
               </div>
-              <div className="flex flex-wrap gap-1.5 px-3 py-2">
+              <div ref={chipRowRef} className="flex flex-wrap gap-1.5 px-3 py-2">
                 {statusOptions.map((s) => (
                   <button
                     key={s.status}
                     type="button"
+                    data-status-chip
                     onClick={() => {
                       setQ(`${completion.prefix}${s.status} `);
                       setIdx(0);
                     }}
-                    className="group inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg-subtle/50 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
+                    onKeyDown={(e) => {
+                      // Chip-row keyboard model: Left/Right walk the chips, Up
+                      // returns to the input, Down returns to the input too
+                      // (so the fuzzy list resumes its normal nav). Enter/Space
+                      // append the status (native button click); Escape bubbles
+                      // to the global handler so it still closes the palette.
+                      if (e.key === 'ArrowRight') {
+                        e.preventDefault();
+                        focusChip(1, e.currentTarget);
+                      } else if (e.key === 'ArrowLeft') {
+                        e.preventDefault();
+                        focusChip(-1, e.currentTarget);
+                      } else if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        inputRef.current?.focus();
+                      }
+                    }}
+                    className="group inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg-subtle/50 px-1.5 py-0.5 font-mono text-[11px] text-fg-muted outline-none transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg focus-visible:border-accent focus-visible:bg-accent/10 focus-visible:text-fg"
                   >
                     <span
                       className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s.status] ?? 'bg-fg-subtle'}`}
