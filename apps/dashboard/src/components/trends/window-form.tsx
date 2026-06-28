@@ -1,6 +1,6 @@
 'use client';
 
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useRouter } from 'next/navigation';
 import { useState, useTransition, type FormEvent } from 'react';
 
 interface Props {
@@ -10,13 +10,17 @@ interface Props {
 
 export function WindowForm({ days, presets }: Props) {
   const router = useRouter();
-  const params = useSearchParams();
   const [value, setValue] = useState(String(days));
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
 
   function apply(next: number) {
-    const sp = new URLSearchParams(params?.toString());
+    // Read the LIVE search string rather than useSearchParams: the agent-table
+    // sort toggle writes `?sort=` via history.replaceState, which Next's
+    // useSearchParams hook does not observe. Reading window.location here keeps
+    // any client-set param (e.g. the chosen sort axis) intact when the window
+    // changes, instead of silently dropping it on the navigation.
+    const sp = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
     sp.set('days', String(next));
     startTransition(() => {
       router.push(`/app/trends?${sp.toString()}`);

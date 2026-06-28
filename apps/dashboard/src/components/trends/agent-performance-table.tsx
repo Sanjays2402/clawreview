@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { AgentDurationBar } from '@/components/charts/agent-duration-bar';
 import { LeaderPill } from '@/components/charts/leader-pill';
@@ -28,11 +28,38 @@ type SortMode = 'avg' | 'total';
  * so the operator can re-sort by either axis and put the row they care about on
  * top.
  *
+ * The chosen axis is reflected into the URL as `?sort=avg|total` (shallow, via
+ * history.replaceState -- the sort is purely client-side so no server re-fetch
+ * is needed), matching the `?days=` param the page already carries. A shared or
+ * reloaded trends link then preserves the operator's axis instead of snapping
+ * back to the default. The initial value is seeded server-side from the param.
+ *
  * Client component (the toggle is interactive); the parent trends page is a
- * server component and passes the raw byAgent rows.
+ * server component and passes the raw byAgent rows + the parsed initial sort.
  */
-export function AgentPerformanceTable({ rows }: { rows: AgentPerfRow[] }) {
-  const [sort, setSort] = useState<SortMode>('avg');
+export function AgentPerformanceTable({
+  rows,
+  initialSort = 'avg',
+}: {
+  rows: AgentPerfRow[];
+  initialSort?: SortMode;
+}) {
+  const [sort, setSort] = useState<SortMode>(initialSort);
+
+  // Reflect the active axis into the URL without a navigation/re-fetch: the
+  // table sorts client-side, so a shallow replaceState is enough to make the
+  // link shareable + reload-stable. 'avg' is the default, so it drops the param
+  // to keep the canonical URL clean (mirrors how the page omits days=14).
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    if (sort === 'avg') url.searchParams.delete('sort');
+    else url.searchParams.set('sort', sort);
+    const next = `${url.pathname}${url.search}`;
+    if (next !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(window.history.state, '', next);
+    }
+  }, [sort]);
 
   const { sorted, maxAvgMs, totalMsByRow, summedTotalMs, maxTotalMs } = useMemo(() => {
     // Total time per agent = average duration x number of runs.

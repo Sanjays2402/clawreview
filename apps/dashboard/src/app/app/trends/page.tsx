@@ -11,15 +11,22 @@ import { getWeeklyStats, type Severity } from '@/lib/data';
 import { dayLabels, formatMs, formatUsd } from '@/lib/format';
 
 const WINDOW_PRESETS = [7, 14, 30, 60, 90] as const;
+const AGENT_SORTS = ['avg', 'total'] as const;
+type AgentSort = (typeof AGENT_SORTS)[number];
+
+function parseAgentSort(raw: string | undefined): AgentSort {
+  return AGENT_SORTS.includes((raw ?? 'avg') as AgentSort) ? (raw as AgentSort) : 'avg';
+}
 
 interface PageProps {
-  searchParams: Promise<{ days?: string }>;
+  searchParams: Promise<{ days?: string; sort?: string }>;
 }
 
 export default async function TrendsPage({ searchParams }: PageProps) {
   const sp = await searchParams;
   const raw = Number.parseInt(sp.days ?? '', 10);
   const days = Number.isFinite(raw) && raw >= 1 && raw <= 90 ? raw : 14;
+  const agentSort = parseAgentSort(sp.sort);
 
   const stats = await getWeeklyStats(days);
 
@@ -110,7 +117,7 @@ export default async function TrendsPage({ searchParams }: PageProps) {
               description="No agents executed in this window."
             />
           ) : (
-            <AgentPerformanceTable rows={stats.byAgent} />
+            <AgentPerformanceTable rows={stats.byAgent} initialSort={agentSort} />
           )}
         </CardBody>
       </Card>
