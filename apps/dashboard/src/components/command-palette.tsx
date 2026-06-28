@@ -32,6 +32,13 @@ const STATUS_DOT: Record<string, string> = {
   open: 'bg-severity-low',
 };
 
+/**
+ * Canonical status order for the help-panel dot legend -- operational priority
+ * (running first, dismissed last), de-duped from STATUS_DOT (completed and
+ * resolved share the same emerald dot, so the legend shows `completed` once).
+ */
+const STATUS_LEGEND: string[] = ['running', 'queued', 'failed', 'completed', 'open', 'dismissed'];
+
 const ROUTES: Cmd[] = [
   { id: 'overview', label: 'go: overview', hint: 'g o', href: '/app', group: 'navigate' },
   { id: 'reviews', label: 'go: reviews', hint: 'g r', href: '/app/reviews', group: 'navigate' },
@@ -194,6 +201,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
   const [idx, setIdx] = useState(0);
+  const [showHelp, setShowHelp] = useState(false);
   const router = useRouter();
   // Per-row DOM handles (keyed by flat index) so arrow-key nav can keep the
   // active row scrolled into view on a long fuzzy-filtered list.
@@ -203,6 +211,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     setOpen(false);
     setQ('');
     setIdx(0);
+    setShowHelp(false);
   }, []);
 
   useEffect(() => {
@@ -368,6 +377,9 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           onChange={(e) => {
             setQ(e.target.value);
             setIdx(0);
+            // Typing dismisses the help overlay so it never competes with live
+            // results; toggle it back with `?` on an empty query or the footer.
+            if (e.target.value !== '') setShowHelp(false);
           }}
           onKeyDown={(e) => {
             const len = filtered.length;
@@ -400,6 +412,12 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             } else if (e.key === 'End') {
               e.preventDefault();
               setIdx(len === 0 ? 0 : len - 1);
+            } else if (e.key === '?' && q === '') {
+              // `?` on an empty query toggles the discoverability help panel
+              // (g-prefix nav, status: vocabulary, the status-dot legend). Gated
+              // on an empty query so a literal `?` stays typeable in a search.
+              e.preventDefault();
+              setShowHelp((v) => !v);
             } else if (e.key === 'Enter') {
               e.preventDefault();
               const cmd = filtered[idx];
@@ -446,6 +464,44 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             <span className="tabular-nums text-fg-subtle">
               {filtered.length} match{filtered.length === 1 ? '' : 'es'}
             </span>
+          </div>
+        ) : null}
+        {showHelp ? (
+          <div className="space-y-2.5 border-b border-border-subtle bg-bg-subtle/20 px-3 py-2.5 font-mono text-[11px]">
+            <div>
+              <div className="mb-1 uppercase tracking-wider text-fg-subtle">navigate</div>
+              <div className="text-fg-muted">
+                press <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">g</kbd>{' '}
+                then a page key (e.g.{' '}
+                <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">g</kbd>{' '}
+                <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">r</kbd>{' '}
+                for reviews) to jump without opening this palette. every route below shows its hint.
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 uppercase tracking-wider text-fg-subtle">filter reviews</div>
+              <div className="text-fg-muted">
+                type{' '}
+                <code className="rounded-sm bg-bg-muted px-1 text-fg">status:failed</code> to scope to
+                one status, or a comma list{' '}
+                <code className="rounded-sm bg-bg-muted px-1 text-fg">status:failed,running</code> for
+                several. a trailing comma re-opens the chips so you can keep adding.
+              </div>
+            </div>
+            <div>
+              <div className="mb-1 uppercase tracking-wider text-fg-subtle">status dots</div>
+              <div className="flex flex-wrap gap-x-3 gap-y-1 text-fg-muted">
+                {STATUS_LEGEND.map((s) => (
+                  <span key={s} className="inline-flex items-center gap-1.5">
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s] ?? 'bg-fg-subtle'}`}
+                      aria-hidden
+                    />
+                    <span>{s}</span>
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
         ) : null}
         <ul className="max-h-80 overflow-y-auto py-1">
@@ -590,7 +646,21 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
         </ul>
         <div className="flex items-center justify-between border-t border-border-subtle bg-bg-subtle/40 px-3 py-1.5 font-mono text-[10px] text-fg-subtle">
           <span>↑↓ wrap · ⇥ section · ⤒⤓ ends · ↵ select · esc close</span>
-          <span>⌘K</span>
+          <span className="flex items-center gap-2.5">
+            <button
+              type="button"
+              onClick={() => setShowHelp((v) => !v)}
+              aria-pressed={showHelp}
+              title="toggle help (?)"
+              className={`inline-flex items-center gap-1 rounded-sm transition-colors hover:text-fg ${
+                showHelp ? 'text-fg' : ''
+              }`}
+            >
+              <kbd className="rounded-sm border border-border px-1 text-[9px]">?</kbd>
+              <span>help</span>
+            </button>
+            <span>⌘K</span>
+          </span>
         </div>
       </div>
     </div>
