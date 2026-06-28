@@ -280,9 +280,23 @@ export default async function AppOverviewPage() {
                   const maxOverdue = vals.length > 0 ? Math.max(...vals) : 0;
                   const minOverdue = vals.length > 0 ? Math.min(...vals) : 0;
                   const emphasisOn = shown.length >= 3 && maxOverdue > minOverdue;
+                  // Age-outlier emphasis: parity with the full SLA table (tick 45).
+                  // Age is a DISTINCT axis from overdue -- the oldest breach can be
+                  // only mildly overdue (a loose SLA) while a young one is wildly
+                  // overdue (a tight SLA blown). The age readout here is uniformly
+                  // muted, so the longest-open breach doesn't stand out. Brighten
+                  // the oldest-in-view row's age with a quiet text-fg bump (NOT the
+                  // critical tint the overdue column owns) so "this one has sat
+                  // longest" reads without competing with the overdue alarm. Same
+                  // 3+-rows-AND-real-spread guard as the overdue emphasis.
+                  const ageVals = shown.map((b) => b.ageHours);
+                  const maxAge = ageVals.length > 0 ? Math.max(...ageVals) : 0;
+                  const minAge = ageVals.length > 0 ? Math.min(...ageVals) : 0;
+                  const ageEmphasisOn = shown.length >= 3 && maxAge > minAge;
                   return shown.map((b) => {
                     const overdue = overdueOf(b);
                     const worst = emphasisOn && overdue >= maxOverdue;
+                    const oldest = ageEmphasisOn && b.ageHours >= maxAge;
                     const overduePct = maxOverdue > 0 ? Math.max((overdue / maxOverdue) * 100, 6) : 0;
                     return (
                     <li key={b.findingId} className="focus-within:bg-accent/[0.07]">
@@ -297,7 +311,10 @@ export default async function AppOverviewPage() {
                           </span>{' '}
                           <span className="text-fg-muted">{b.title}</span>
                         </span>
-                        <span className="shrink-0 tabular-nums text-fg-subtle">
+                        <span
+                          className={`shrink-0 tabular-nums ${oldest ? 'font-medium text-fg' : 'text-fg-subtle'}`}
+                          title={oldest ? 'open longest of the breaches shown' : undefined}
+                        >
                           {Math.round(b.ageHours)}h / {b.slaHours}h
                         </span>
                         {overdue > 0 ? (
