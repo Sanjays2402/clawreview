@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Check, Info, Circle, WarningCircle } from '@phosphor-icons/react';
 import type { Icon } from '@phosphor-icons/react';
 
@@ -42,6 +42,13 @@ import type { Icon } from '@phosphor-icons/react';
  * there's time to actually reach for it. The CustomEvent detail carries the
  * callback by reference (same realm, no serialization), so the button just
  * invokes it and dismisses itself.
+ *
+ * Keyboard UX: the rest of the dashboard is keyboard-driven (j/k list nav, x/r
+ * triage, cmd-k palette), so the toast corner answers to the keyboard too. A
+ * global `u` while an actionable toast is live fires its action (undo) and
+ * dismisses it -- so a too-fast `x` is one keystroke away from being undone,
+ * no reach for the mouse. `Escape` clears the corner. Both are ignored while
+ * typing in an input/textarea/contenteditable so they never eat real input.
  */
 
 export type ToastTone = 'success' | 'info' | 'neutral' | 'error';
@@ -159,6 +166,38 @@ export function Toaster() {
     return () => window.removeEventListener(TOAST_EVENT, onToast as EventListener);
   }, []);
 
+  // Keyboard handling for the corner. Registered once; reads live state via a
+  // ref so the handler never goes stale. `u` fires the most-recent actionable
+  // toast's action (undo) and removes it; `Escape` clears the whole corner.
+  // Skipped while the user is typing so we don't swallow a literal "u".
+  const toastsRef = useRef<ActiveToast[]>(toasts);
+  toastsRef.current = toasts;
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      const cur = toastsRef.current;
+      if (cur.length === 0) return;
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setToasts([]);
+        return;
+      }
+      if (e.key === 'u') {
+        // Fire the most-recent actionable toast (the one the operator most
+        // likely just triggered) and dismiss it. No-op if nothing is undoable.
+        const target = [...cur].reverse().find((x) => x.action);
+        if (!target) return;
+        e.preventDefault();
+        target.action?.onClick();
+        setToasts((list) => list.filter((x) => x.token !== target.token));
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   if (toasts.length === 0) return null;
 
   return (
@@ -196,9 +235,12 @@ export function Toaster() {
                   // Dismiss this toast immediately once the action fires.
                   setToasts((cur) => cur.filter((x) => x.token !== t.token));
                 }}
-                className="pointer-events-auto ml-0.5 shrink-0 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
+                className="pointer-events-auto ml-0.5 inline-flex shrink-0 items-center gap-1 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
               >
                 {t.action.label}
+                <kbd className="rounded-sm border border-border px-1 text-[9px] normal-case tracking-normal text-fg-subtle">
+                  u
+                </kbd>
               </button>
             ) : null}
           </div>
