@@ -21,6 +21,19 @@ const STATUS_TABS: Array<{ key: ReviewStatus | 'all'; label: string }> = [
   { key: 'queued', label: 'queued' },
 ];
 
+// Canonical status ordering for stable display, independent of the order the
+// statuses appear in the `?status=` param.
+const STATUS_VALUES: ReviewStatus[] = ['running', 'completed', 'failed', 'queued'];
+
+// Status -> dot tint, mirroring StatusPill's ladder so a multi-status chip
+// reads the same here as the dots do everywhere else.
+const STATUS_DOT: Record<ReviewStatus, string> = {
+  running: 'bg-accent',
+  completed: 'bg-emerald-400',
+  failed: 'bg-severity-critical',
+  queued: 'bg-severity-medium',
+};
+
 type SortKey = 'created' | 'findings' | 'duration' | 'spend';
 type SortDir = 'asc' | 'desc';
 
@@ -41,6 +54,26 @@ function parseSort(raw: string | undefined): SortKey {
 }
 function parseDir(raw: string | undefined): SortDir {
   return raw === 'asc' ? 'asc' : 'desc';
+}
+
+/**
+ * Parse the `?status=` param as a deduped, validated, canonically-ordered list
+ * of review statuses. Accepts a single status (`?status=failed`) or a comma
+ * list (`?status=failed,running`) so the list can scope to several at once --
+ * matching the command palette's `status:failed,running` vocabulary (tick 44)
+ * and letting the overview reliability card deep-link a combined
+ * "needs attention" view. Unknown entries are dropped; an empty / absent param
+ * yields `[]` (the implicit "all"). The result is ordered by STATUS_VALUES so
+ * the tabs + chips render in a stable order regardless of the URL's order.
+ */
+function parseStatusList(raw: string | undefined): ReviewStatus[] {
+  if (!raw) return [];
+  const seen = new Set<string>();
+  for (const part of raw.split(',')) {
+    const s = part.trim().toLowerCase();
+    if (s) seen.add(s);
+  }
+  return STATUS_VALUES.filter((v) => seen.has(v));
 }
 
 function sortItems(items: ReviewListItem[], key: SortKey, dir: SortDir): ReviewListItem[] {
@@ -70,19 +103,27 @@ function sortItems(items: ReviewListItem[], key: SortKey, dir: SortDir): ReviewL
 
 export default async function ReviewsPage({ searchParams }: PageProps) {
   const sp = await searchParams;
-  const status = (STATUS_TABS.find((t) => t.key === sp.status)?.key ?? 'all') as ReviewStatus | 'all';
+  const selectedStatuses = parseStatusList(sp.status);
   const sortKey = parseSort(sp.sort);
   const sortDir = parseDir(sp.dir);
   const owner = sp.owner?.trim() || '';
   const repo = sp.repo?.trim() || '';
 
+  // One status -> let the server filter (identical to the old single-status
+  // path). Two or more -> the list endpoint only accepts a single status, so
+  // fetch the page unfiltered and OR-filter client-side. The page is capped at
+  // 50 either way, so this stays a bounded preview, consistent with before.
   const { items: rawItems } = await listReviews({
     limit: 50,
-    status: status === 'all' ? undefined : status,
+    status: selectedStatuses.length === 1 ? selectedStatuses[0] : undefined,
     owner: owner || undefined,
     repo: repo || undefined,
   });
-  const items = sortItems(rawItems, sortKey, sortDir);
+  const statusScoped =
+    selectedStatuses.length >= 2
+      ? rawItems.filter((r) => selectedStatuses.includes(r.status))
+      : rawItems;
+  const items = sortItems(statusScoped, sortKey, sortDir);
 
   // Spend-outlier detection over the displayed page: a review whose cost is a
   // clear spike vs the page mean gets a hollow ring + tint, so a runaway
@@ -132,7 +173,7 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
     next: Partial<{ status: string; owner: string; repo: string; sort: string; dir: string }>,
   ): string {
     const qs = new URLSearchParams();
-    const st = next.status ?? (status === 'all' ? '' : status);
+    const st = next.status ?? selectedStatuses.join(',');
     const ow = next.owner ?? owner;
     const rp = next.repo ?? repo;
     const sr = next.sort ?? sortKey;
@@ -142,8 +183,22 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
     if (rp) qs.set('repo', rp);
     if (sr && sr !== 'created') qs.set('sort', sr);
     if (dr && dr !== 'desc') qs.set('dir', dr);
-    const tail = qs.toString();
+    // Keep commas literal in the status list for a clean, shareable URL
+    // (?status=failed,running rather than the %2C-escaped form).
+    const tail = qs.toString().replace(/%2C/gi, ',');
     return `/app/reviews${tail ? `?${tail}` : ''}`;
+  }
+
+  // Toggle a status into / out of the active set, preserving the others, and
+  // return the href that lands on the resulting selection. Lets the tabs act as
+  // a multi-select: click `failed` then `running` to see both; click an active
+  // tab again to drop it.
+  function statusToggleHref(tab: ReviewStatus): string {
+    const set = new Set(selectedStatuses);
+    if (set.has(tab)) set.delete(tab);
+    else set.add(tab);
+    const next = STATUS_VALUES.filter((v) => set.has(v));
+    return hrefWith({ status: next.join(',') });
   }
 
   function sortHref(col: SortKey): string {
@@ -155,14 +210,31 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
     return hrefWith({ sort: col, dir: 'desc' });
   }
 
-  // Build the active-filters chip row
-  const chips: Array<{ label: string; href: string }> = [];
-  if (status !== 'all') chips.push({ label: `status: ${status}`, href: hrefWith({ status: '' }) });
-  if (owner) chips.push({ label: `owner: ${owner}`, href: hrefWith({ owner: '' }) });
-  if (repo) chips.push({ label: `repo: ${repo}`, href: hrefWith({ repo: '' }) });
+  // Build the active-filters chip row. Each selected status is its own removable
+  // chip (with its dot) so a multi-status scope is legible and each status can
+  // be peeled off individually -- clicking `failed` removes just it, leaving
+  // `running` active.
+  const chips: Array<{ key: string; node: React.ReactNode; href: string }> = [];
+  for (const s of selectedStatuses) {
+    const set = new Set(selectedStatuses);
+    set.delete(s);
+    chips.push({
+      key: `status-${s}`,
+      href: hrefWith({ status: STATUS_VALUES.filter((v) => set.has(v)).join(',') }),
+      node: (
+        <span className="inline-flex items-center gap-1">
+          <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s]}`} aria-hidden />
+          <span>status: {s}</span>
+        </span>
+      ),
+    });
+  }
+  if (owner) chips.push({ key: 'owner', node: `owner: ${owner}`, href: hrefWith({ owner: '' }) });
+  if (repo) chips.push({ key: 'repo', node: `repo: ${repo}`, href: hrefWith({ repo: '' }) });
   if (sortKey !== 'created' || sortDir !== 'desc') {
     chips.push({
-      label: `sort: ${sortKey} ${sortDir === 'desc' ? '↓' : '↑'}`,
+      key: 'sort',
+      node: `sort: ${sortKey} ${sortDir === 'desc' ? '↓' : '↑'}`,
       href: hrefWith({ sort: 'created', dir: 'desc' }),
     });
   }
@@ -189,16 +261,33 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
       <StickyBar backToTop>
         <div className="flex flex-wrap items-center gap-px font-mono text-[11px]">
           {STATUS_TABS.map((t) => {
-            const active = t.key === status;
-            const href = t.key === 'all' ? hrefWith({ status: '' }) : hrefWith({ status: t.key });
+            // `all` is active only when nothing is selected; a concrete status
+            // is active when it's a member of the selected set (so several tabs
+            // can be lit at once). Clicking a status toggles its membership;
+            // clicking `all` clears the whole set.
+            const active =
+              t.key === 'all'
+                ? selectedStatuses.length === 0
+                : selectedStatuses.includes(t.key as ReviewStatus);
+            const href =
+              t.key === 'all' ? hrefWith({ status: '' }) : statusToggleHref(t.key as ReviewStatus);
             return (
               <Link
                 key={t.key}
                 href={href as any}
-                className={`-mb-px border-b-2 px-2.5 py-1 lowercase transition-colors ${
+                aria-pressed={active}
+                className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-2.5 py-1 lowercase transition-colors ${
                   active ? 'border-accent text-fg' : 'border-transparent text-fg-muted hover:text-fg'
                 }`}
               >
+                {t.key !== 'all' ? (
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[t.key as ReviewStatus]} ${
+                      active ? '' : 'opacity-40'
+                    }`}
+                    aria-hidden
+                  />
+                ) : null}
                 {t.label}
               </Link>
             );
@@ -211,11 +300,11 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
           <span className="uppercase tracking-wider text-fg-subtle">active</span>
           {chips.map((c) => (
             <Link
-              key={c.label}
+              key={c.key}
               href={c.href as any}
               className="group inline-flex items-center gap-1 rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 lowercase text-fg transition-colors hover:border-accent/70 hover:bg-accent/20"
             >
-              <span>{c.label}</span>
+              <span>{c.node}</span>
               <X size={9} weight="bold" className="text-fg-muted group-hover:text-fg" />
             </Link>
           ))}
