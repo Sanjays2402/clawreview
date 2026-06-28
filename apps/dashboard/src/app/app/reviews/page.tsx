@@ -425,7 +425,10 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                             "both" marker, scaled to a row edge -- so the rare
                             combined outlier is findable in the table, not just
                             counted up top. Quiet enough not to compete with the
-                            per-column rings. */}
+                            per-column rings. The rail is aria-hidden, so the PR
+                            link carries an explicit title + sr-only note giving
+                            the rail meaning to pointer-hover and screen readers
+                            alike, without leaning on the header legend. */}
                         {isBothOutlier(r) ? (
                           <span
                             className="absolute inset-y-0 left-0 flex w-[3px] flex-col overflow-hidden"
@@ -438,10 +441,14 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                         <Link
                           href={`/app/reviews/${r.id}` as any}
                           data-review-row
+                          title={isBothOutlier(r) ? 'cost spike + above findings baseline' : undefined}
                           className="block rounded-sm outline-none ring-accent/60 focus-visible:ring-1"
                         >
                           <div className="text-fg">
                             {r.owner}/{r.repo} <span className="text-fg-subtle">#</span>{r.prNumber}
+                            {isBothOutlier(r) ? (
+                              <span className="sr-only"> — cost spike and above findings baseline</span>
+                            ) : null}
                           </div>
                           <div className="text-[10px] text-fg-subtle">{r.headSha.slice(0, 8)}</div>
                         </Link>
