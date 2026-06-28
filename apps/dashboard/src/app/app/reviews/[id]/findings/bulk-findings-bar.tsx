@@ -43,14 +43,36 @@ export function BulkFindingsBar({ reviewId, filter, matchCount, stateFilter }: P
         // Neutral tone for a bulk dismiss (deactivation), success for reopen --
         // matches the single-finding row toasts so a mixed triage pass reads
         // consistently whether you act on one finding or the whole filter.
+        // A bulk dismiss carries an "undo" that reopens the SAME filter, so a
+        // too-broad dismiss is recoverable in one click -- mirroring tick-43's
+        // single-finding undo. (Reopen is already non-destructive, no undo.)
         toast(`${verb} ${res.updated} finding${res.updated === 1 ? '' : 's'}`, {
           tone: kind === 'dismiss' ? 'neutral' : 'success',
+          action:
+            kind === 'dismiss'
+              ? { label: 'undo', onClick: () => undoBulkDismiss() }
+              : undefined,
         });
       } else if (!res.ok) {
         // A bulk action over a large filter is the most painful to silently
         // lose -- surface the failure in the corner too, matching the
         // single-finding error toasts.
         toast(res.error ?? 'bulk action failed', { tone: 'error' });
+      }
+    });
+  }
+
+  // Undo a bulk dismiss by reopening the SAME filter. Fired from the undo button
+  // on the dismiss toast. Runs through the same transition so the bar shows the
+  // working state, and confirms (or surfaces failure) with its own toast.
+  function undoBulkDismiss() {
+    start(async () => {
+      const res = await bulkReopenAction(reviewId, filter);
+      setResult(res);
+      if (res.ok && typeof res.updated === 'number') {
+        toast(`reopened ${res.updated} finding${res.updated === 1 ? '' : 's'}`, { tone: 'success' });
+      } else if (!res.ok) {
+        toast(res.error ?? 'undo failed', { tone: 'error' });
       }
     });
   }
