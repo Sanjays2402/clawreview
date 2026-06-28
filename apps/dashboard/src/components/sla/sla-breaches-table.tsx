@@ -127,6 +127,22 @@ export function SlaBreachesTable({
   const overdueEmphasisOn = items.length >= 4 && maxOverdue > minOverdue;
   const isWorstOverdue = (v: number) => overdueEmphasisOn && v >= worstThreshold;
 
+  // Age-outlier emphasis: a DISTINCT axis from overdue. A breach can be very
+  // overdue but young (a tight SLA blown by hours) or only mildly overdue but
+  // ancient (a loose SLA on a finding that has sat for weeks) -- the age column
+  // is uniformly muted, so the oldest breaches don't stand out under any sort
+  // that isn't `age`. Brighten the worst decile BY AGE with a quiet text bump
+  // (text-fg, not the critical tint the overdue column uses) so "this one has
+  // been open longest" reads at a glance without competing with the overdue
+  // alarm. Same worst-decile idiom; same guard (enough rows AND real spread).
+  const ageVals = items.map((b) => b.ageHours);
+  const maxAge = ageVals.length > 0 ? Math.max(...ageVals) : 0;
+  const minAge = ageVals.length > 0 ? Math.min(...ageVals) : 0;
+  const sortedAgeDesc = ageVals.slice().sort((a, b) => b - a);
+  const worstAgeThreshold = sortedAgeDesc[worstCount - 1] ?? Infinity;
+  const ageEmphasisOn = items.length >= 4 && maxAge > minAge;
+  const isOldest = (v: number) => ageEmphasisOn && v >= worstAgeThreshold;
+
   function hrefWith(next: Partial<{ sev: string; sort: string; dir: string }>): string {
     const qs = new URLSearchParams();
     // Policy overrides are always preserved -- they drive which findings breach.
@@ -308,7 +324,18 @@ export function SlaBreachesTable({
                         <span className="text-fg-subtle">unknown</span>
                       )}
                     </td>
-                    <td className="py-1.5 text-right align-top tabular-nums text-fg-muted">{formatHours(b.ageHours)}</td>
+                    <td className="py-1.5 text-right align-top tabular-nums">
+                      {isOldest(b.ageHours) ? (
+                        <span
+                          className="font-medium text-fg"
+                          title="among the oldest breaches in view"
+                        >
+                          {formatHours(b.ageHours)}
+                        </span>
+                      ) : (
+                        <span className="text-fg-muted">{formatHours(b.ageHours)}</span>
+                      )}
+                    </td>
                     <td className="py-1.5 text-right align-top tabular-nums text-fg-subtle">{formatHours(b.slaHours)}</td>
                     <td className="py-1.5 align-top">
                       <span className="flex items-center justify-end gap-2">
