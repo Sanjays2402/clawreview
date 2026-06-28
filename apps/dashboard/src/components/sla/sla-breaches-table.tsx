@@ -132,9 +132,10 @@ export function SlaBreachesTable({
   // ancient (a loose SLA on a finding that has sat for weeks) -- the age column
   // is uniformly muted, so the oldest breaches don't stand out under any sort
   // that isn't `age`. Brighten the worst decile BY AGE with a quiet text bump
-  // (text-fg, not the critical tint the overdue column uses) so "this one has
-  // been open longest" reads at a glance without competing with the overdue
-  // alarm. Same worst-decile idiom; same guard (enough rows AND real spread).
+  // (text-fg, not the critical tint the overdue column uses) AND draw a quiet
+  // proportional age bar (normalised to the oldest in view, neutral fg-subtle
+  // track, not the overdue critical track) so relative age reads at a glance
+  // like overdue already does. Same worst-decile idiom; same guard.
   const ageVals = items.map((b) => b.ageHours);
   const maxAge = ageVals.length > 0 ? Math.max(...ageVals) : 0;
   const minAge = ageVals.length > 0 ? Math.min(...ageVals) : 0;
@@ -324,17 +325,27 @@ export function SlaBreachesTable({
                         <span className="text-fg-subtle">unknown</span>
                       )}
                     </td>
-                    <td className="py-1.5 text-right align-top tabular-nums">
-                      {isOldest(b.ageHours) ? (
-                        <span
-                          className="font-medium text-fg"
-                          title="among the oldest breaches in view"
-                        >
-                          {formatHours(b.ageHours)}
-                        </span>
-                      ) : (
-                        <span className="text-fg-muted">{formatHours(b.ageHours)}</span>
-                      )}
+                    <td className="py-1.5 align-top">
+                      <span className="flex items-center justify-end gap-2">
+                        {ageEmphasisOn ? (
+                          <span className="relative hidden h-1.5 w-14 shrink-0 overflow-hidden rounded-sm bg-bg-muted sm:block" aria-hidden>
+                            <span
+                              className={`absolute inset-y-0 left-0 ${isOldest(b.ageHours) ? 'bg-fg-subtle' : 'bg-fg-subtle/40'}`}
+                              style={{ width: `${maxAge > 0 ? Math.max((b.ageHours / maxAge) * 100, 4) : 0}%` }}
+                            />
+                          </span>
+                        ) : null}
+                        {isOldest(b.ageHours) ? (
+                          <span
+                            className="w-12 shrink-0 text-right tabular-nums font-medium text-fg"
+                            title="among the oldest breaches in view"
+                          >
+                            {formatHours(b.ageHours)}
+                          </span>
+                        ) : (
+                          <span className="w-12 shrink-0 text-right tabular-nums text-fg-muted">{formatHours(b.ageHours)}</span>
+                        )}
+                      </span>
                     </td>
                     <td className="py-1.5 text-right align-top tabular-nums text-fg-subtle">{formatHours(b.slaHours)}</td>
                     <td className="py-1.5 align-top">
