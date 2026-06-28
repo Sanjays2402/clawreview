@@ -101,6 +101,21 @@
   .mono {
     @apply font-mono text-[12px] tabular-nums;
   }
+  /*
+   * Windowed paint for very long finding lists. `content-visibility: auto`
+   * keeps the row MOUNTED (so [data-finding-row] j/k nav, focus-scroll and
+   * deep-link focus all keep working -- the UA auto-renders a skipped row the
+   * moment it is focused or scrolled near) while skipping the layout + paint of
+   * its expanded subtree whenever it is off-screen. `contain-intrinsic-size:
+   * auto <h>` supplies a placeholder height so the scrollbar stays stable, and
+   * the `auto` keyword remembers a row's real rendered height (e.g. once
+   * expanded) so re-skipping it never jumps the layout. Applied only above a
+   * row-count threshold where the win is real; below it the rows render plainly.
+   */
+  .cv-row {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 40px;
+  }
 }
 
 .scroll-area {

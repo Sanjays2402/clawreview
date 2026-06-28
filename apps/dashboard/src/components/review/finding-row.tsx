@@ -30,10 +30,18 @@ export function FindingRow({
   finding,
   reviewId,
   focus = false,
+  windowed = false,
 }: {
   finding: FindingDto;
   reviewId: string;
   focus?: boolean;
+  /**
+   * Opt into windowed paint (`content-visibility: auto`) for this row. Set by
+   * the list parents only above a length threshold where skipping off-screen
+   * paint is a real win. The row stays mounted, so j/k nav, deep-link focus and
+   * focus-scroll all keep working; only its off-screen layout/paint is deferred.
+   */
+  windowed?: boolean;
 }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -147,7 +155,9 @@ export function FindingRow({
       onBlur={() => setFocused(false)}
       className={`group relative outline-none ${dismissed ? 'opacity-55' : ''} ${
         focused ? 'bg-accent/[0.06]' : 'hover:bg-bg-subtle/40'
-      } ${focus ? 'ring-1 ring-inset ring-accent/50' : ''}`}
+      } ${focus ? 'ring-1 ring-inset ring-accent/50' : ''} ${
+        windowed && !focus ? 'cv-row' : ''
+      }`}
     >
       <span className={`sev-strip ${SEV_BAR[finding.severity] ?? 'bg-severity-nit'}`} />
       <div className="flex items-start gap-2 pl-3 pr-2 py-1.5">

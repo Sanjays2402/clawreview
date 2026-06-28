@@ -71,6 +71,13 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
 
   const fileGroups = groupBy === 'file' ? groupFindingsByFile(filtered) : null;
 
+  // Windowed paint kicks in only once the list is long enough that skipping
+  // off-screen layout/paint is a real win -- below this the rows render plainly
+  // (and the `content-visibility` placeholder height would be pure overhead).
+  // Rows stay MOUNTED either way, so j/k nav + deep-link focus are unaffected.
+  const WINDOW_THRESHOLD = 60;
+  const windowed = filtered.length >= WINDOW_THRESHOLD;
+
   // Severity mix for the summary bar. Counted over the state/agent scope but
   // IGNORING the active severity filter, so every non-empty severity stays a
   // live deep-link -- the bar is a one-click severity *switcher*, not just a
@@ -232,11 +239,11 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
                 })()}
               />
               {fileGroups ? (
-                <FindingsGroupedByFile groups={fileGroups} reviewId={id} focusId={focusId || undefined} />
+                <FindingsGroupedByFile groups={fileGroups} reviewId={id} focusId={focusId || undefined} windowed={windowed} />
               ) : (
                 <ul className="divide-y divide-border-subtle/60 rounded-sm border border-border-subtle">
                   {filtered.map((f) => (
-                    <FindingRow key={f.id} finding={f} reviewId={id} focus={focusId === f.id} />
+                    <FindingRow key={f.id} finding={f} reviewId={id} focus={focusId === f.id} windowed={windowed} />
                   ))}
                 </ul>
               )}

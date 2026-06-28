@@ -132,11 +132,14 @@ export function FindingsGroupedByFile({
   reviewId,
   initiallyOpen = 5,
   focusId,
+  windowed = false,
 }: {
   groups: FileGroup[];
   reviewId: string;
   initiallyOpen?: number;
   focusId?: string;
+  /** Opt rows into windowed paint -- forwarded to each FindingRow. */
+  windowed?: boolean;
 }) {
   const files = groups.map((g) => g.file);
   const { isOpen, hasOverride, toggle } = usePersistentExpand(reviewId, files);
@@ -157,6 +160,7 @@ export function FindingsGroupedByFile({
             persisted={hasOverride(g.file)}
             onToggle={() => toggle(g.file, fallback)}
             focusId={focusId}
+            windowed={windowed}
           />
         );
       })}
@@ -171,6 +175,7 @@ function FileGroupCard({
   onToggle,
   persisted,
   focusId,
+  windowed = false,
 }: {
   group: FileGroup;
   reviewId: string;
@@ -178,6 +183,7 @@ function FileGroupCard({
   onToggle: () => void;
   persisted?: boolean;
   focusId?: string;
+  windowed?: boolean;
 }) {
   return (
     <li className="overflow-hidden rounded-sm border border-border-subtle">
@@ -213,7 +219,13 @@ function FileGroupCard({
       {open ? (
         <ul className="divide-y divide-border-subtle/60 border-t border-border-subtle">
           {group.findings.map((f) => (
-            <FindingRow key={f.id} finding={f} reviewId={reviewId} focus={f.id === focusId} />
+            <FindingRow
+              key={f.id}
+              finding={f}
+              reviewId={reviewId}
+              focus={f.id === focusId}
+              windowed={windowed}
+            />
           ))}
         </ul>
       ) : null}
