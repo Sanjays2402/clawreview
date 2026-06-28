@@ -97,6 +97,25 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   const isSpendOutlier = (v: number) => spendOutliersOn && v >= spendFloor;
   const spikeCount = spendOutliersOn ? items.filter((r) => isSpendOutlier(r.totalCostUsd)).length : 0;
 
+  // Findings above-baseline markers: carry the repo-detail sparkline idiom into
+  // the list's findings column. A high finding count alone isn't an anomaly --
+  // but a review that JUMPS well past the page's own baseline is worth a quiet
+  // flag (a big PR, or a quality regression). Here \"baseline\" is the page mean
+  // (the list is account-wide, not single-repo). Same dual gate as the repo
+  // sparkline: a ratio (>= 1.8x mean) AND an absolute gap (>= mean + 3), so a
+  // 1 -> 2 wobble never lights up. A NEUTRAL accent ring -- deliberately not
+  // the orange cost-spike alarm -- keeps the \"interesting, not urgent\" framing.
+  const findingsMean =
+    items.length > 0 ? items.reduce((sum, r) => sum + r.totalFindings, 0) / items.length : 0;
+  const findingsRatioFloor = findingsMean * 1.8;
+  const findingsGapFloor = findingsMean + 3;
+  const findingsOutliersOn = items.length >= 2 && findingsMean > 0;
+  const isFindingsOutlier = (v: number) =>
+    findingsOutliersOn && v >= findingsRatioFloor && v >= findingsGapFloor;
+  const findingsJumpCount = findingsOutliersOn
+    ? items.filter((r) => isFindingsOutlier(r.totalFindings)).length
+    : 0;
+
   function hrefWith(
     next: Partial<{ status: string; owner: string; repo: string; sort: string; dir: string }>,
   ): string {
@@ -212,6 +231,15 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                 <span className="tabular-nums">{spikeCount}</span> cost {spikeCount === 1 ? 'spike' : 'spikes'}
               </span>
             ) : null}
+            {findingsJumpCount > 0 ? (
+              <span className="inline-flex items-center gap-1" title={`${findingsJumpCount} review${findingsJumpCount === 1 ? '' : 's'} with findings >= ${Math.ceil(Math.max(findingsRatioFloor, findingsGapFloor))} (page mean ${findingsMean.toFixed(1)})`}>
+                <span
+                  className="inline-block h-2 w-2 rounded-full border-[1.5px] border-accent"
+                  aria-hidden
+                />
+                <span className="tabular-nums">{findingsJumpCount}</span> above baseline
+              </span>
+            ) : null}
             <span>sorted by {sortKey} {sortDir === 'desc' ? 'desc' : 'asc'}</span>
           </div>
         </CardHeader>
@@ -286,8 +314,24 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                       </td>
                       <td><StatusPill status={r.status} /></td>
                       <td className="text-fg-muted">
-                        <span className="tabular-nums text-fg">{r.openFindings}</span>
-                        <span className="tabular-nums text-fg-subtle"> / {r.totalFindings}</span>
+                        {isFindingsOutlier(r.totalFindings) ? (
+                          <span
+                            className="inline-flex items-center gap-1"
+                            title={`above baseline: findings >= ${Math.ceil(Math.max(findingsRatioFloor, findingsGapFloor))} (page mean ${findingsMean.toFixed(1)})`}
+                          >
+                            <span
+                              className="inline-block h-1.5 w-1.5 shrink-0 rounded-full border-[1.5px] border-accent"
+                              aria-hidden
+                            />
+                            <span className="tabular-nums text-fg">{r.openFindings}</span>
+                            <span className="tabular-nums text-fg-subtle">/ {r.totalFindings}</span>
+                          </span>
+                        ) : (
+                          <>
+                            <span className="tabular-nums text-fg">{r.openFindings}</span>
+                            <span className="tabular-nums text-fg-subtle"> / {r.totalFindings}</span>
+                          </>
+                        )}
                       </td>
                       <td className="tabular-nums text-fg-muted">{formatMs(r.durationMs)}</td>
                       <td className="tabular-nums">
