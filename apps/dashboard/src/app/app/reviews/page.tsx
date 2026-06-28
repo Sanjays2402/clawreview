@@ -116,6 +116,18 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
     ? items.filter((r) => isFindingsOutlier(r.totalFindings)).length
     : 0;
 
+  // Combined-anomaly rollup: a review that is BOTH a cost spike AND above the
+  // findings baseline is the single most interesting row in the list -- an
+  // expensive review that also surfaced an unusual number of findings. The two
+  // outlier rings already render independently on their columns; surface a
+  // header rollup so "how many rows are doubly anomalous" reads without scanning
+  // for rows that happen to carry both. Only meaningful when both detectors are
+  // on AND at least one row trips both.
+  const isBothOutlier = (r: ReviewListItem) =>
+    isSpendOutlier(r.totalCostUsd) && isFindingsOutlier(r.totalFindings);
+  const bothCount =
+    spendOutliersOn && findingsOutliersOn ? items.filter(isBothOutlier).length : 0;
+
   function hrefWith(
     next: Partial<{ status: string; owner: string; repo: string; sort: string; dir: string }>,
   ): string {
@@ -240,6 +252,24 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                 <span className="tabular-nums">{findingsJumpCount}</span> above baseline
               </span>
             ) : null}
+            {bothCount > 0 ? (
+              <span
+                className="inline-flex items-center gap-1 text-fg"
+                title={`${bothCount} review${bothCount === 1 ? '' : 's'} that are BOTH a cost spike and above the findings baseline`}
+              >
+                {/* Split dot reads as the union of the two outlier accents: a
+                    severity-high (cost) left half + an accent (findings) right
+                    half, so the combined marker is legible against both legends. */}
+                <span
+                  className="inline-flex h-2 w-2 shrink-0 overflow-hidden rounded-full"
+                  aria-hidden
+                >
+                  <span className="h-full w-1/2 bg-severity-high" />
+                  <span className="h-full w-1/2 bg-accent" />
+                </span>
+                <span className="tabular-nums">{bothCount}</span> both
+              </span>
+            ) : null}
             <span>sorted by {sortKey} {sortDir === 'desc' ? 'desc' : 'asc'}</span>
           </div>
         </CardHeader>
@@ -300,7 +330,22 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
                 <tbody className="divide-y divide-border-subtle">
                   {items.map((r) => (
                     <tr key={r.id} className="group/row hover:bg-bg-subtle/40 focus-within:bg-accent/[0.07]">
-                      <td className="px-3 py-1.5">
+                      <td className="relative px-3 py-1.5">
+                        {/* A doubly-anomalous row (cost spike AND above findings
+                            baseline) gets a thin split left rail -- the header
+                            "both" marker, scaled to a row edge -- so the rare
+                            combined outlier is findable in the table, not just
+                            counted up top. Quiet enough not to compete with the
+                            per-column rings. */}
+                        {isBothOutlier(r) ? (
+                          <span
+                            className="absolute inset-y-0 left-0 flex w-[3px] flex-col overflow-hidden"
+                            aria-hidden
+                          >
+                            <span className="h-1/2 w-full bg-severity-high" />
+                            <span className="h-1/2 w-full bg-accent" />
+                          </span>
+                        ) : null}
                         <Link
                           href={`/app/reviews/${r.id}` as any}
                           data-review-row
