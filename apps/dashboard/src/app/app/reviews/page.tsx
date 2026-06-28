@@ -308,6 +308,15 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
               <X size={9} weight="bold" className="text-fg-muted group-hover:text-fg" />
             </Link>
           ))}
+          {selectedStatuses.length >= 2 ? (
+            <Link
+              href={hrefWith({ status: '' }) as any}
+              className="ml-1 text-fg-subtle hover:text-fg lowercase"
+              title="remove all status filters, keep owner / repo / sort"
+            >
+              clear statuses
+            </Link>
+          ) : null}
           <Link
             href={'/app/reviews' as any}
             className="ml-1 text-fg-subtle hover:text-fg lowercase"
