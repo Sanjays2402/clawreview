@@ -93,19 +93,29 @@ function fuzzyScore(needle: string, haystack: string): number | null {
 }
 
 /**
- * Pull a `status:<value>` token out of the query. When present, the palette
- * scopes results to review commands whose status matches `<value>` (prefix, so
- * `status:fail` -> failed), and the leftover text fuzzy-matches as usual --
- * e.g. `status:failed api` finds failed reviews on the api repo. Returns the
- * lowercased status value (or null) plus the remaining query with the token
- * removed. The token can sit anywhere in the string.
+ * Pull a `status:<value>` token out of the query. The value may be a single
+ * status (`status:failed`) or a comma list (`status:failed,running`) to scope
+ * to several at once -- the palette ORs them, so `status:failed,running` shows
+ * every review that is failed OR running. Matching is by prefix per entry, so
+ * `status:fail` -> failed. The leftover text fuzzy-matches as usual -- e.g.
+ * `status:failed,running api` finds failed-or-running reviews on the api repo.
+ * Returns the deduped lowercased status list (or null when no token is present)
+ * plus the remaining query with the token removed. The token can sit anywhere.
  */
-export function parseStatusFilter(raw: string): { statusFilter: string | null; restQuery: string } {
-  const m = raw.match(/\bstatus:([a-z]+)/i);
+export function parseStatusFilter(raw: string): { statusFilter: string[] | null; restQuery: string } {
+  // `[a-z]+(?:,[a-z]*)*` accepts a leading status then any number of
+  // comma-separated entries, tolerating a trailing comma mid-type
+  // (`status:failed,` matches `failed,`, which splits to just `failed`).
+  const m = raw.match(/\bstatus:([a-z]+(?:,[a-z]*)*)/i);
   if (!m || m.index === undefined) return { statusFilter: null, restQuery: raw };
-  const value = m[1]!.toLowerCase();
+  const seen = new Set<string>();
+  const values = m[1]!
+    .toLowerCase()
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && !seen.has(s) && (seen.add(s), true));
   const rest = (raw.slice(0, m.index) + raw.slice(m.index + m[0].length)).replace(/\s+/g, ' ').trim();
-  return { statusFilter: value, restQuery: rest };
+  return { statusFilter: values.length > 0 ? values : null, restQuery: rest };
 }
 
 /**
@@ -210,10 +220,13 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
     const needle = restQuery.trim().toLowerCase();
 
     // With an active status: filter, scope to review commands whose status
-    // matches (prefix), then fuzzy-rank the leftover text within that scope.
-    // Routes carry no status, so they drop out entirely while the filter is on.
+    // matches ANY of the requested statuses (prefix, OR-composed), then
+    // fuzzy-rank the leftover text within that scope. Routes carry no status,
+    // so they drop out entirely while the filter is on.
     if (sf) {
-      const scoped = commands.filter((c) => c.status != null && c.status.toLowerCase().startsWith(sf));
+      const scoped = commands.filter(
+        (c) => c.status != null && sf.some((s) => c.status!.toLowerCase().startsWith(s)),
+      );
       if (!needle) return { filtered: scoped, statusFilter: sf };
       const scored: Array<{ cmd: Cmd; score: number }> = [];
       for (const cmd of scoped) {
@@ -355,10 +368,10 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           className="w-full border-b border-border-subtle bg-bg px-3 py-2.5 font-mono text-xs text-fg outline-none placeholder:text-fg-subtle"
         />
         {/* Active status-filter pill: when a `status:<value>` token is parsed
-            out of the query, show a removable chip with the matching status dot
-            so the active scope is legible (and the dots in the rows below have
-            a key). Clicking the chip strips the token from the query, restoring
-            the full list. */}
+            out of the query, show a removable chip per requested status (each
+            with its matching dot) so the active scope is legible and the dots
+            in the rows below have a key. Clicking the chip strips the WHOLE
+            token from the query, restoring the full list. */}
         {statusFilter ? (
           <div className="flex items-center gap-2 border-b border-border-subtle/60 bg-bg-subtle/30 px-3 py-1.5 font-mono text-[10px]">
             <span className="uppercase tracking-wider text-fg-subtle">filter</span>
@@ -369,13 +382,21 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
                 setIdx(0);
               }}
               className="inline-flex items-center gap-1.5 rounded-sm border border-border bg-bg px-1.5 py-0.5 text-fg-muted transition-colors hover:border-border hover:text-fg"
-              title="clear status filter"
+              title={`clear status filter (${statusFilter.join(', ')})`}
             >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[statusFilter] ?? 'bg-fg-subtle'}`}
-                aria-hidden
-              />
-              <span>status: {statusFilter}</span>
+              <span className="inline-flex items-center gap-1">
+                <span className="text-fg-subtle">status:</span>
+                {statusFilter.map((s, i) => (
+                  <span key={s} className="inline-flex items-center gap-1">
+                    {i > 0 ? <span className="text-fg-subtle">,</span> : null}
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[s] ?? 'bg-fg-subtle'}`}
+                      aria-hidden
+                    />
+                    <span>{s}</span>
+                  </span>
+                ))}
+              </span>
               <span className="text-fg-subtle" aria-hidden>
                 &times;
               </span>
@@ -422,7 +443,7 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
               {bareStatus
                 ? 'no recent reviews to filter'
                 : statusFilter
-                  ? `no reviews with status: ${statusFilter}`
+                  ? `no reviews with status: ${statusFilter.join(', ')}`
                   : 'no matches'}
             </li>
           ) : (
