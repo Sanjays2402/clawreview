@@ -470,12 +470,37 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
           <div className="space-y-2.5 border-b border-border-subtle bg-bg-subtle/20 px-3 py-2.5 font-mono text-[11px]">
             <div>
               <div className="mb-1 uppercase tracking-wider text-fg-subtle">navigate</div>
-              <div className="text-fg-muted">
+              <div className="mb-1.5 text-fg-muted">
                 press <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">g</kbd>{' '}
-                then a page key (e.g.{' '}
-                <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">g</kbd>{' '}
-                <kbd className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg">r</kbd>{' '}
-                for reviews) to jump without opening this palette. every route below shows its hint.
+                then a page key to jump without opening this palette:
+              </div>
+              {/* Live g-prefix cheat-sheet: rather than describe the binding in
+                  prose, list the actual `g x` chords pulled from ROUTES' hint
+                  fields so the panel is a real reference. Only routes that
+                  declare a hint (i.e. have a g-prefix chord) appear -- routes
+                  reachable only by name stay out of the grid. */}
+              <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 sm:grid-cols-3">
+                {ROUTES.filter((r) => r.hint).map((r) => {
+                  // The hint is "g x"; split so each key renders as its own kbd.
+                  const keys = r.hint!.split(' ');
+                  // Strip the "go: " label prefix to the bare destination name.
+                  const dest = r.label.replace(/^go:\s*/, '');
+                  return (
+                    <span key={r.id} className="inline-flex items-center gap-1.5 text-fg-muted">
+                      <span className="inline-flex shrink-0 items-center gap-0.5">
+                        {keys.map((k, i) => (
+                          <kbd
+                            key={i}
+                            className="rounded-sm border border-border bg-bg px-1 text-[10px] text-fg"
+                          >
+                            {k}
+                          </kbd>
+                        ))}
+                      </span>
+                      <span className="truncate">{dest}</span>
+                    </span>
+                  );
+                })}
               </div>
             </div>
             <div>
