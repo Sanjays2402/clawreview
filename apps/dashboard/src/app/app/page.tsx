@@ -173,6 +173,37 @@ export default async function AppOverviewPage() {
                       />
                     ) : null}
                   </div>
+
+                  {/* Combined "needs attention" deep-link. Only shown when there
+                      is a genuine MIX -- both failed AND in-flight reviews -- so
+                      it adds something the individual chips above don't: a single
+                      jump to the union of the two non-clean states. Uses the
+                      reviews list's multi-status filter (status=failed,running),
+                      the capability the per-status chips can't express. Hidden
+                      when only one of the two is present (the matching chip
+                      already covers it) or when everything is clean. */}
+                  {failed > 0 && inProgress > 0 ? (
+                    <Link
+                      href={'/app/reviews?status=failed,running' as any}
+                      className="group inline-flex items-center gap-1.5 font-mono text-[11px] text-fg-muted transition-colors hover:text-fg"
+                    >
+                      <span
+                        className="inline-flex h-1.5 w-1.5 shrink-0 overflow-hidden rounded-full"
+                        aria-hidden
+                      >
+                        <span className="h-full w-1/2 bg-severity-critical/70" />
+                        <span className="h-full w-1/2 bg-accent/70" />
+                      </span>
+                      <span className="tabular-nums text-fg">{failed + inProgress}</span>
+                      <span>need attention</span>
+                      <span
+                        className="text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100"
+                        aria-hidden
+                      >
+                        &rsaquo;
+                      </span>
+                    </Link>
+                  ) : null}
                 </div>
               );
             })()}
