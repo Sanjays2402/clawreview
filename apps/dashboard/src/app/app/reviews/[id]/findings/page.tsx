@@ -193,9 +193,27 @@ export default async function FindingsPage({ params, searchParams }: PageProps) 
           {(sevFilter !== 'all' || stateFilter !== 'all' || agentFilter || groupBy !== 'flat') && (
             <Link href={`/app/reviews/${id}/findings` as any} className="ml-1 text-fg-subtle hover:text-fg">reset</Link>
           )}
-          <span className="ml-auto tabular-nums text-fg-subtle">
-            {filtered.length} / {review.findings.length}
-            {fileGroups ? <span> · {fileGroups.length} files</span> : null}
+          <span className="ml-auto flex items-center gap-1.5 tabular-nums text-fg-subtle">
+            {/* Windowed-paint hint: when the list is long enough that off-screen
+                rows defer their paint (content-visibility, 60+ findings, tick
+                45), surface a tiny badge so the perf mode is legible -- and,
+                importantly, reassure that every row is PRESENT (j/k nav + deep
+                links reach them all), just paint-deferred while off-screen. Not
+                a spinner: the work is the browser skipping layout it doesn't
+                need, so the badge is a quiet steady-state marker. */}
+            {windowed ? (
+              <span
+                className="hidden items-center gap-1 rounded-sm border border-border-subtle bg-bg-subtle/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted sm:inline-flex"
+                title={`long list: off-screen rows defer paint for smoother scrolling (>= ${WINDOW_THRESHOLD} findings). all ${filtered.length} rows are present and keyboard-reachable.`}
+              >
+                <span className="h-1 w-1 rounded-full bg-accent/70" aria-hidden />
+                windowed
+              </span>
+            ) : null}
+            <span>
+              {filtered.length} / {review.findings.length}
+              {fileGroups ? <span> · {fileGroups.length} files</span> : null}
+            </span>
           </span>
         </div>
 
