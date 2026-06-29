@@ -88,7 +88,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                         className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-severity-critical/20 px-1 text-[9px] font-medium tabular-nums text-severity-critical"
                         title={`${failedCount} failed review${failedCount === 1 ? '' : 's'} need attention`}
                       >
-                        {failedCount}
+                        {failedCount > 99 ? '99+' : failedCount}
                       </span>
                     ) : null}
                     {/* When failures exist the dot rides alongside the badge,
@@ -110,7 +110,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                         />
                         {!showBadge && runningCount > 1 ? (
                           <span className="hidden text-[9px] tabular-nums text-accent md:inline">
-                            {runningCount}
+                            {runningCount > 99 ? '99+' : runningCount}
                           </span>
                         ) : null}
                       </span>
