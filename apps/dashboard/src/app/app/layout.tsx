@@ -45,11 +45,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // failed (the genuinely actionable state) drives the badge. Hidden at zero.
   const failedCount = recentReviews.filter((r) => r.status === 'failed').length;
   // Running reviews are transient and expected, so they don't warrant the
-  // alarm-tinted count. But a quiet accent dot signals "work in flight" so the
-  // chrome reads live -- shown only when nothing has failed (the failed badge
-  // already commands attention; doubling up would be noise). Hidden at zero.
+  // alarm-tinted count. A quiet pulsing accent dot signals "work in flight" so
+  // the chrome reads live. It coexists with the failed badge: when both states
+  // are present the badge keeps the deep-link + count (the actionable state)
+  // and the dot rides alongside, dimmed, like the overview's "needs attention"
+  // union -- so a mixed fleet shows triage AND activity at once. Hidden at zero.
   const runningCount = recentReviews.filter((r) => r.status === 'running').length;
-  const showRunningDot = failedCount === 0 && runningCount > 0;
+  const showRunningDot = runningCount > 0;
 
   return (
     <div className="min-h-screen">
@@ -67,6 +69,8 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                 // actionable state is one click away from anywhere in the app.
                 const showBadge = n.href === '/app/reviews' && failedCount > 0;
                 const showRunning = n.href === '/app/reviews' && showRunningDot;
+                // Failed (actionable) wins the deep-link; running falls back to
+                // its own filter only when nothing has failed.
                 const reviewsHref = showBadge
                   ? '/app/reviews?status=failed'
                   : showRunning
@@ -86,9 +90,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                       >
                         {failedCount}
                       </span>
-                    ) : showRunning ? (
+                    ) : null}
+                    {/* When failures exist the dot rides alongside the badge,
+                        dimmed, so a mixed fleet shows triage + activity at once;
+                        when nothing failed it stands alone at full accent. */}
+                    {showRunning ? (
                       <span
-                        className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-accent"
+                        className={`inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-accent ${showBadge ? 'opacity-50' : ''}`}
                         title={`${runningCount} review${runningCount === 1 ? '' : 's'} running`}
                         aria-hidden
                       />
