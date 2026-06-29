@@ -121,6 +121,10 @@ export function SlaBreachesTable({
   const overdueVals = items.map(overdueOf);
   const maxOverdue = overdueVals.length > 0 ? Math.max(...overdueVals) : 0;
   const minOverdue = overdueVals.length > 0 ? Math.min(...overdueVals) : 0;
+  // Total time-past-SLA across the breaches in view -- the remediation debt of
+  // the current filter. A column-foot sum gives the overdue column a workload
+  // anchor (the per-row values are individual; the foot is "how much in total").
+  const sumOverdue = overdueVals.reduce((a, b) => a + b, 0);
   const worstCount = Math.max(1, Math.ceil(items.length * 0.1));
   const sortedDesc = overdueVals.slice().sort((a, b) => b - a);
   const worstThreshold = sortedDesc[worstCount - 1] ?? Infinity;
@@ -406,6 +410,29 @@ export function SlaBreachesTable({
                 );
               })}
             </tbody>
+            {/* Aggregate foot: the per-row overdue values are individual, so a
+                long list never shows the total remediation debt -- the summed
+                time-past-SLA across the filtered breaches. Foot it under the
+                overdue column it sums, mirroring the trends table idiom, plus a
+                breach count under the leading columns. Gated to 2+ rows: a single
+                breach's foot just restates its own row. The oldest age is already
+                brightened per-row, so the foot stays focused on the debt total. */}
+            {items.length >= 2 ? (
+              <tfoot className="border-t border-border text-[10px] uppercase tracking-wider text-fg-subtle">
+                <tr className="tabular-nums">
+                  <td className="px-3 py-1.5 font-medium normal-case tracking-normal text-fg-muted" colSpan={4}>
+                    {items.length} {severity === 'all' ? 'breaches' : `${severity} breaches`}
+                  </td>
+                  <td className="text-right normal-case tracking-normal text-fg-subtle" colSpan={2}>
+                    total overdue
+                  </td>
+                  <td className="py-1.5 text-right font-medium text-severity-critical" title="summed time past SLA across the breaches shown — the remediation debt of this view">
+                    {formatHours(sumOverdue)}
+                  </td>
+                  <td className="px-3" aria-hidden />
+                </tr>
+              </tfoot>
+            ) : null}
           </table>
         </div>
         </>
