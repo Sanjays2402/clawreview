@@ -1275,7 +1275,31 @@ Gate results: dashboard `tsc --noEmit` IDENTICAL to the tick-48 baseline -- ONLY
 - **Command palette: "go to list" keyboard hint** — pair the tick-49 button with a footer note that Enter does the same, closing the discoverability loop both directions.
 - **Reviews list: sticky header bg theme check** — tick 49 used bg-bg-subtle (opaque); verify it reads right in light + dark against the card bg, same check as the agent-table carry.
 
+### Tick 50 — 2026-06-28 23:08 PT — 5 features (FRONTEND BATCH)
 
+| # | Slice | SHA | Notes |
+|---|---|---|---|
+| 1 | SLA breaches table sticky header parity: thead was translucent bg-bg-subtle/50 and scrolled away while reviews/agent/trends pin theirs. Made it sticky top-0 z-10 opaque bg-bg-subtle + bottom border (agent-table idiom) so labels + sort arrows stay on the 760px-wide list | 87447bc | sla-breaches-table.tsx |
+| 2 | Top-nav running dot + failed badge coexist: dot showed only when failedCount==0, hiding activity on a mixed fleet. Now both show -- failed badge keeps deep-link+count, running dot rides alongside dimmed (opacity-50); failed wins href, dot solo+full-accent when none failed | 0897e43 | app/layout.tsx |
+| 3 | shift+u undo-all confirmation: bulk undo cleared N silently. Fire one non-actionable "n undone" toast; no action attached so it can't itself be undone -- no undo-all loop | 7f94ad9 | toaster.tsx |
+| 4 | Reviews tab title folds doubly-anomalous "both": anomalyCounts adds spike-AND-above-baseline overlap (highest signal); title appends "N both" only on a real mix; spike/jump predicates extracted so overlap can't drift | 43d0a2b | reviews/page.tsx |
+| 5 | Command palette go-to-list "enter" kbd hint: pairs tick-49's mouse button with the keyboard chord so discoverability closes both ways | 55a7059 | command-palette.tsx |
+
+Gate: dashboard `tsc --noEmit` 0 new errors (only pre-existing TS5101 baseUrl on tsconfig:18; total 2 lines = baseline). `next build` Compiled successfully in 4.3s; fails ONLY in standalone type-check on root `src/app/layout.tsx:5 import './globals.css'` -- pre-existing AND untouched (batch hit app/app/layout.tsx, different file; not in git diff). Disk 83%. All 5 scoped to apps/dashboard/src/. Push verified origin/main -> 55a7059.
+
+**Tick-50: 5 of 10 backlog items shipped (SLA full-table sticky parity, running+failed coexistence, undo-all confirmation, anomaly "both" count, palette enter hint). The agent-table sticky-bg + reviews sticky-bg theme-checks read fine on inspection; the empty-window guard + palette round-trip doc remain low-value, dropped. Refilled fresh for tick 51.**
+
+### Backlog seeded for tick 51 (refill — frontend-first under the standing override)
+- **SLA breaches table: sticky thead bg theme check** — tick 50 used opaque bg-bg-subtle; verify it reads against the bordered table container in light + dark, same check now passing on reviews/agent.
+- **Top-nav: running dot count on hover** — tick 50 shows a dim dot beside the failed badge; consider a tiny inline count when 2+ running, only at md+ so the nav stays tight. Verify clutter vs value.
+- **Toast: "n undone" pluralize at 1** — shift+u with one actionable fires "1 undone"; confirm a single actionable can even reach shift+u (newest u already covers it) -- may be a no-op worth guarding to "undone".
+- **Reviews tab title: cap part count** — three anomaly clauses can make a long title; verify it still reads in a narrow tab, trim to two + "and N more" if it overflows.
+- **Command palette: enter hint only when scope actionable** — verify the new kbd hides when statusFilter is empty (it lives in the scope chip row, should already); add aria so SR users hear the parity.
+- **SLA preview: oldest-row age emphasis on overview** — overview brightens worst-overdue; tick 50 left age emphasis to the full table. Mirror the oldest-row text bump into the 5-row preview if it reads.
+- **Trends agent table: zero-rows empty state** — confirm it degrades to a clean empty card at 0 agents under both sort axes; sticky thead must not leave a bare strip.
+- **Reviews list sticky header: scroll shadow** — pinned theads (tick 49/50) could gain a 1px shadow when content scrolls under, so the pin reads as deliberate not flat. Subtle, optional.
+- **Command palette go-to-list: count preview** — the button could show the match count it'll land on (e.g. "go to 12 ›") so the jump's destination size is known before committing.
+- **Failed badge: stale tolerance note** — SSR snapshot can lag; verify acceptable for a nav badge or add a light revalidate; keep no-client if SSR is fine.
 
 ### Tick 1 — 2026-06-20 02:11 PT — 5 features + 1 infra unblock
 
