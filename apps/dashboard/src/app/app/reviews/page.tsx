@@ -150,8 +150,14 @@ export async function generateMetadata({ searchParams }: PageProps) {
   if (both > 0 && spikes > 0 && jumps > 0) parts.push(`${both} both`);
   // Surface the anomaly count in the browser tab so a runaway page reads as
   // "needs a look" before the operator scans a single row. Quiet when nothing
-  // is anomalous (just the page name).
-  return { title: parts.length > 0 ? `reviews · ${parts.join(', ')}` : 'reviews' };
+  // is anomalous (just the page name). Cap at two clauses + an "and N more"
+  // tail so a triple ("2 cost spikes, 5 above baseline, 1 both") stays legible
+  // in a narrow pinned tab instead of truncating mid-phrase.
+  if (parts.length === 0) return { title: 'reviews' };
+  const shown = parts.slice(0, 2);
+  const overflow = parts.length - shown.length;
+  const summary = overflow > 0 ? `${shown.join(', ')} +${overflow} more` : shown.join(', ');
+  return { title: `reviews · ${summary}` };
 }
 
 export default async function ReviewsPage({ searchParams }: PageProps) {
