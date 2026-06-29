@@ -182,6 +182,20 @@ export function AgentPerformanceTable({
           </tbody>
         </table>
       </div>
+
+      {/* Share-track legend: the duration bar carries a faint sub-track for this
+          agent's share of total wall time, but the cue is silent without a key.
+          Spell out the two stacked bars once, below the table, so the secondary
+          track reads as "% of total" not visual noise. Shown only when there's a
+          row to explain. sm:+ keeps it off cramped mobile. */}
+      {sorted.length > 0 ? (
+        <div className="hidden items-center justify-end gap-1.5 px-1 font-mono text-[10px] text-fg-subtle sm:flex">
+          <span className="relative h-1.5 w-6 overflow-hidden rounded-sm bg-bg-muted" aria-hidden>
+            <span className="absolute inset-y-0 left-0 w-full bg-fg-subtle/30" />
+          </span>
+          <span>thin track = share of total agent time</span>
+        </div>
+      ) : null}
     </div>
   );
 }
