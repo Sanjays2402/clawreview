@@ -101,6 +101,49 @@ function sortItems(items: ReviewListItem[], key: SortKey, dir: SortDir): ReviewL
   return copy;
 }
 
+/**
+ * Spend / findings anomaly counts over a page of reviews. Shared by the page
+ * body (which renders the per-row rings + header pills) and generateMetadata
+ * (which folds the count into the document title) so the two never drift. Same
+ * dual-gate thresholds as the per-column markers: a spike is >= 1.6x mean AND
+ * above an absolute floor; an above-baseline review is >= 1.8x mean AND >= mean
+ * + 3 findings. Detectors are off below 2 rows / zero mean.
+ */
+function anomalyCounts(items: ReviewListItem[]): { spikes: number; jumps: number } {
+  const spendMean =
+    items.length > 0 ? items.reduce((sum, r) => sum + r.totalCostUsd, 0) / items.length : 0;
+  const spendFloor = Math.max(spendMean * 1.6, 0.05);
+  const spendOn = items.length >= 2 && spendMean > 0;
+  const spikes = spendOn ? items.filter((r) => r.totalCostUsd >= spendFloor).length : 0;
+  const fMean =
+    items.length > 0 ? items.reduce((sum, r) => sum + r.totalFindings, 0) / items.length : 0;
+  const fRatio = fMean * 1.8;
+  const fGap = fMean + 3;
+  const fOn = items.length >= 2 && fMean > 0;
+  const jumps = fOn ? items.filter((r) => r.totalFindings >= fRatio && r.totalFindings >= fGap).length : 0;
+  return { spikes, jumps };
+}
+
+export async function generateMetadata({ searchParams }: PageProps) {
+  const sp = await searchParams;
+  const statuses = parseStatusList(sp.status);
+  const { items } = await listReviews({
+    limit: 50,
+    status: statuses.length === 1 ? statuses[0] : undefined,
+    owner: sp.owner?.trim() || undefined,
+    repo: sp.repo?.trim() || undefined,
+  });
+  const scoped = statuses.length >= 2 ? items.filter((r) => statuses.includes(r.status)) : items;
+  const { spikes, jumps } = anomalyCounts(scoped);
+  const parts: string[] = [];
+  if (spikes > 0) parts.push(`${spikes} cost spike${spikes === 1 ? '' : 's'}`);
+  if (jumps > 0) parts.push(`${jumps} above baseline`);
+  // Surface the anomaly count in the browser tab so a runaway page reads as
+  // "needs a look" before the operator scans a single row. Quiet when nothing
+  // is anomalous (just the page name).
+  return { title: parts.length > 0 ? `reviews · ${parts.join(', ')}` : 'reviews' };
+}
+
 export default async function ReviewsPage({ searchParams }: PageProps) {
   const sp = await searchParams;
   const selectedStatuses = parseStatusList(sp.status);
@@ -136,7 +179,6 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   const spendFloor = Math.max(spendMean * 1.6, 0.05);
   const spendOutliersOn = items.length >= 2 && spendMean > 0;
   const isSpendOutlier = (v: number) => spendOutliersOn && v >= spendFloor;
-  const spikeCount = spendOutliersOn ? items.filter((r) => isSpendOutlier(r.totalCostUsd)).length : 0;
 
   // Findings above-baseline markers: carry the repo-detail sparkline idiom into
   // the list's findings column. A high finding count alone isn't an anomaly --
@@ -156,6 +198,10 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   const findingsJumpCount = findingsOutliersOn
     ? items.filter((r) => isFindingsOutlier(r.totalFindings)).length
     : 0;
+
+  // Header pill counts come from the same helper the document title uses, so
+  // the tab and the in-page pills can never disagree.
+  const { spikes: spikeCount } = anomalyCounts(items);
 
   // Combined-anomaly rollup: a review that is BOTH a cost spike AND above the
   // findings baseline is the single most interesting row in the list -- an
