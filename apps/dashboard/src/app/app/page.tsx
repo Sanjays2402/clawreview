@@ -311,11 +311,29 @@ export default async function AppOverviewPage() {
                           </span>{' '}
                           <span className="text-fg-muted">{b.title}</span>
                         </span>
-                        <span
-                          className={`shrink-0 tabular-nums ${oldest ? 'font-medium text-fg' : 'text-fg-subtle'}`}
-                          title={oldest ? 'open longest of the breaches shown' : undefined}
-                        >
-                          {Math.round(b.ageHours)}h / {b.slaHours}h
+                        <span className="flex shrink-0 items-center gap-1.5">
+                          {/* Compact age bar, parity with the full SLA table
+                              (tick 47): a quiet neutral track normalised to the
+                              oldest breach shown so relative age reads at a
+                              glance, oldest-in-view brightened. Distinct from the
+                              critical overdue bar below -- age is its own axis. */}
+                          {ageEmphasisOn ? (
+                            <span
+                              className="relative hidden h-1.5 w-10 shrink-0 overflow-hidden rounded-sm bg-bg-muted sm:block"
+                              aria-hidden
+                            >
+                              <span
+                                className={`absolute inset-y-0 left-0 ${oldest ? 'bg-fg-subtle' : 'bg-fg-subtle/40'}`}
+                                style={{ width: `${maxAge > 0 ? Math.max((b.ageHours / maxAge) * 100, 6) : 0}%` }}
+                              />
+                            </span>
+                          ) : null}
+                          <span
+                            className={`tabular-nums ${oldest ? 'font-medium text-fg' : 'text-fg-subtle'}`}
+                            title={oldest ? 'open longest of the breaches shown' : undefined}
+                          >
+                            {Math.round(b.ageHours)}h / {b.slaHours}h
+                          </span>
                         </span>
                         {overdue > 0 ? (
                           <span className="flex shrink-0 items-center gap-1.5">
