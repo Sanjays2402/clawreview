@@ -400,7 +400,7 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
           ) : (
             <div className="overflow-x-auto">
               <table className="w-full min-w-[720px] font-mono text-xs">
-                <thead className="bg-bg-subtle/50 text-left text-[10px] uppercase tracking-wider text-fg-subtle">
+                <thead className="sticky top-0 z-10 border-b border-border-subtle bg-bg-subtle text-left text-[10px] uppercase tracking-wider text-fg-subtle">
                   <tr>
                     <th className="px-3 py-1.5 font-medium">pull request</th>
                     <th className="font-medium">status</th>
