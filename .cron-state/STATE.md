@@ -1249,6 +1249,32 @@ Gate results: dashboard `tsc --noEmit` output IDENTICAL to the tick-47 baseline 
 - **Command palette: status: scope chip "go to list" button** — pair the enter-to-commit (tick 48) with a visible footer button so mouse users get the same jump. Tiny, reuses the deep-link.
 - **Reviews list: sticky header parity with SLA/agent tables** — the reviews table thead isn't sticky; the SLA + agent tables are. Mirror the idiom on long review lists. Verify length first.
 
+### Tick 49 — 2026-06-28 20:38 PT — 5 features (FRONTEND BATCH)
+
+| # | Slice | SHA | Notes |
+|---|---|---|---|
+| 1 | Reviews list sticky header parity: the reviews table thead scrolled away while SLA + agent tables pin theirs. Made it sticky top-0 z-10 with opaque bg-bg-subtle + bottom border (the agent-table idiom) so column labels + sort arrows stay visible on long (50-row) lists | 2fdf061 | reviews/page.tsx |
+| 2 | Toast shift+u undoes the whole actionable stack: `u` walks newest-first one per press; a deep stack (x/r/x/r cap-3) needed N taps. shift+u fires every live actionable toast newest-first + clears all in one keystroke; newest toast's `u` kbd gains +N counter + advertises the shortcut when 2+ reachable. Handles uppercase U for Shift-held | f7defdc | toaster.tsx |
+| 3 | Top-nav running indicator dot: tick-48 failed badge extended with a quiet pulsing accent dot when reviews are running but none failed (in-flight reads live without the alarm tint); deep-links ?status=running. Failed badge wins; hidden at zero | ebe9834 | app/layout.tsx |
+| 4 | Command palette status-scope "go to list" button: mouse parity for tick-48's enter-to-commit. Active status-filter pill row gains a right-aligned button firing the same /app/reviews?status=... deep-link the keyboard path uses; only while a scope is built | 430f373 | command-palette.tsx |
+| 5 | Reviews list anomaly count in tab title: generateMetadata folds "N cost spikes / N above baseline" into the document title so a runaway page reads in the browser tab before scanning. Extracted anomalyCounts() shared with the body so tab + header pills can't drift; honors status/owner/repo scope | f421fed | reviews/page.tsx |
+
+Gate results: dashboard `tsc --noEmit` IDENTICAL to the tick-48 baseline -- ONLY line is the pre-existing TS5101 baseUrl deprecation on tsconfig.json:18; ZERO new type errors (`grep error TS | grep -v TS5101 | wc -l` = 0; total tsc output 2 lines, same as baseline). Verified per-slice + after final commit. `next build` **Compiled successfully in 8.4s**; build fails ONLY in Next's standalone type-check phase on root `src/app/layout.tsx:5 import './globals.css'` -- proven pre-existing AND untouched: root layout NOT in `git diff --name-only origin/main...HEAD` (batch touched app/app/layout.tsx, different file), failing line byte-identical at origin/main and HEAD. All 5 slices GREEN; residual is the documented quirk (ticks 31-48). Disk healthy (12Gi/82%). All changes scoped to apps/dashboard/src/ (4 files); zero backend/packages touched. Push verified: origin/main -> f421fed.
+
+**Tick-49 frontend override:** All five slices user-facing UI in apps/dashboard/src/, each revertible, matching lowercase/mono/dense Linear-Raycast language. 5 of the explicit tick-49 backlog items shipped (sticky reviews header, shift+u undo-all, running dot, palette go-to-list button, anomaly tab title). Verified top-nav-badge poll-free freshness is acceptable as SSR snapshot (no client work added). Parked backend roadmap stays parked under the override.
+
+### Backlog seeded for tick 50 (refill — frontend-first under the standing override)
+- **Reviews list: `?status=` <-> command-palette round-trip doc** — carried. A small "filter in palette" hint or shared note; verify a real discoverability gap first.
+- **Agent table: sticky header bg matches scroll container** — carried (tick 47). Verify the sticky thead bg against the card bg in both themes so rows never bleed under a translucent header. Tiny polish if it reads wrong.
+- **Trends: agent-table empty-window guard** — carried. Confirm the table degrades cleanly at 0 rows under both sort axes; add empty-state if the sticky header leaves a bare thead.
+- **SLA overview: brighten the single worst overdue preview row** — tick 48 added the age bar; consider one brightened worst overdue row in the 5-row preview to match the full table's decile brightening (the bar is there, the row emphasis could follow).
+- **Top-nav: running dot + failed badge coexistence** — tick 49 shows running ONLY when failedCount==0. Evaluate showing both (failed count + dim running dot) when a mix exists, like the overview's "needs attention" union; keep subtle.
+- **Toast: undo-all confirmation pulse** — shift+u (tick 49) clears N silently; consider a tiny "n undone" confirmation toast so the bulk action gives feedback. Verify it doesn't loop (an undo-all toast must not itself be actionable).
+- **SLA full-table: sticky header parity** — reviews (tick 49) + agent + trends now pin theads; verify the SLA breaches table does too (it has 760px min-width, long lists likely). Mirror if missing.
+- **Reviews list: anomaly tab title also covers "both" count** — tick 49 surfaces spikes + above-baseline; the doubly-anomalous "both" count could fold in too. Verify it adds signal vs clutter on the tab.
+- **Command palette: "go to list" keyboard hint** — pair the tick-49 button with a footer note that Enter does the same, closing the discoverability loop both directions.
+- **Reviews list: sticky header bg theme check** — tick 49 used bg-bg-subtle (opaque); verify it reads right in light + dark against the card bg, same check as the agent-table carry.
+
 
 
 ### Tick 1 — 2026-06-20 02:11 PT — 5 features + 1 infra unblock
