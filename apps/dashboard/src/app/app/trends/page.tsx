@@ -42,27 +42,25 @@ export default async function TrendsPage({ searchParams }: PageProps) {
   const dailyHasData = stats.dailyFindings.some((n) => n > 0);
 
   return (
-    <div className="space-y-8">
+    <div className="space-y-4">
       <PageHeader
         title="trends"
         description="aggregate review and finding volume over a custom window."
         action={<WindowForm days={days} presets={WINDOW_PRESETS} />}
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <Stat label="Reviews" value={stats.totalReviews} />
-        <Stat label="Completion" value={`${Math.round(completionRate * 100)}%`} />
-        <Stat label="Findings" value={stats.totalFindings} />
-        <Stat label="Spend" value={formatUsd(stats.totalCostUsd)} />
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <Stat label="reviews" value={stats.totalReviews} />
+        <Stat label="completion" value={`${Math.round(completionRate * 100)}%`} />
+        <Stat label="findings" value={stats.totalFindings} />
+        <Stat label="spend" value={formatUsd(stats.totalCostUsd)} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-3 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Findings per day</div>
-              <div className="text-xs text-fg-muted">Last {stats.windowDays} days</div>
-            </div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">findings/day</div>
+            <div className="font-mono text-[11px] text-fg-muted">{stats.windowDays}d</div>
           </CardHeader>
           <CardBody>
             {dailyHasData ? (
@@ -75,13 +73,13 @@ export default async function TrendsPage({ searchParams }: PageProps) {
                 className="w-full"
               />
             ) : (
-              <div className="flex h-20 items-center text-xs text-fg-subtle">
-                No findings landed in this window.
+              <div className="flex h-20 items-center font-mono text-xs text-fg-subtle">
+                no findings landed in this window.
               </div>
             )}
-            <div className="mt-4 grid grid-cols-2 gap-3 text-xs text-fg-muted sm:grid-cols-4">
-              <Cell label="Open" value={String(stats.openFindings)} />
-              <Cell label="Dismissed" value={String(stats.dismissedFindings)} />
+            <div className="mt-4 grid grid-cols-2 gap-3 font-mono text-[11px] text-fg-muted sm:grid-cols-4">
+              <Cell label="open" value={String(stats.openFindings)} />
+              <Cell label="dismissed" value={String(stats.dismissedFindings)} />
               <Cell label="p50 latency" value={formatMs(stats.p50LatencyMs)} />
               <Cell label="p95 latency" value={formatMs(stats.p95LatencyMs)} />
             </div>
@@ -90,11 +88,12 @@ export default async function TrendsPage({ searchParams }: PageProps) {
 
         <Card>
           <CardHeader>
-            <div className="text-sm font-medium">Severity mix</div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">severity mix</div>
+            <div className="font-mono text-[11px] tabular-nums text-fg-muted">{sevTotal} total</div>
           </CardHeader>
           <CardBody>
             {sevTotal === 0 ? (
-              <div className="text-xs text-fg-subtle">No findings in window.</div>
+              <div className="font-mono text-xs text-fg-subtle">no findings in window.</div>
             ) : (
               <SeverityRow counts={sevCounts} total={sevTotal} />
             )}
@@ -104,17 +103,15 @@ export default async function TrendsPage({ searchParams }: PageProps) {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">Agent performance</div>
-            <div className="text-xs text-fg-muted">{stats.byAgent.length} agents</div>
-          </div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">agent performance</div>
+          <div className="font-mono text-[11px] tabular-nums text-fg-muted">{stats.byAgent.length} agents</div>
         </CardHeader>
         <CardBody>
           {stats.byAgent.length === 0 ? (
             <EmptyState
               icon={<ChartLineUp size={28} weight="duotone" />}
-              title="No agent runs"
-              description="No agents executed in this window."
+              title="no agent runs"
+              description="no agents executed in this window."
             />
           ) : (
             <AgentPerformanceTable rows={stats.byAgent} initialSort={agentSort} />
@@ -128,8 +125,8 @@ export default async function TrendsPage({ searchParams }: PageProps) {
 function Cell({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <div className="text-fg-subtle">{label}</div>
-      <div className="text-base font-medium text-fg">{value}</div>
+      <div className="uppercase tracking-wider text-fg-subtle">{label}</div>
+      <div className="text-sm tabular-nums text-fg">{value}</div>
     </div>
   );
 }
