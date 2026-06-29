@@ -226,7 +226,7 @@ export default async function AppOverviewPage() {
           <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">sla breaches</div>
           <div className="flex items-center gap-3 font-mono text-[11px] text-fg-muted">
             <span>{sla ? `${sla.reviewsScanned} reviews scanned` : 'unavailable'}</span>
-            <Link href={'/app/sla' as any} className="hover:text-fg">view all</Link>
+            <Link href={'/app/sla' as any} className="rounded-sm outline-none ring-accent/60 hover:text-fg focus-visible:ring-1">view all</Link>
           </div>
         </CardHeader>
         <CardBody>
@@ -365,7 +365,7 @@ export default async function AppOverviewPage() {
               {sla.totalBreaches > 5 ? (
                 <Link
                   href={'/app/sla' as any}
-                  className="inline-block font-mono text-[11px] text-fg-subtle hover:text-fg"
+                  className="inline-block rounded-sm font-mono text-[11px] text-fg-subtle outline-none ring-accent/60 hover:text-fg focus-visible:ring-1"
                 >
                   +{sla.totalBreaches - 5} more breaches
                 </Link>
@@ -386,7 +386,7 @@ export default async function AppOverviewPage() {
                 <span>nav</span>
               </span>
             ) : null}
-            <Link href={'/app/reviews' as any} className="font-mono text-[11px] text-fg-muted hover:text-fg">
+            <Link href={'/app/reviews' as any} className="rounded-sm font-mono text-[11px] text-fg-muted outline-none ring-accent/60 hover:text-fg focus-visible:ring-1">
               view all
             </Link>
           </div>
