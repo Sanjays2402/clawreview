@@ -269,6 +269,30 @@ export function SlaBreachesTable({
           no {severity} breaches. <Link href={hrefWith({ sev: '' }) as any} className="text-accent hover:underline">show all</Link>
         </div>
       ) : (
+        <>
+        {/* Worst-row legend: both numeric columns brighten their worst decile,
+            but on two DISTINCT axes -- age (text-fg) and overdue (critical). In
+            a long list the brightening is easy to read as "random bold rows".
+            Key it: oldest = open longest, most overdue = furthest past SLA, and
+            a row can be one without the other. Only shown once an axis is
+            actually on (the same guard the columns use), sm:+ to spare mobile. */}
+        {ageEmphasisOn || overdueEmphasisOn ? (
+          <div className="hidden flex-wrap items-center gap-x-3 gap-y-1 px-1 font-mono text-[10px] text-fg-subtle sm:flex">
+            <span className="uppercase tracking-wider">brightest</span>
+            {ageEmphasisOn ? (
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-fg-subtle" aria-hidden />
+                <span className="font-medium text-fg">oldest</span> open longest
+              </span>
+            ) : null}
+            {overdueEmphasisOn ? (
+              <span className="inline-flex items-center gap-1">
+                <span className="h-1.5 w-1.5 rounded-full bg-severity-critical" aria-hidden />
+                <span className="font-medium text-severity-critical">most overdue</span> furthest past sla
+              </span>
+            ) : null}
+          </div>
+        ) : null}
         <div className="overflow-x-auto rounded-sm border border-border-subtle">
           <table className="w-full min-w-[760px] font-mono text-xs">
             <thead className="bg-bg-subtle/50 text-left text-[10px] uppercase tracking-wider text-fg-subtle">
@@ -384,6 +408,7 @@ export function SlaBreachesTable({
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {items.length > 0 ? (
