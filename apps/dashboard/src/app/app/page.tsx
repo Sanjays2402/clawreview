@@ -185,7 +185,7 @@ export default async function AppOverviewPage() {
                   {failed > 0 && inProgress > 0 ? (
                     <Link
                       href={'/app/reviews?status=failed,running' as any}
-                      className="group inline-flex items-center gap-1.5 font-mono text-[11px] text-fg-muted transition-colors hover:text-fg"
+                      className="group inline-flex items-center gap-1.5 rounded-sm font-mono text-[11px] text-fg-muted outline-none ring-accent/60 transition-colors hover:text-fg focus-visible:ring-1"
                     >
                       <span
                         className="inline-flex h-1.5 w-1.5 shrink-0 overflow-hidden rounded-full"
@@ -255,7 +255,7 @@ export default async function AppOverviewPage() {
                     <Link
                       key={sev}
                       href={`/app/sla?sev=${sev}` as any}
-                      className="group inline-flex items-center gap-1.5 rounded-sm border border-border-subtle bg-bg-subtle/50 px-1.5 py-0.5 lowercase text-fg-muted transition-colors hover:border-border hover:bg-bg-subtle"
+                      className="group inline-flex items-center gap-1.5 rounded-sm border border-border-subtle bg-bg-subtle/50 px-1.5 py-0.5 lowercase text-fg-muted outline-none ring-accent/60 transition-colors hover:border-border hover:bg-bg-subtle focus-visible:ring-1"
                     >
                       <span className={`h-1.5 w-1.5 rounded-full ${SEV_DOT[sev]}`} aria-hidden />
                       <span className="tabular-nums text-fg">{n}</span>
@@ -469,7 +469,7 @@ function ReliabilityChip({
     <Link
       href={href as any}
       aria-label={`view ${count} ${label} review${count === 1 ? '' : 's'}`}
-      className={`group inline-flex items-center gap-1.5 rounded-sm border border-transparent px-1 py-0.5 transition-colors hover:border-border hover:bg-bg-subtle/60 ${tone ?? ''}`}
+      className={`group inline-flex items-center gap-1.5 rounded-sm border border-transparent px-1 py-0.5 outline-none ring-accent/60 transition-colors hover:border-border hover:bg-bg-subtle/60 focus-visible:ring-1 ${tone ?? ''}`}
     >
       {inner}
       <span className="text-fg-subtle opacity-0 transition-opacity group-hover:opacity-100" aria-hidden>
