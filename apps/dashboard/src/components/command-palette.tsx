@@ -451,7 +451,16 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             } else if (e.key === 'Enter') {
               e.preventDefault();
               const cmd = filtered[idx];
-              if (cmd) run(cmd);
+              if (cmd) {
+                run(cmd);
+              } else if (statusFilter && statusFilter.length > 0) {
+                // No fuzzy row selected but a status: scope is built -> commit
+                // it to the reviews list deep-link the list already reads
+                // (?status=failed,running). Closes the keyboard loop: build the
+                // multi-status scope with chips, then Enter to jump.
+                close();
+                router.push(`/app/reviews?status=${statusFilter.join(',')}` as any);
+              }
             }
           }}
           placeholder="jump to a page or review... (try status:failed)"
