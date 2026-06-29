@@ -45,10 +45,11 @@ import type { Icon } from '@phosphor-icons/react';
  *
  * Keyboard UX: the rest of the dashboard is keyboard-driven (j/k list nav, x/r
  * triage, cmd-k palette), so the toast corner answers to the keyboard too. A
- * global `u` while an actionable toast is live fires its action (undo) and
- * dismisses it -- so a too-fast `x` is one keystroke away from being undone,
- * no reach for the mouse. `Escape` clears the corner. Both are ignored while
- * typing in an input/textarea/contenteditable so they never eat real input.
+ * global `u` fires the NEWEST live actionable toast and dismisses it; pressing
+ * `u` again then walks back to the next-newest, so two quick dismisses are two
+ * `u`s to fully undo -- no toast is keyboard-unreachable just because another
+ * stacked on top. `Escape` clears the corner. Both are ignored while typing in
+ * an input/textarea/contenteditable so they never eat real input.
  */
 
 export type ToastTone = 'success' | 'info' | 'neutral' | 'error';
@@ -185,8 +186,10 @@ export function Toaster() {
         return;
       }
       if (e.key === 'u') {
-        // Fire the most-recent actionable toast (the one the operator most
-        // likely just triggered) and dismiss it. No-op if nothing is undoable.
+        // Fire the NEWEST actionable toast (the one most likely just triggered)
+        // and dismiss it. Because each press removes its target, pressing `u`
+        // again walks back to the next-newest -- two stacked dismisses undo
+        // with two `u`s. No-op if nothing is undoable.
         const target = [...cur].reverse().find((x) => x.action);
         if (!target) return;
         e.preventDefault();
@@ -200,6 +203,12 @@ export function Toaster() {
 
   if (toasts.length === 0) return null;
 
+  // The newest actionable toast is the one `u` targets first; any older
+  // actionable toasts are reached by pressing `u` again. Mark all but the
+  // newest with a quieter "u again" badge so the walk-back order is visible
+  // rather than implied -- two stacked dismisses read as a 2-deep undo stack.
+  const lastUndoableToken = [...toasts].reverse().find((t) => t.action)?.token ?? null;
+
   return (
     <div
       aria-live="polite"
@@ -208,6 +217,7 @@ export function Toaster() {
       {toasts.map((t) => {
         const tone = TONE[t.tone] ?? TONE.success;
         const Glyph = tone.icon;
+        const isNextUndo = t.action != null && t.token === lastUndoableToken;
         return (
           <div
             key={t.key}
@@ -238,7 +248,12 @@ export function Toaster() {
                 className="pointer-events-auto ml-0.5 inline-flex shrink-0 items-center gap-1 rounded-sm border border-border bg-bg-subtle px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
               >
                 {t.action.label}
-                <kbd className="rounded-sm border border-border px-1 text-[9px] normal-case tracking-normal text-fg-subtle">
+                <kbd
+                  className={`rounded-sm border border-border px-1 text-[9px] normal-case tracking-normal ${
+                    isNextUndo ? 'text-fg-subtle' : 'text-fg-subtle/40'
+                  }`}
+                  title={isNextUndo ? 'press u to undo' : 'press u twice to reach this'}
+                >
                   u
                 </kbd>
               </button>
