@@ -518,6 +518,13 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             >
               go to list <span aria-hidden>&rsaquo;</span>
             </button>
+            {/* Keyboard parity hint: the button mirrors what Enter already does
+                on an empty fuzzy row, so advertise the chord beside it -- the
+                discoverability loop closes both ways (mouse sees the key, key
+                sees the button). */}
+            <kbd className="hidden rounded-sm border border-border bg-bg px-1 text-[10px] text-fg-subtle sm:inline" title="press enter to jump">
+              enter
+            </kbd>
           </div>
         ) : null}
         {showHelp ? (
