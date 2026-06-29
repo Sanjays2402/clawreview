@@ -444,10 +444,12 @@ function SortableTh({
       <Link
         href={href as any}
         aria-sort={active ? (dir === 'asc' ? 'ascending' : 'descending') : 'none'}
-        className={`group inline-flex items-center gap-0.5 ${justify} transition-colors ${active ? 'text-fg' : 'hover:text-fg'}`}
+        className={`group inline-flex items-center gap-0.5 rounded-sm outline-none ring-accent/60 focus-visible:ring-1 ${justify} transition-colors ${active ? 'text-fg' : 'hover:text-fg'}`}
       >
         <span>{children}</span>
-        <span className={`flex h-3 w-3 items-center justify-center ${active ? 'opacity-100' : 'opacity-0 group-hover:opacity-60'}`}>
+        {/* Keyboard parity: the sort arrow reveals on focus-visible too, not just
+            hover, so a tabbed header still advertises that it sorts. */}
+        <span className={`flex h-3 w-3 items-center justify-center ${active ? 'opacity-100' : 'opacity-0 group-hover:opacity-60 group-focus-visible:opacity-60'}`}>
           {dir === 'asc' && active ? <ArrowUp size={9} weight="bold" /> : <ArrowDown size={9} weight="bold" />}
         </span>
       </Link>
