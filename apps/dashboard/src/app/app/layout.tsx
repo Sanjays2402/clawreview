@@ -38,6 +38,13 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
     status: r.status,
   }));
 
+  // Failed reviews in the recent set get a quiet count badge on the top-nav
+  // "reviews" link, so the operator sees there's something to triage without
+  // opening the page first -- the overview's "needs attention" idiom carried
+  // into the persistent chrome. Running reviews are transient/expected, so only
+  // failed (the genuinely actionable state) drives the badge. Hidden at zero.
+  const failedCount = recentReviews.filter((r) => r.status === 'failed').length;
+
   return (
     <div className="min-h-screen">
       <header className="sticky top-0 z-30 border-b border-border-subtle bg-bg/85 backdrop-blur">
@@ -48,15 +55,29 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
               <span className="font-mono text-[12px] font-semibold tracking-tight">clawreview</span>
             </Link>
             <nav className="flex min-w-0 items-center gap-px overflow-x-auto text-xs text-fg-muted">
-              {NAV.map((n) => (
-                <Link
-                  key={n.href}
-                  href={n.href as any}
-                  className="rounded px-2 py-1 font-mono lowercase hover:bg-bg-subtle hover:text-fg"
-                >
-                  {n.label}
-                </Link>
-              ))}
+              {NAV.map((n) => {
+                // The reviews link, when failures exist, deep-links straight to
+                // the failed filter + carries a quiet count badge so the
+                // actionable state is one click away from anywhere in the app.
+                const showBadge = n.href === '/app/reviews' && failedCount > 0;
+                return (
+                  <Link
+                    key={n.href}
+                    href={(showBadge ? '/app/reviews?status=failed' : n.href) as any}
+                    className="inline-flex items-center gap-1 rounded px-2 py-1 font-mono lowercase hover:bg-bg-subtle hover:text-fg"
+                  >
+                    {n.label}
+                    {showBadge ? (
+                      <span
+                        className="inline-flex h-3.5 min-w-[14px] items-center justify-center rounded-full bg-severity-critical/20 px-1 text-[9px] font-medium tabular-nums text-severity-critical"
+                        title={`${failedCount} failed review${failedCount === 1 ? '' : 's'} need attention`}
+                      >
+                        {failedCount}
+                      </span>
+                    ) : null}
+                  </Link>
+                );
+              })}
             </nav>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
