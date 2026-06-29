@@ -18,6 +18,28 @@ function parseAgentSort(raw: string | undefined): AgentSort {
   return AGENT_SORTS.includes((raw ?? 'avg') as AgentSort) ? (raw as AgentSort) : 'avg';
 }
 
+/**
+ * Findings-per-day spike days: indices in the daily series that jump well past
+ * the window's own baseline. Same dual gate the repo-detail trend card + the
+ * reviews list already use -- a ratio (>= 1.8x mean) AND an absolute gap
+ * (>= mean + 3) -- so a 1 -> 2 wobble never lights up, only a genuine surge (a
+ * big PR day, or a regression worth a look). Off below 2 points / zero mean.
+ * Feeds the sparkline's always-visible outlier rings so a spike day reads at a
+ * glance, the way the per-review trend card already marks its outliers -- the
+ * window-level chart was the one place the marker idiom hadn't reached.
+ */
+function spikeDayIndices(daily: number[]): number[] {
+  const mean = daily.length > 0 ? daily.reduce((a, b) => a + b, 0) / daily.length : 0;
+  if (daily.length < 2 || mean <= 0) return [];
+  const ratioFloor = mean * 1.8;
+  const gapFloor = mean + 3;
+  const out: number[] = [];
+  daily.forEach((v, i) => {
+    if (v >= ratioFloor && v >= gapFloor) out.push(i);
+  });
+  return out;
+}
+
 interface PageProps {
   searchParams: Promise<{ days?: string; sort?: string }>;
 }
@@ -40,6 +62,7 @@ export default async function TrendsPage({ searchParams }: PageProps) {
   const sevTotal = Object.values(sevCounts).reduce((a, b) => a + b, 0);
   const completionRate = stats.totalReviews > 0 ? stats.completedReviews / stats.totalReviews : 0;
   const dailyHasData = stats.dailyFindings.some((n) => n > 0);
+  const spikeDays = spikeDayIndices(stats.dailyFindings);
 
   return (
     <div className="space-y-4">
@@ -60,7 +83,22 @@ export default async function TrendsPage({ searchParams }: PageProps) {
         <Card className="lg:col-span-2">
           <CardHeader>
             <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">findings/day</div>
-            <div className="font-mono text-[11px] text-fg-muted">{stats.windowDays}d</div>
+            <div className="flex items-center gap-3 font-mono text-[11px] text-fg-muted">
+              {spikeDays.length > 0 ? (
+                <span
+                  className="inline-flex items-center gap-1"
+                  title={`${spikeDays.length} day${spikeDays.length === 1 ? '' : 's'} well above the window baseline (>= 1.8x mean and >= mean + 3)`}
+                >
+                  <span
+                    className="inline-block h-2 w-2 rounded-full border-[1.5px] border-accent"
+                    aria-hidden
+                  />
+                  <span className="tabular-nums">{spikeDays.length}</span>
+                  {spikeDays.length === 1 ? ' spike day' : ' spike days'}
+                </span>
+              ) : null}
+              <span>{stats.windowDays}d</span>
+            </div>
           </CardHeader>
           <CardBody>
             {dailyHasData ? (
@@ -70,6 +108,8 @@ export default async function TrendsPage({ searchParams }: PageProps) {
                 width={600}
                 height={80}
                 unit="finding"
+                markers={spikeDays}
+                markerColor="hsl(var(--accent))"
                 className="w-full"
               />
             ) : (
