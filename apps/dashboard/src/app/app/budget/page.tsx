@@ -35,24 +35,25 @@ export default async function BudgetPage() {
         description="per-installation spend over last 30d. live health for every monitored repo."
       />
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <Stat label="30d spend" value={formatUsd(weekly.totalCostUsd)} />
-        <Stat label="Healthy repos" value={healthy} />
-        <Stat label="Degraded" value={degraded} />
-        <Stat label="Paused" value={paused} />
+        <Stat label="healthy repos" value={healthy} />
+        <Stat label="degraded" value={degraded} />
+        <Stat label="paused" value={paused} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-3">
+      <div className="grid gap-3 lg:grid-cols-3">
         <Card className="lg:col-span-2">
           <CardHeader>
-            <div className="text-sm font-medium">Installations</div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">installations</div>
+            <div className="font-mono text-[11px] tabular-nums text-fg-muted">{installs.length} tracked</div>
           </CardHeader>
           <CardBody>
             {installs.length === 0 ? (
               <EmptyState
                 icon={<ShieldCheck size={28} weight="duotone" />}
-                title="No installations on this account"
-                description="Install the ClawReview GitHub App on an org or user to start tracking spend here."
+                title="no installations on this account"
+                description="install the clawreview github app on an org or user to start tracking spend here."
                 action={
                   <EmptyStateActions
                     primary={{ label: 'install on github', href: '/login' }}
@@ -62,25 +63,25 @@ export default async function BudgetPage() {
               />
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[480px] text-sm">
-                  <thead className="text-left text-xs uppercase tracking-wide text-fg-subtle">
+                <table className="w-full min-w-[480px] font-mono text-xs">
+                  <thead className="text-left text-[10px] uppercase tracking-wider text-fg-subtle">
                     <tr>
-                      <th className="py-2 font-medium">Account</th>
-                      <th className="font-medium">Repos</th>
-                      <th className="font-medium">Spent</th>
-                      <th className="font-medium">Limit</th>
-                      <th className="text-right font-medium">Detail</th>
+                      <th className="py-1.5 font-medium">account</th>
+                      <th className="font-medium">repos</th>
+                      <th className="font-medium">spent</th>
+                      <th className="font-medium">limit</th>
+                      <th className="text-right font-medium">detail</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-border-subtle">
                     {installs.map((i) => {
                       const pct = i.monthlyBudgetUsd > 0 ? Math.min(1, i.spentUsd / i.monthlyBudgetUsd) : 0;
                       return (
-                        <tr key={i.id}>
-                          <td className="py-3 font-medium text-fg">{i.login}</td>
-                          <td className="text-fg-muted">{i.repoCount}</td>
+                        <tr key={i.id} className="hover:bg-bg-subtle/40">
+                          <td className="py-1.5 text-fg">{i.login}</td>
+                          <td className="tabular-nums text-fg-muted">{i.repoCount}</td>
                           <td className="text-fg-muted">
-                            <div>{formatUsd(i.spentUsd)}</div>
+                            <div className="tabular-nums">{formatUsd(i.spentUsd)}</div>
                             <div className="mt-1 h-1 w-24 overflow-hidden rounded-full bg-bg-subtle">
                               <div
                                 className={pct >= 1 ? 'bg-rose-500' : pct > 0.8 ? 'bg-amber-500' : 'bg-emerald-500'}
@@ -88,13 +89,13 @@ export default async function BudgetPage() {
                               />
                             </div>
                           </td>
-                          <td className="text-fg-muted">{formatUsd(i.monthlyBudgetUsd)}</td>
+                          <td className="tabular-nums text-fg-muted">{formatUsd(i.monthlyBudgetUsd)}</td>
                           <td className="text-right">
                             <Link
                               href={`/app/installations/${i.id}/billing` as any}
-                              className="text-xs text-fg-muted hover:text-fg"
+                              className="rounded-sm text-fg-muted outline-none ring-accent/60 hover:text-fg focus-visible:ring-1"
                             >
-                              View
+                              view
                             </Link>
                           </td>
                         </tr>
@@ -109,12 +110,12 @@ export default async function BudgetPage() {
 
         <Card>
           <CardHeader>
-            <div className="text-sm font-medium">Look up by installation id</div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">look up by installation id</div>
           </CardHeader>
           <CardBody>
             <BudgetLookupForm />
-            <p className="mt-3 text-xs text-fg-subtle">
-              Paste the numeric GitHub App installation id to view the live budget snapshot for that tenant.
+            <p className="mt-3 font-mono text-xs text-fg-subtle">
+              paste the numeric github app installation id to view the live budget snapshot for that tenant.
             </p>
           </CardBody>
         </Card>
@@ -122,7 +123,7 @@ export default async function BudgetPage() {
 
       <Card>
         <CardHeader>
-          <div className="text-sm font-medium">Repo health</div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">repo health</div>
           <div className="flex items-center gap-3">
             {health.length > 0 ? (
               <span className="hidden items-center gap-1.5 font-mono text-[11px] text-fg-muted sm:inline-flex">
@@ -133,15 +134,15 @@ export default async function BudgetPage() {
                 <span>open</span>
               </span>
             ) : null}
-            <span className="text-xs text-fg-muted">{health.length} tracked</span>
+            <span className="font-mono text-[11px] tabular-nums text-fg-muted">{health.length} tracked</span>
           </div>
         </CardHeader>
         <CardBody>
           {health.length === 0 ? (
             <EmptyState
               icon={<ShieldCheck size={28} weight="duotone" />}
-              title="No repos tracked yet"
-              description="Repo health updates as reviews land. Open a PR on an installed repo to populate this list."
+              title="no repos tracked yet"
+              description="repo health updates as reviews land. open a pr on an installed repo to populate this list."
               action={
                 <EmptyStateActions
                   primary={{ label: 'view repos', href: '/app/repos' }}
@@ -161,7 +162,7 @@ export default async function BudgetPage() {
                     <div className="col-span-12 sm:col-span-5">
                       <div className="font-medium text-fg">{h.owner}/{h.repo}</div>
                       {h.pauseReason ? (
-                        <div className="text-xs text-fg-muted">Paused: {h.pauseReason}</div>
+                        <div className="text-xs text-fg-muted">paused: {h.pauseReason}</div>
                       ) : null}
                     </div>
                     <div className="col-span-4 sm:col-span-2">
@@ -198,7 +199,7 @@ function HealthPill({ status }: { status: 'healthy' | 'degraded' | 'paused' }) {
   } as const;
   const m = map[status];
   return (
-    <span className={`inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide ${m.tone}`}>
+    <span className={`inline-flex items-center gap-1 rounded-sm border px-1.5 py-0.5 text-[10px] font-medium lowercase tracking-wide ${m.tone}`}>
       {m.icon}
       {status}
     </span>
