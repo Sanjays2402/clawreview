@@ -199,6 +199,11 @@ export function Toaster() {
           for (const x of actionable) x.action?.onClick();
           const tokens = new Set(actionable.map((x) => x.token));
           setToasts((list) => list.filter((x) => !tokens.has(x.token)));
+          // Bulk undo clears N toasts silently; fire a single non-actionable
+          // confirmation so the keystroke gives feedback. No `action`, so it
+          // can never itself be undone -- shift+u can't spawn an undo-all loop.
+          const n = actionable.length;
+          toast(`${n} undone`, { tone: 'success', durationMs: 1600 });
           return;
         }
         const target = actionable[0]!;
