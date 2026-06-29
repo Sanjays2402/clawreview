@@ -98,7 +98,7 @@ export function AgentPerformanceTable({
 
       <div className="overflow-x-auto">
         <table className="w-full min-w-[640px] font-mono text-xs">
-          <thead className="sticky top-0 z-10 border-b border-border-subtle bg-bg text-left text-[10px] uppercase tracking-wider text-fg-subtle">
+          <thead className="sticky top-0 z-10 border-b border-border-subtle bg-bg text-left text-[10px] uppercase tracking-wider text-fg-subtle shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
             <tr>
               <th className="py-1.5 font-medium">agent</th>
               <th className="font-medium tabular-nums">runs</th>
