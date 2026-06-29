@@ -93,13 +93,27 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                     ) : null}
                     {/* When failures exist the dot rides alongside the badge,
                         dimmed, so a mixed fleet shows triage + activity at once;
-                        when nothing failed it stands alone at full accent. */}
+                        when nothing failed it stands alone at full accent. With
+                        2+ running, a tiny inline count rides beside the dot at
+                        md+ so a busy fleet's depth reads without hovering -- but
+                        only when the dot stands alone (no failed badge) so the
+                        chrome never stacks two numbers; the count stays single,
+                        hidden below md to keep the nav tight on mobile. */}
                     {showRunning ? (
                       <span
-                        className={`inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-accent ${showBadge ? 'opacity-50' : ''}`}
+                        className="inline-flex items-center gap-0.5"
                         title={`${runningCount} review${runningCount === 1 ? '' : 's'} running`}
-                        aria-hidden
-                      />
+                      >
+                        <span
+                          className={`inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-accent ${showBadge ? 'opacity-50' : ''}`}
+                          aria-hidden
+                        />
+                        {!showBadge && runningCount > 1 ? (
+                          <span className="hidden text-[9px] tabular-nums text-accent md:inline">
+                            {runningCount}
+                          </span>
+                        ) : null}
+                      </span>
                     ) : null}
                   </Link>
                 );
