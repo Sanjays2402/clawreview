@@ -31,7 +31,7 @@ export function WindowForm({ days, presets }: Props) {
     e.preventDefault();
     const parsed = Number.parseInt(value, 10);
     if (!Number.isFinite(parsed) || parsed < 1 || parsed > 90) {
-      setError('Pick a window between 1 and 90 days.');
+      setError('pick a window between 1 and 90 days.');
       return;
     }
     setError(null);
@@ -39,27 +39,37 @@ export function WindowForm({ days, presets }: Props) {
   }
 
   return (
-    <div className="flex flex-col items-end gap-2">
-      <div className="flex flex-wrap items-center gap-1.5">
-        {presets.map((p) => (
-          <button
-            key={p}
-            type="button"
-            onClick={() => {
-              setValue(String(p));
-              setError(null);
-              apply(p);
-            }}
-            disabled={pending}
-            className={`rounded-md border px-2 py-1 text-xs transition-colors ${
-              p === days
-                ? 'border-fg bg-fg text-bg'
-                : 'border-border bg-bg-subtle text-fg-muted hover:bg-bg-muted'
-            } disabled:opacity-50`}
-          >
-            {p}d
-          </button>
-        ))}
+    <div className="flex flex-col items-end gap-1.5 font-mono">
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+        {/* Segmented preset control: dense accent-tinted toggle matching the
+            agent-table sort toggle + repo-trend metric switch, rather than the
+            old heavy border-fg/bg-fg pill. The active window reads as a quiet
+            accent fill, inactive presets stay muted. */}
+        <div className="inline-flex overflow-hidden rounded-sm border border-border-subtle">
+          {presets.map((p) => {
+            const active = p === days;
+            return (
+              <button
+                key={p}
+                type="button"
+                onClick={() => {
+                  setValue(String(p));
+                  setError(null);
+                  apply(p);
+                }}
+                disabled={pending}
+                aria-pressed={active}
+                className={`px-2 py-0.5 tabular-nums transition-colors disabled:opacity-50 ${
+                  active
+                    ? 'bg-accent/15 text-fg'
+                    : 'text-fg-subtle hover:bg-bg-subtle/60 hover:text-fg-muted'
+                }`}
+              >
+                {p}d
+              </button>
+            );
+          })}
+        </div>
         <form onSubmit={onSubmit} className="flex items-center gap-1.5">
           <input
             type="number"
@@ -67,19 +77,19 @@ export function WindowForm({ days, presets }: Props) {
             max={90}
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            className="w-16 rounded-md border border-border bg-bg px-2 py-1 text-xs text-fg focus:border-fg focus:outline-none"
-            aria-label="Custom window in days"
+            className="w-14 rounded-sm border border-border bg-bg px-2 py-0.5 tabular-nums text-fg outline-none ring-accent/60 focus:border-accent focus-visible:ring-1"
+            aria-label="custom window in days"
           />
           <button
             type="submit"
             disabled={pending}
-            className="rounded-md border border-border bg-bg-subtle px-2 py-1 text-xs text-fg-muted hover:bg-bg-muted disabled:opacity-50"
+            className="rounded-sm border border-border bg-bg-subtle px-2 py-0.5 lowercase text-fg-muted outline-none ring-accent/60 transition-colors hover:bg-bg-muted hover:text-fg focus-visible:ring-1 disabled:opacity-50"
           >
-            {pending ? 'Loading' : 'Apply'}
+            {pending ? 'loading' : 'apply'}
           </button>
         </form>
       </div>
-      {error ? <div className="text-xs text-rose-500">{error}</div> : null}
+      {error ? <div className="text-[11px] text-severity-critical">{error}</div> : null}
     </div>
   );
 }
