@@ -503,6 +503,21 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             <span className="tabular-nums text-fg-subtle">
               {filtered.length} match{filtered.length === 1 ? '' : 'es'}
             </span>
+            {/* Mouse parity for the Enter-to-commit (tick 48): jump straight to
+                the reviews list deep-link the built status scope describes. The
+                keyboard path is Enter on an empty fuzzy row; this gives pointer
+                users the same single-click jump without typing/clearing first. */}
+            <button
+              type="button"
+              onClick={() => {
+                close();
+                router.push(`/app/reviews?status=${statusFilter.join(',')}` as any);
+              }}
+              className="ml-auto inline-flex items-center gap-1 rounded-sm border border-border bg-bg px-1.5 py-0.5 text-fg-muted transition-colors hover:border-accent/60 hover:bg-accent/10 hover:text-fg"
+              title={`open reviews filtered to ${statusFilter.join(', ')}`}
+            >
+              go to list <span aria-hidden>&rsaquo;</span>
+            </button>
           </div>
         ) : null}
         {showHelp ? (
