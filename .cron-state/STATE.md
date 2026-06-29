@@ -1301,6 +1301,32 @@ Gate: dashboard `tsc --noEmit` 0 new errors (only pre-existing TS5101 baseUrl on
 - **Command palette go-to-list: count preview** — the button could show the match count it'll land on (e.g. "go to 12 ›") so the jump's destination size is known before committing.
 - **Failed badge: stale tolerance note** — SSR snapshot can lag; verify acceptable for a nav badge or add a light revalidate; keep no-client if SSR is fine.
 
+### Tick 51 — 2026-06-29 01:46 PT — 5 features
+
+| # | Slice | SHA | File |
+|---|---|---|---|
+| 1 | Top-nav running dot gains an inline tabular count when 2+ in flight, md+ only, suppressed when failed badge present so chrome never stacks two numbers; title moved to wrapper | 4e4794f | app/app/layout.tsx |
+| 2 | Command palette go-to-list enter hint announces parity to SR: aria-hidden the visual kbd + sr-only "press enter to open the filtered reviews list"; still scope-gated | efaef39 | command-palette.tsx |
+| 3 | Reviews tab title caps anomaly clauses at two + "+N more" so a triple ("2 spikes, 5 above baseline, 1 both") stays legible in a narrow pinned tab | 4487b85 | reviews/page.tsx |
+| 4 | Pinned table headers gain a soft 1px theme-neutral scroll shadow on reviews + sla so the sticky thead reads as deliberate depth | 798f5af | reviews/page.tsx, sla-breaches-table.tsx |
+| 5 | Trends agent table pinned header gains the same scroll shadow for full parity across all sticky tables (audit has none, untouched) | 190e332 | agent-performance-table.tsx |
+
+Gate: dashboard `tsc --noEmit` 0 new errors (only pre-existing TS5101 baseUrl on tsconfig:18 = baseline). `next build` Compiled successfully in 7.8s; standalone type-check fails ONLY on pre-existing root `src/app/layout.tsx:5 import './globals.css'` -- untouched (batch hit app/app/layout.tsx, NOT in diff; verified ROOT_UNTOUCHED). Disk 39%. All 5 scoped to apps/dashboard/src/. Push verified origin/main -> 190e332.
+
+**Tick-51: 5 of 10 backlog items shipped (running count, enter-hint aria, title cap, reviews+sla scroll shadow, trends scroll shadow). Dropped: "go-to-list count preview" (the only count available is palette-command matches, not destination reviews -- would mislead). SLA sticky-bg theme check, toast "n undone" at 1, SLA preview oldest emphasis, trends zero-rows, failed-badge stale all read fine / already shipped on inspection. Refilled fresh for tick 52.**
+
+### Backlog seeded for tick 52 (refill — frontend-first under the standing override)
+- **SLA full-table: scroll shadow now on reviews/sla/trends** — confirm the 1px shadow reads against the bordered sla-table container in both themes; if too quiet against bg-bg-subtle, bump alpha a hair.
+- **Top-nav running count: cap display at 99+** — a 2+ count is unbounded; a 3-digit run would widen the nav. Clamp to "99+" so the chrome stays tight.
+- **Reviews tab title: verify "+N more" never strands an empty clause** — with exactly one clause no tail renders; with three, shown=2 tail=1. Confirm no off-by-one leaves "+0 more".
+- **Command palette: enter hint focus-visible** — the go-to-list button + clear chip get keyboard focus; verify focus ring present and the sr-only note isn't double-announced when button focused.
+- **SLA breaches: severity-mix bar scroll-anchor** — long lists pin the sev tabs; the mix bar scrolls away. Consider folding the mix into the sticky bar on long lists, or leave (it's a one-time read).
+- **Trends agent table: total-share track legend** — the duration bar carries a faint share track; a hover title exists but no inline legend. Tiny "▍ share" hint under the table if it reads.
+- **Failed badge + running dot: aria-live region** — chrome updates server-side; verify a screen reader gets the failed count on nav without a live region, or add polite once.
+- **Reviews list: sortable header focus parity** — SortableTh has hover arrows; verify keyboard focus reveals the arrow too (focus-visible), not just hover.
+- **Command palette: result-count pluralize** — "1 matches" vs "1 match" already handled; spot-check the bare status-scope (0 matches) reads clean.
+- **SLA preview overview: +N more breaches focus ring** — the "+N more" link should match the row focus-ring idiom; verify outline present.
+
 ### Tick 1 — 2026-06-20 02:11 PT — 5 features + 1 infra unblock
 
 | # | Slice | SHA | Lines | Tests |
