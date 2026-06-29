@@ -109,19 +109,25 @@ function sortItems(items: ReviewListItem[], key: SortKey, dir: SortDir): ReviewL
  * above an absolute floor; an above-baseline review is >= 1.8x mean AND >= mean
  * + 3 findings. Detectors are off below 2 rows / zero mean.
  */
-function anomalyCounts(items: ReviewListItem[]): { spikes: number; jumps: number } {
+function anomalyCounts(items: ReviewListItem[]): { spikes: number; jumps: number; both: number } {
   const spendMean =
     items.length > 0 ? items.reduce((sum, r) => sum + r.totalCostUsd, 0) / items.length : 0;
   const spendFloor = Math.max(spendMean * 1.6, 0.05);
   const spendOn = items.length >= 2 && spendMean > 0;
-  const spikes = spendOn ? items.filter((r) => r.totalCostUsd >= spendFloor).length : 0;
+  const isSpike = (r: ReviewListItem) => spendOn && r.totalCostUsd >= spendFloor;
+  const spikes = items.filter(isSpike).length;
   const fMean =
     items.length > 0 ? items.reduce((sum, r) => sum + r.totalFindings, 0) / items.length : 0;
   const fRatio = fMean * 1.8;
   const fGap = fMean + 3;
   const fOn = items.length >= 2 && fMean > 0;
-  const jumps = fOn ? items.filter((r) => r.totalFindings >= fRatio && r.totalFindings >= fGap).length : 0;
-  return { spikes, jumps };
+  const isJump = (r: ReviewListItem) => fOn && r.totalFindings >= fRatio && r.totalFindings >= fGap;
+  const jumps = items.filter(isJump).length;
+  // Doubly-anomalous reviews -- expensive AND finding-heavy -- are the highest
+  // signal: a budget-burner that's also a quality outlier. Count the overlap so
+  // the tab title can lead with it (e.g. "2 spikes, 5 above baseline, 1 both").
+  const both = items.filter((r) => isSpike(r) && isJump(r)).length;
+  return { spikes, jumps, both };
 }
 
 export async function generateMetadata({ searchParams }: PageProps) {
@@ -134,10 +140,14 @@ export async function generateMetadata({ searchParams }: PageProps) {
     repo: sp.repo?.trim() || undefined,
   });
   const scoped = statuses.length >= 2 ? items.filter((r) => statuses.includes(r.status)) : items;
-  const { spikes, jumps } = anomalyCounts(scoped);
+  const { spikes, jumps, both } = anomalyCounts(scoped);
   const parts: string[] = [];
   if (spikes > 0) parts.push(`${spikes} cost spike${spikes === 1 ? '' : 's'}`);
   if (jumps > 0) parts.push(`${jumps} above baseline`);
+  // A review can be both a spike AND above baseline -- the highest-signal case.
+  // Fold its overlap count in so a doubly-anomalous page reads as such in the
+  // tab; only when there's a mix (both spikes and jumps) does it add signal.
+  if (both > 0 && spikes > 0 && jumps > 0) parts.push(`${both} both`);
   // Surface the anomaly count in the browser tab so a runaway page reads as
   // "needs a look" before the operator scans a single row. Quiet when nothing
   // is anomalous (just the page name).
