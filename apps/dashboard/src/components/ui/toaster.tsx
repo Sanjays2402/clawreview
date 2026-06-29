@@ -185,14 +185,23 @@ export function Toaster() {
         setToasts([]);
         return;
       }
-      if (e.key === 'u') {
+      if (e.key === 'u' || e.key === 'U') {
         // Fire the NEWEST actionable toast (the one most likely just triggered)
         // and dismiss it. Because each press removes its target, pressing `u`
         // again walks back to the next-newest -- two stacked dismisses undo
-        // with two `u`s. No-op if nothing is undoable.
-        const target = [...cur].reverse().find((x) => x.action);
-        if (!target) return;
+        // with two `u`s. Shift+u clears the whole stack at once: fire every
+        // live actionable toast (newest-first, so order matches repeat `u`)
+        // and remove them all. No-op if nothing is undoable.
+        const actionable = [...cur].reverse().filter((x) => x.action);
+        if (actionable.length === 0) return;
         e.preventDefault();
+        if (e.shiftKey) {
+          for (const x of actionable) x.action?.onClick();
+          const tokens = new Set(actionable.map((x) => x.token));
+          setToasts((list) => list.filter((x) => !tokens.has(x.token)));
+          return;
+        }
+        const target = actionable[0]!;
         target.action?.onClick();
         setToasts((list) => list.filter((x) => x.token !== target.token));
       }
@@ -208,6 +217,10 @@ export function Toaster() {
   // newest with a quieter "u again" badge so the walk-back order is visible
   // rather than implied -- two stacked dismisses read as a 2-deep undo stack.
   const lastUndoableToken = [...toasts].reverse().find((t) => t.action)?.token ?? null;
+  // Count live actionable toasts so a deep stack can advertise the shift+u
+  // "undo all" shortcut on the newest entry -- a single press clears them all
+  // rather than N taps of `u`. Only meaningful once 2+ are reachable.
+  const undoableCount = toasts.filter((t) => t.action).length;
 
   return (
     <div
@@ -252,10 +265,25 @@ export function Toaster() {
                   className={`rounded-sm border border-border px-1 text-[9px] normal-case tracking-normal ${
                     isNextUndo ? 'text-fg-subtle' : 'text-fg-subtle/40'
                   }`}
-                  title={isNextUndo ? 'press u to undo' : 'press u twice to reach this'}
+                  title={
+                    isNextUndo
+                      ? undoableCount > 1
+                        ? `press u to undo, shift+u to undo all ${undoableCount}`
+                        : 'press u to undo'
+                      : 'press u twice to reach this'
+                  }
                 >
                   u
                 </kbd>
+                {isNextUndo && undoableCount > 1 ? (
+                  <span
+                    className="shrink-0 text-[9px] tabular-nums text-fg-subtle/70"
+                    title={`shift+u undoes all ${undoableCount}`}
+                    aria-hidden
+                  >
+                    +{undoableCount - 1}
+                  </span>
+                ) : null}
               </button>
             ) : null}
           </div>
