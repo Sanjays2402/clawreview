@@ -304,6 +304,22 @@ export default async function ReviewsPage({ searchParams }: PageProps) {
   return (
     <div className="space-y-3">
       <ListKeyboardNav selector="[data-review-row]" enabled={items.length > 0} />
+      {/* Polite live region: the result count + anomaly pills below are
+          visual-only, so a screen reader navigating between status/owner/repo
+          filters never hears how the list changed. Voice the count and any
+          spend/findings anomalies once per filter nav, mirroring the top-nav
+          fleet-status idiom. Built from the same counts the header pills + tab
+          title use so the three surfaces can't drift. */}
+      <span className="sr-only" role="status" aria-live="polite">
+        {(() => {
+          const base = `${items.length} review${items.length === 1 ? '' : 's'}`;
+          const notes: string[] = [];
+          if (spikeCount > 0) notes.push(`${spikeCount} cost spike${spikeCount === 1 ? '' : 's'}`);
+          if (findingsJumpCount > 0) notes.push(`${findingsJumpCount} above findings baseline`);
+          if (bothCount > 0) notes.push(`${bothCount} both`);
+          return notes.length > 0 ? `${base}, ${notes.join(', ')}` : base;
+        })()}
+      </span>
       <PageHeader
         title="reviews"
         description="every review across installations you can see."
