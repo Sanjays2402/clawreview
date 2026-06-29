@@ -61,12 +61,20 @@ export function AgentPerformanceTable({
     }
   }, [sort]);
 
-  const { sorted, maxAvgMs, totalMsByRow, summedTotalMs, maxTotalMs } = useMemo(() => {
+  const { sorted, maxAvgMs, totalMsByRow, summedTotalMs, maxTotalMs, totalRuns, totalFindings, weightedErrorRate } = useMemo(() => {
     // Total time per agent = average duration x number of runs.
     const withTotal = rows.map((r) => ({ row: r, totalMs: r.avgMs * Math.max(r.runs, 0) }));
     const summed = withTotal.reduce((a, b) => a + b.totalMs, 0);
     const maxAvg = Math.max(...rows.map((r) => r.avgMs), 1);
     const maxTotal = Math.max(...withTotal.map((w) => w.totalMs), 1);
+    // Column totals for the footer: runs + findings sum straight; the overall
+    // error rate is the run-weighted mean (a 90%-error agent with 1 run must
+    // not drag the fleet figure like a 90%-error agent with 1000 runs), which
+    // is exactly summed errored-runs / summed runs.
+    const runsSum = rows.reduce((a, r) => a + Math.max(r.runs, 0), 0);
+    const findingsSum = rows.reduce((a, r) => a + r.findings, 0);
+    const erroredRuns = rows.reduce((a, r) => a + r.errorRate * Math.max(r.runs, 0), 0);
+    const weightedErr = runsSum > 0 ? erroredRuns / runsSum : 0;
     // Sort by the active axis, descending, so the heaviest row floats to top.
     const ordered = withTotal
       .slice()
@@ -77,8 +85,17 @@ export function AgentPerformanceTable({
       totalMsByRow: ordered.map((o) => o.totalMs),
       summedTotalMs: summed,
       maxTotalMs: maxTotal,
+      totalRuns: runsSum,
+      totalFindings: findingsSum,
+      weightedErrorRate: weightedErr,
     };
   }, [rows, sort]);
+
+  // The footer restates the share denominator (summed wall time = 100%) plus
+  // the run/finding totals so the per-row share% has an anchor. The weighted
+  // error rate is the fleet-wide errored-run fraction. Only worth a row once
+  // there are 2+ agents -- a single agent's footer just echoes its own row.
+  const showTotals = sorted.length >= 2;
 
   return (
     <div className="space-y-2">
@@ -180,6 +197,32 @@ export function AgentPerformanceTable({
               );
             })}
           </tbody>
+          {/* Totals footer: anchors the per-row share% (summed wall time = the
+              100% every share divides into) and gives the runs / findings
+              columns a fleet sum so the table reads as a whole, not just a
+              ranking. Mirrors the thead's dense mono casing; the wall-time cell
+              sits under the share column it explains. error rate is run-weighted
+              (see the memo) so a rare flaky agent doesn't skew the fleet figure. */}
+          {showTotals ? (
+            <tfoot className="border-t border-border text-[10px] uppercase tracking-wider text-fg-subtle">
+              <tr className="tabular-nums">
+                <td className="py-1.5 font-medium normal-case tracking-normal text-fg-muted">
+                  {sorted.length} agents
+                </td>
+                <td className="text-fg-muted">{totalRuns}</td>
+                <td className="text-fg-muted">{totalFindings}</td>
+                <td className="pr-3 text-right normal-case tracking-normal text-fg-subtle">
+                  total wall time
+                </td>
+                <td className="text-fg" title="summed wall time across all agents — the 100% each row's share divides into">
+                  {formatMs(summedTotalMs)}
+                </td>
+                <td className={`text-right ${weightedErrorRate > 0 ? 'text-severity-critical' : 'text-fg-subtle'}`} title="run-weighted error rate across all agents">
+                  {Math.round(weightedErrorRate * 100)}%
+                </td>
+              </tr>
+            </tfoot>
+          ) : null}
         </table>
       </div>
 
