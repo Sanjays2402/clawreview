@@ -44,6 +44,12 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // into the persistent chrome. Running reviews are transient/expected, so only
   // failed (the genuinely actionable state) drives the badge. Hidden at zero.
   const failedCount = recentReviews.filter((r) => r.status === 'failed').length;
+  // Running reviews are transient and expected, so they don't warrant the
+  // alarm-tinted count. But a quiet accent dot signals "work in flight" so the
+  // chrome reads live -- shown only when nothing has failed (the failed badge
+  // already commands attention; doubling up would be noise). Hidden at zero.
+  const runningCount = recentReviews.filter((r) => r.status === 'running').length;
+  const showRunningDot = failedCount === 0 && runningCount > 0;
 
   return (
     <div className="min-h-screen">
@@ -60,10 +66,16 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                 // the failed filter + carries a quiet count badge so the
                 // actionable state is one click away from anywhere in the app.
                 const showBadge = n.href === '/app/reviews' && failedCount > 0;
+                const showRunning = n.href === '/app/reviews' && showRunningDot;
+                const reviewsHref = showBadge
+                  ? '/app/reviews?status=failed'
+                  : showRunning
+                    ? '/app/reviews?status=running'
+                    : n.href;
                 return (
                   <Link
                     key={n.href}
-                    href={(showBadge ? '/app/reviews?status=failed' : n.href) as any}
+                    href={(n.href === '/app/reviews' ? reviewsHref : n.href) as any}
                     className="inline-flex items-center gap-1 rounded px-2 py-1 font-mono lowercase hover:bg-bg-subtle hover:text-fg"
                   >
                     {n.label}
@@ -74,6 +86,12 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
                       >
                         {failedCount}
                       </span>
+                    ) : showRunning ? (
+                      <span
+                        className="inline-flex h-1.5 w-1.5 animate-pulse rounded-full bg-accent"
+                        title={`${runningCount} review${runningCount === 1 ? '' : 's'} running`}
+                        aria-hidden
+                      />
                     ) : null}
                   </Link>
                 );
