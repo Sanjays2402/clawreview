@@ -1327,6 +1327,32 @@ Gate: dashboard `tsc --noEmit` 0 new errors (only pre-existing TS5101 baseUrl on
 - **Command palette: result-count pluralize** — "1 matches" vs "1 match" already handled; spot-check the bare status-scope (0 matches) reads clean.
 - **SLA preview overview: +N more breaches focus ring** — the "+N more" link should match the row focus-ring idiom; verify outline present.
 
+### Tick 52 — 2026-06-29 04:09 PT — 5 features (FRONTEND BATCH)
+
+| # | Slice | SHA | File |
+|---|---|---|---|
+| 1 | Sortable headers reveal the sort arrow on keyboard focus (group-focus-visible) + focus-ring on the header link, reviews + sla tables: was hover-only so a tabbed header read as a bare label with no sort cue | 9531b5d | reviews/page.tsx, sla-breaches-table.tsx |
+| 2 | Trends agent table share-track legend: the duration bar's faint sub-track (share of total wall time) had only a hover title; tiny inline key below the table, sm:+, shown when rows exist | 18b29a9 | agent-performance-table.tsx |
+| 3 | Top-nav failed badge + running count clamp to 99+ so a 3-digit fleet never widens the dense single-line chrome; titles keep exact count | 5f898ca | app/app/layout.tsx |
+| 4 | Overview card-header "view all" (sla + reviews) + "+N more breaches" links gain the row focus-ring idiom -- keyboard focus stayed visible through chrome that was hover-only | 37cf30e | app/app/page.tsx |
+| 5 | Top-nav fleet status sr-only polite live region: failed/running was visual-only; announces "N failed reviews, N running across recent reviews", empty when idle | 0c6171e | app/app/layout.tsx |
+
+Gate: dashboard `tsc --noEmit` 0 new errors (only pre-existing TS5101 baseUrl on tsconfig:18 = baseline, total 2 lines). `next build` Compiled successfully in 7.2s; fails ONLY in standalone type-check on root `src/app/layout.tsx:5 import './globals.css'` -- pre-existing AND untouched (batch hit app/app/layout.tsx; ROOT_UNTOUCHED; non-dashboard-src leaks NONE). Disk 41%. All 5 scoped to apps/dashboard/src/ (5 files). Push verified origin/main -> 0c6171e.
+
+**Tick-52: shipped 5 explicit backlog items (sort-arrow focus parity, share-track legend, 99+ cap, overview focus rings, aria-live fleet status). Verified clean on inspection / already-done: reviews tab title "+N more" off-by-one (slice tail only when overflow>0, no +0), palette enter-hint focus + sr-only no double-announce, scroll-shadow alpha, palette result-count pluralize. Dropped: sev-mix scroll-anchor (one-time read). Refilled fresh for tick 53.**
+
+### Backlog seeded for tick 53 (refill — frontend-first under the standing override)
+- **SLA full-table: sortable-header focus ring on age/sla/overdue** — tick 52 gave SortableTh focus parity; verify all three numeric headers show the ring + arrow reveal, not just severity. Tiny check.
+- **Trends share legend: only when share track meaningful** — the legend shows whenever rows>0; if all agents have ~equal share the track is uniform. Verify it doesn't mislead at 1 agent (share=100%); hide at sorted.length<2.
+- **Top-nav 99+: aria-live exact vs clamped** — the live region says exact count, badge shows 99+. Confirm a SR hears "127 failed" while the glyph reads 99+; that's intended, just verify no truncation in the spoken string.
+- **Overview focus ring: severity deep-link chips** — the sla sev chips (critical/high/...) are links; verify they carry the same focus-visible ring now on the view-all + breach rows. Mirror if bare.
+- **Reviews list: aria-live result count on filter** — sla/reviews tab counts update on filter nav; a polite live region announcing "N results" would help SR users, like the new fleet status. Verify worth it.
+- **Trends agent table: empty-window guard** — confirm clean empty card at 0 agents under both sort axes; sticky thead must not leave a bare strip (carried).
+- **SLA preview: brighten worst overdue preview row** — age bar is there; consider one brightened worst-overdue row in the 5-row preview to match full-table decile brightening.
+- **Command palette: go-to-list button focus ring** — tick 52 added header focus rings; verify the palette go-to-list button + clear chip show focus-visible outline consistently.
+- **Top-nav running dot: pause animation at reduced-motion** — the pulse animates; verify prefers-reduced-motion stills it (animate-pulse may need a guard).
+- **Reviews tab title: scope-aware "+N more"** — three-clause cap works; verify owner/repo-scoped pages still read the count correctly in the tab.
+
 ### Tick 1 — 2026-06-20 02:11 PT — 5 features + 1 infra unblock
 
 | # | Slice | SHA | Lines | Tests |
