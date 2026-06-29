@@ -295,7 +295,7 @@ export function SlaBreachesTable({
         ) : null}
         <div className="overflow-x-auto rounded-sm border border-border-subtle">
           <table className="w-full min-w-[760px] font-mono text-xs">
-            <thead className="sticky top-0 z-10 border-b border-border-subtle bg-bg-subtle text-left text-[10px] uppercase tracking-wider text-fg-subtle">
+            <thead className="sticky top-0 z-10 border-b border-border-subtle bg-bg-subtle text-left text-[10px] uppercase tracking-wider text-fg-subtle shadow-[0_1px_2px_rgba(0,0,0,0.06)]">
               <tr>
                 <SortableTh href={sortHref('severity')} active={sortKey === 'severity'} dir={sortDir} className="px-3">
                   severity
