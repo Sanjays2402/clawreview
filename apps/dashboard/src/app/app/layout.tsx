@@ -52,6 +52,16 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   // union -- so a mixed fleet shows triage AND activity at once. Hidden at zero.
   const runningCount = recentReviews.filter((r) => r.status === 'running').length;
   const showRunningDot = runningCount > 0;
+  // The failed badge + running dot are visual-only chrome. Mirror them into a
+  // single polite aria-live status so a screen reader hears the fleet state on
+  // navigation instead of parsing a count glyph + a pulsing dot. Quiet (empty)
+  // when nothing needs attention so it never speaks noise.
+  const fleetStatus = [
+    failedCount > 0 ? `${failedCount} failed review${failedCount === 1 ? '' : 's'}` : '',
+    runningCount > 0 ? `${runningCount} running` : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
 
   return (
     <div className="min-h-screen">
@@ -121,6 +131,11 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
             </nav>
           </div>
           <div className="flex items-center gap-2 text-xs text-fg-muted">
+            {/* Polite live region voicing the failed badge + running dot for
+                screen readers; sr-only, empty when the fleet is idle. */}
+            <span className="sr-only" role="status" aria-live="polite">
+              {fleetStatus ? `${fleetStatus} across recent reviews` : ''}
+            </span>
             <Tooltip label="open command palette" placement="bottom">
               <button
                 type="button"
