@@ -521,10 +521,17 @@ export function CommandPalette({ recentReviews = [] }: { recentReviews?: RecentR
             {/* Keyboard parity hint: the button mirrors what Enter already does
                 on an empty fuzzy row, so advertise the chord beside it -- the
                 discoverability loop closes both ways (mouse sees the key, key
-                sees the button). */}
-            <kbd className="hidden rounded-sm border border-border bg-bg px-1 text-[10px] text-fg-subtle sm:inline" title="press enter to jump">
+                sees the button). aria-hidden on the visual kbd + an sr-only
+                phrasing so screen-reader users hear the parity too, not a bare
+                "enter" glyph; only rendered alongside the active scope so it
+                never advertises a chord that wouldn't fire. */}
+            <kbd
+              className="hidden rounded-sm border border-border bg-bg px-1 text-[10px] text-fg-subtle sm:inline"
+              aria-hidden
+            >
               enter
             </kbd>
+            <span className="sr-only">press enter to open the filtered reviews list</span>
           </div>
         ) : null}
         {showHelp ? (
