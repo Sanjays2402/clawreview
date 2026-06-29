@@ -23,24 +23,22 @@ export default async function IntegrationsPage() {
         description="live health for the queue and llm providers wired into this server."
       />
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Job queue</div>
-              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone(queue?.ok)}`}>
-                {queue?.ok ? 'ok' : queue ? 'down' : 'unknown'}
-              </span>
-            </div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">job queue</div>
+            <span className={`rounded-sm px-2 py-0.5 font-mono text-[10px] font-medium lowercase ${tone(queue?.ok)}`}>
+              {queue?.ok ? 'ok' : queue ? 'down' : 'unknown'}
+            </span>
           </CardHeader>
           <CardBody>
-            <dl className="grid grid-cols-2 gap-y-2 text-sm">
-              <dt className="text-fg-muted">Backend</dt>
+            <dl className="grid grid-cols-2 gap-y-2 font-mono text-xs">
+              <dt className="text-fg-subtle">backend</dt>
               <dd className="text-fg">{queue?.backend ?? 'unknown'}</dd>
               {queue?.error ? (
                 <>
-                  <dt className="text-fg-muted">Error</dt>
-                  <dd className="text-fg">{queue.error}</dd>
+                  <dt className="text-fg-subtle">error</dt>
+                  <dd className="text-severity-critical">{queue.error}</dd>
                 </>
               ) : null}
             </dl>
@@ -49,18 +47,16 @@ export default async function IntegrationsPage() {
 
         <Card>
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div className="text-sm font-medium">Overall readiness</div>
-              <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone(ready?.ok)}`}>
-                {ready?.ok ? 'ready' : ready ? 'not ready' : 'unreachable'}
-              </span>
-            </div>
+            <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">overall readiness</div>
+            <span className={`rounded-sm px-2 py-0.5 font-mono text-[10px] font-medium lowercase ${tone(ready?.ok)}`}>
+              {ready?.ok ? 'ready' : ready ? 'not ready' : 'unreachable'}
+            </span>
           </CardHeader>
           <CardBody>
-            <p className="text-sm text-fg-muted">
+            <p className="font-mono text-xs text-fg-muted">
               {ready
-                ? `Last probed ${new Date(ready.ts).toLocaleString()}.`
-                : 'The server did not respond on /readyz. Start the API on port 4000.'}
+                ? `last probed ${new Date(ready.ts).toLocaleString()}.`
+                : 'the server did not respond on /readyz. start the api on port 4000.'}
             </p>
           </CardBody>
         </Card>
@@ -68,17 +64,15 @@ export default async function IntegrationsPage() {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between">
-            <div className="text-sm font-medium">LLM providers</div>
-            <div className="text-xs text-fg-muted">{llm.length} configured</div>
-          </div>
+          <div className="font-mono text-[11px] uppercase tracking-wider text-fg-subtle">llm providers</div>
+          <div className="font-mono text-[11px] tabular-nums text-fg-muted">{llm.length} configured</div>
         </CardHeader>
         <CardBody>
           {llm.length === 0 ? (
             <EmptyState
               icon={<Plugs size={28} weight="duotone" />}
-              title="No providers reachable"
-              description="Set LLM_OPENAI_API_KEY, LLM_COPILOT_API_KEY, or point LLM_HERMES_BASE_URL at a local model."
+              title="no providers reachable"
+              description="set LLM_OPENAI_API_KEY, LLM_COPILOT_API_KEY, or point LLM_HERMES_BASE_URL at a local model."
               action={
                 <EmptyStateActions
                   primary={{ label: 'configure providers', href: '/docs', external: true }}
@@ -87,32 +81,34 @@ export default async function IntegrationsPage() {
               }
             />
           ) : (
-            <table className="w-full text-sm">
-              <thead className="text-left text-xs uppercase tracking-wide text-fg-subtle">
-                <tr>
-                  <th className="py-2 font-medium">Provider</th>
-                  <th className="font-medium">Base URL</th>
-                  <th className="font-medium">Latency</th>
-                  <th className="text-right font-medium">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-border-subtle">
-                {llm.map((p, i) => (
-                  <tr key={`${p.name}-${i}`}>
-                    <td className="py-2 font-medium text-fg">{p.name ?? 'unknown'}</td>
-                    <td className="font-mono text-[11px] text-fg-muted">{p.baseUrl ?? ''}</td>
-                    <td className="text-fg-muted">
-                      {typeof p.latencyMs === 'number' ? `${p.latencyMs} ms` : '-'}
-                    </td>
-                    <td className="text-right">
-                      <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${tone(p.ok)}`}>
-                        {p.ok ? 'reachable' : 'down'}
-                      </span>
-                    </td>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[480px] font-mono text-xs">
+                <thead className="text-left text-[10px] uppercase tracking-wider text-fg-subtle">
+                  <tr>
+                    <th className="py-1.5 font-medium">provider</th>
+                    <th className="font-medium">base url</th>
+                    <th className="font-medium tabular-nums">latency</th>
+                    <th className="text-right font-medium">status</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-border-subtle">
+                  {llm.map((p, i) => (
+                    <tr key={`${p.name}-${i}`} className="hover:bg-bg-subtle/40">
+                      <td className="py-1.5 text-fg">{p.name ?? 'unknown'}</td>
+                      <td className="text-[11px] text-fg-muted">{p.baseUrl ?? ''}</td>
+                      <td className="tabular-nums text-fg-muted">
+                        {typeof p.latencyMs === 'number' ? `${p.latencyMs} ms` : '-'}
+                      </td>
+                      <td className="text-right">
+                        <span className={`rounded-sm px-2 py-0.5 text-[10px] font-medium lowercase ${tone(p.ok)}`}>
+                          {p.ok ? 'reachable' : 'down'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </CardBody>
       </Card>
