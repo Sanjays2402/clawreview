@@ -25,7 +25,7 @@ clawreview reviews pull requests with a fan-out of specialised agents (security,
 - Author filters: skip bot PRs and a comma-separated allowlist
 - Rate limit (240/min) and Helmet on all server routes
 - Weekly stats endpoint for trends charts
-- Local CLI (`pnpm cli`) that runs the same agent pipeline against a local diff
+- Local CLI (`pnpm cli`) that runs the same agent pipeline against a local diff, with a `--fail-on <severity>` CI gate (exit codes apply to every `--format`, not just text)
 
 ## Stack
 

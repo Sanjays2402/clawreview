@@ -2,7 +2,7 @@ export function renderHelp(): string {
   return `clawreview - multi-agent code review
 
 Usage:
-  clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json]
+  clawreview run [--base <ref>] [--head <ref>] [--config <path>] [--format text|json] [--fail-on <sev>]
   clawreview validate [--config <path>]
   clawreview lint-config [--root <dir>] [--pattern <name>[,<name>...]] [--format text|json] [--fix]
   clawreview presets list [--root <dir>] [--format text|json]
@@ -36,6 +36,11 @@ Flags:
   --fail-on-budget   Exit non-zero (3) when 'clawreview run' estimates the review will
                      exceed the configured monthly budget. Off by default; the estimate
                      is still printed to stderr either way.
+  --fail-on <sev>    Exit non-zero (1) when 'clawreview run' finds any finding at or
+                     above <sev> (critical|high|medium|low|nit). Applies to every
+                     --format, so 'clawreview run --format json --fail-on high' works
+                     as a one-step CI gate. Without the flag, the default exit
+                     behavior applies: critical findings exit 2, high findings exit 1.
   --root <dir>       lint-config / presets list: root directory to scan (default: cwd).
   --pattern <name>   lint-config: filenames to match (default: .clawreview.yml). Comma-separated
                      for multiple, e.g. --pattern .clawreview.yml,clawreview.config.yml.

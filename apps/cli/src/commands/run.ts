@@ -20,6 +20,7 @@ import {
   type ReportMetadata,
 } from '@clawreview/aggregator';
 import type { Severity } from '@clawreview/types';
+import { SEVERITY_ORDER } from '@clawreview/types';
 
 import type { ParsedArgs } from '../args.js';
 import { loadConfig } from '../config.js';
@@ -83,6 +84,24 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     cfg.min_confidence = raw;
   }
   const concurrency = args.flags.concurrency ? Number(args.flags.concurrency) : 6;
+
+  // `--fail-on <sev>` turns `run` into a one-step CI gate: exit non-zero
+  // when a finding at or above the severity is present, for every
+  // --format (not just text). Without the flag the historical behavior
+  // applies: critical findings exit 2, high findings exit 1. Validated
+  // up front so a typo fails fast instead of after an expensive review.
+  const failOnRaw =
+    args.flags['fail-on'] === undefined ? null : String(args.flags['fail-on']).toLowerCase();
+  const failOn = failOnRaw !== null && failOnRaw in SEVERITY_ORDER ? (failOnRaw as Severity) : null;
+  if (failOnRaw !== null && failOn === null) {
+    process.stderr.write(
+      kleur.red(
+        `clawreview: --fail-on must be one of critical|high|medium|low|nit (got '${String(args.flags['fail-on'])}')\n`,
+      ),
+    );
+    process.exitCode = 2;
+    return;
+  }
 
   const [headSha, baseSha] = await Promise.all([revParse(head, cwd), revParse(base, cwd)]);
   process.stderr.write(kleur.gray(`Diffing ${base} (${baseSha.slice(0, 7)}) -> ${head} (${headSha.slice(0, 7)})\n`));
@@ -211,6 +230,11 @@ export async function runReview(args: ParsedArgs): Promise<void> {
   }
   for (const f of result.findings) result.totals[f.severity] += 1;
 
+  // Severity gate applies to every output format: previously only the
+  // default text report set a non-zero exit code, so `run --format json`
+  // (and sarif/junit/csv) silently exited 0 even on critical findings.
+  applyRunFailOn(failOn, result.totals);
+
   if (format === 'json') {
     console.log(JSON.stringify({ summary, aggregated: result }, null, 2));
     return;
@@ -249,8 +273,30 @@ export async function runReview(args: ParsedArgs): Promise<void> {
     return;
   }
   console.log(renderTextReport(result, { noColor }));
-  if (result.totals.critical > 0) process.exitCode = 2;
-  else if (result.totals.high > 0) process.exitCode = 1;
+}
+
+/**
+ * Exit-code policy for `clawreview run`, shared across all output
+ * formats. Mirrors `stats --fail-on` semantics when the flag is given
+ * (any finding at or above it exits 1); without the flag, the historical
+ * default applies (criticals exit 2, highs exit 1).
+ */
+function applyRunFailOn(failOn: Severity | null, totals: Record<Severity, number>): void {
+  if (failOn) {
+    const triggered = (Object.keys(totals) as Severity[]).filter(
+      (s) => SEVERITY_ORDER[s] <= SEVERITY_ORDER[failOn] && totals[s] > 0,
+    );
+    if (triggered.length > 0) {
+      const total = triggered.reduce((a, s) => a + totals[s], 0);
+      process.stderr.write(
+        `clawreview run: ${total} finding(s) at or above '${failOn}' (${triggered.join(', ')})\n`,
+      );
+      process.exitCode = 1;
+    }
+    return;
+  }
+  if (totals.critical > 0) process.exitCode = 2;
+  else if (totals.high > 0) process.exitCode = 1;
 }
 
 function toReportMetadata(
